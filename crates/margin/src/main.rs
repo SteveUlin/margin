@@ -196,7 +196,61 @@ const FEED_HELP: &str = "feeds: scripts that keep an artifact current without Cl
   margin feed logs <name> [--follow] [--lines N]
   margin feed run <name>            once, in the foreground (stream: until it exits or ctrl-c);
                                     leaves the daemon's status alone
+  margin feed <subcommand> --help for each; margin help feeds has the script contract and an example
 ";
+
+/// `margin feed <sub> --help`: that subcommand's own usage.
+fn feed_sub_help(sub: &str) -> Option<&'static str> {
+    Some(match sub {
+        "add" => "margin feed add <name> (--every 10s | --watch <path>... | --stream) [--artifact A] [--owns PREFIX]
+                [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
+  register a script whose stdout is `margin apply` input; the daemon runs it from here on
+  pick one trigger:
+  --every 30s        run it to completion on that interval (10s, 2m, 1h; at least 0.2s)
+  --watch <path>...  run it once now, then whenever a watched file or directory changes
+                     (a file replaced by rename is still watched)
+  --stream           start it once and keep it running; lines land as they arrive, and it is
+                     restarted with backoff when it exits
+  --artifact A       the artifact it writes (default: <name>)
+  --owns PREFIX      the id prefix it owns there: PREFIX and PREFIX-… (default: <name>; * = all)
+  --min-gap 1s       at least this long between two writes
+  --timeout 60s      a run of --every / --watch is stopped after this long
+  --replace          change a registered feed's command or trigger in place
+  -- <cmd...>        the command, run with no shell in the directory you are in now
+  margin help feeds has the script contract and a complete example
+",
+        "ls" => "margin feed ls
+  each feed: its state (live, restarting, paused), trigger, artifact/prefix, restarts, and its
+  last run: `ran 2s ago · unchanged`, `ran 2s ago · wrote`, or `failed 5s ago: <last stderr line>`
+  (unchanged: it ran and printed what is already there, so nothing was written)
+  margin help feeds has the rest
+",
+        "rm" => "margin feed rm <name>
+  unregister a feed. Its last output stays in the artifact, unowned (the health line says
+  removed); the daemon exits when no unpaused feed is left
+  margin help feeds has the rest
+",
+        "pause" | "resume" => "margin feed pause <name>
+margin feed resume <name>
+  stop running a feed without unregistering it (it still owns its ids), or start it again;
+  pausing the last running feed stops the daemon, resume starts it
+  margin help feeds has the rest
+",
+        "logs" => "margin feed logs <name> [--follow] [--lines N]
+  the feed's log: a line per run (`run: wrote`, `run: unchanged`, `run: failed: …`), its
+  stderr, rejected lines, restarts
+  --lines N   the last N lines (default 40)
+  --follow    keep printing as lines arrive
+  margin help feeds has the rest
+",
+        "run" => "margin feed run <name>
+  run a registered feed once, in the foreground, as the feed (a stream: until it exits or
+  ctrl-c); prints `<art> rev N` or `<art> unchanged`, and leaves the daemon's status alone
+  margin help feeds has the rest
+",
+        _ => return None,
+    })
+}
 
 /// Flags each `feed` subcommand takes, and its most positionals.
 fn feed_spec(sub: &str) -> Option<(&'static [&'static str], Option<usize>)> {
@@ -525,7 +579,9 @@ fn main() {
         None => (&argv[1..], vec![]),
     };
     if wants_help(mine) {
-        print!("{}{GLOBAL_HELP}", who::say(spec.help));
+        // `margin feed add --help`: that subcommand's own usage
+        let sub = if cmd == "feed" { mine.iter().find(|x| !x.starts_with('-')).and_then(|s| feed_sub_help(s)) } else { None };
+        print!("{}{GLOBAL_HELP}", who::say(sub.unwrap_or(spec.help)));
         return;
     }
     // the global flags read the same on either side of the command; one written after it wins
@@ -1239,6 +1295,15 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// The note `feed add` prints when ids that were Claude's change hands: how many, and the first
+/// few (a table of 200 rows once printed 200 ids).
+fn owns_note(name: &str, taken: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let first = taken.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    let more = if taken.len() > SHOWN { format!(", … {} more", taken.len() - SHOWN) } else { String::new() };
+    format!("note: feed {name} now owns {} existing id{} ({first}{more}): read-only for you from here", taken.len(), if taken.len() == 1 { "" } else { "s" })
+}
+
 fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
     use feed::{edit_registry, Feed, Registry, Trigger};
     let sub = a.pos(0, "add|rm|ls|pause|resume|logs|run")?;
@@ -1286,7 +1351,7 @@ fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
             if let Ok(d) = st.load(&artifact) {
                 let taken: Vec<String> = d.ids().into_iter().filter(|i| store::owns(&owns, i)).collect();
                 if !taken.is_empty() {
-                    eprintln!("note: feed {name} now owns existing ids {}", taken.join(", "));
+                    eprintln!("{}", owns_note(&name, &taken));
                 }
             }
             let started = daemon::ensure(&st)?;
@@ -1294,14 +1359,19 @@ fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
         }
         "rm" => {
             let n = name()?;
-            edit_registry(&st, |r| r.remove(n))?;
-            println!("removed feed {n}; its last output stays in the artifact");
+            let f = edit_registry(&st, |r| r.remove(n))?;
+            // the daemon's worker marks the health line as it stops; with no daemon (or a feed
+            // that was paused) nobody would, and the line kept saying `paused`
+            feed::mark_health(&st, &f, "removed");
+            println!("removed feed {n}; its last output stays in {} (health line {}: removed), unowned: margin rm {} <id> deletes a part", f.artifact, f.status_id(), f.artifact);
         }
         "pause" | "resume" => {
             let n = name()?;
             edit_registry(&st, |r| r.set_paused(n, sub == "pause"))?;
             if sub == "resume" {
                 daemon::ensure(&st)?;
+            } else if let Some(f) = Registry::load(&st.dir()).get(n) {
+                feed::mark_health(&st, f, "paused");
             }
             println!("{} feed {n}", if sub == "pause" { "paused" } else { "resumed" });
         }
@@ -1318,16 +1388,18 @@ fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
             for f in &r.feeds {
                 let s = feed::read_status(&st, &f.name).unwrap_or_default();
                 let state = if f.paused { "paused".to_string() } else if s.state.is_empty() { "starting".into() } else { s.state.clone() };
-                let last = util::parse_rfc3339(&s.last_write).map(|t| util::ago(util::epoch_now() - t)).unwrap_or_else(|| "never".into());
+                // the last run and how it went, apart from the last write: a feed whose output
+                // matched what was there has run and written nothing
+                let last = s.last_run_text(util::epoch_now());
                 println!(
-                    "{:<12} {:<11} {:<26} {:<20} restarts {:<3} wrote {last}",
+                    "{:<12} {:<11} {:<26} {:<20} restarts {:<3} {last}",
                     f.name,
                     state,
                     vellum::text::truncate(&f.trigger.describe(), 26),
                     format!("{}/{}", f.artifact, f.owns),
                     s.restarts
                 );
-                if !s.last_error.is_empty() && state != "live" {
+                if !s.last_error.is_empty() && state != "live" && s.last_outcome != "failed" {
                     println!("{:<12} last error: {}", "", vellum::text::truncate(&s.last_error, 90));
                 }
             }
@@ -1640,6 +1712,28 @@ mod tests {
             assert!(RENDER_HELP.contains(&format!("  {flag} ")), "render --help doesn't explain {flag}");
         }
         let _ = std::fs::remove_dir_all(&st.home);
+    }
+
+    /// Each feed subcommand has its own help, the trigger flags a line each, all pointing at the
+    /// topic; the ownership note is a count and the first few ids.
+    #[test]
+    fn feed_subcommands_have_their_own_help_and_the_note_is_capped() {
+        for sub in ["add", "ls", "rm", "pause", "resume", "logs", "run"] {
+            let h = feed_sub_help(sub).unwrap_or_else(|| panic!("feed {sub} has no help"));
+            assert!(h.starts_with("margin feed ") && h.contains(&format!("margin feed {sub}")) && h.contains("margin help feeds"), "{sub}: {h}");
+            let (flags, _) = feed_spec(sub).unwrap();
+            for f in flags {
+                assert!(h.contains(f), "feed {sub} --help doesn't show {f}");
+            }
+        }
+        let add = feed_sub_help("add").unwrap();
+        for f in ["--every", "--watch", "--stream"] {
+            assert_eq!(add.lines().filter(|l| l.trim_start().starts_with(f)).count(), 1, "{f} has a line of its own");
+        }
+        assert!(feed_sub_help("nope").is_none() && FEED_HELP.contains("margin help feeds"));
+        let ids: Vec<String> = (0..14).map(|i| format!("pr-{i}")).collect();
+        assert_eq!(owns_note("reviews", &ids), "note: feed reviews now owns 14 existing ids (pr-0, pr-1, pr-2, pr-3, pr-4, … 9 more): read-only for you from here");
+        assert_eq!(owns_note("x", &ids[..1]), "note: feed x now owns 1 existing id (pr-0): read-only for you from here");
     }
 
     #[test]

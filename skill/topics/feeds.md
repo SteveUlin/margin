@@ -44,7 +44,14 @@ keeps going after the session ends. Register one only when {{user}} asked for so
 | `--watch <path>…` | runs it once at start, then whenever a watched file or directory changes | a file another job writes |
 | `--stream` | starts it once and keeps it running; lines land as they arrive (at most one write per `--min-gap`, default 1 s); restarts it with backoff when it exits | a tail, a subscription, a loop of its own |
 
-The daemon is per project; `feed add` and `feed resume` start it and it exits when no feed is left.
+- The daemon is per project; `feed add` and `feed resume` start it. Pausing or removing the last
+  running feed stops it (`margin feed ls` then says `daemon: not running`).
+- A watched file that is replaced by rename (an editor's save, `jq … > tmp && mv tmp data.json`)
+  is still watched: margin watches the file's directory too.
+- `margin feed ls` shows each feed's last run apart from its last write: `ran 2s ago · unchanged`
+  means it ran and printed what is already there, so nothing was written (right after
+  registering over a board you applied by hand, that is the normal state); `ran 2s ago · wrote`;
+  `failed 5s ago: <last stderr line>`.
 
 ## A complete feed: pull requests into a table
 
@@ -87,8 +94,8 @@ chmod +x prs-feed.sh
 ./prs-feed.sh prs.json | margin apply reviews # 2. `reviews rev 1`: it passes the schema (creates the artifact)
 margin render reviews --width 90 --height 12  # 3. the table as text
 margin feed add reviews --watch prs.json --artifact reviews --owns pr -- ./prs-feed.sh prs.json
-margin feed ls                                # 4. `reviews  live  watch prs.json  reviews/pr … wrote …`
-margin feed logs reviews                      # 5. its stderr, rejected lines, restarts
+margin feed ls                                # 4. `reviews  live  watch prs.json  reviews/pr … ran 2s ago · unchanged`
+margin feed logs reviews                      # 5. a line per run, its stderr, rejected lines, restarts
 ```
 
 - Step 2 works only before the feed is registered; afterwards the ids are the feed's and the
@@ -105,7 +112,8 @@ margin feed logs reviews                      # 5. its stderr, rejected lines, r
 ```sh
 margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
                 [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
-margin feed ls                      # state, trigger, restarts, last write, last error
+margin feed ls                      # state, trigger, restarts, last run and how it went
+margin feed add --help              # each subcommand has its own (the trigger flags, a line each)
 margin feed logs <name> [--follow] [--lines N]
 margin feed run <name>              # once, in the foreground (a stream: until it exits or ctrl-c)
 margin feed pause <name> | resume <name> | rm <name>
@@ -123,8 +131,8 @@ margin feed pause <name> | resume <name> | rm <name>
   write, the error). The daemon inserts it above the component whose id is the prefix, else at the
   end of the document. To choose its place, put `{"type": "feed", "id": "<prefix>-feed"}` where you
   want it before registering: the daemon then updates it there.
-- `margin feed rm` leaves the feed's last output in the artifact, unowned (the health line says
-  `removed`); delete what you don't want with `margin rm <art> <id>`.
+- `margin feed rm` leaves the feed's last output in the artifact, unowned, and sets the health
+  line to `removed` itself (daemon or not); delete what you don't want with `margin rm <art> <id>`.
 - **Don't poll something a feed could watch.** **Why:** every refresh you do costs a turn; a feed
   costs nothing and keeps going after you stop.
 

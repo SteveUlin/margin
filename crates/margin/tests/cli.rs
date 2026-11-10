@@ -35,16 +35,29 @@ fn margin(decoy: &Path, argv: &[String], stdin: &str) -> (bool, String) {
         .stderr(Stdio::piped());
     let mut ch = c.spawn().unwrap();
     ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    // drain both pipes while it runs: a pipe may hold as little as a page, and `margin skill`
+    // prints more than that
+    let drain = |mut r: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = r.read_to_end(&mut b);
+            String::from_utf8_lossy(&b).into_owned()
+        })
+    };
+    let out = drain(Box::new(ch.stdout.take().unwrap()));
+    let err = drain(Box::new(ch.stderr.take().unwrap()));
     let start = Instant::now();
-    while ch.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(s) = ch.try_wait().unwrap() {
+            break s;
+        }
         if start.elapsed() > Duration::from_secs(30) {
             let _ = ch.kill();
             panic!("margin {argv:?} did not finish");
         }
         std::thread::sleep(Duration::from_millis(10));
-    }
-    let o = ch.wait_with_output().unwrap();
-    (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+    };
+    (status.success(), format!("{}{}", out.join().unwrap(), err.join().unwrap()))
 }
 
 fn s(v: &[&str]) -> Vec<String> {

@@ -203,7 +203,7 @@ A feed is any program that prints JSON lines. This one turns a `services.json`, 
 
    It prints `feed services: watch services.json → tour (owns "svc"); daemon started`. The command runs from this directory, without a shell.
 
-3. [ ] **Check it.** `margin feed ls` shows `live` and "wrote 2s ago"; your pane grows a health line and the section. Edit `services.json` and the section follows.
+3. [ ] **Check it.** `margin feed ls` shows `live` and "ran 2s ago · wrote"; your pane grows a health line and the section. Edit `services.json` and the section follows.
 
    ![The tour pane with a feed health line "feed services · live · watch services.json · wrote now" and a "services" section of 3 rows: web and api with a check glyph, "all N checks pass" and an age such as 10h, backup with a red cross and "last run failed"](img/guide/b-feed.png "The services feed under your own content. The ages (10h, 7h) tick in the renderer; the feed never rewrote them. Real render through pyte, not Ghostty.")
 
@@ -290,7 +290,7 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
    `margin feed rm services`)
    ```
 
-3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the feed's section; a whole-artifact `put` must carry the feed's components through unchanged. Registering a feed over ids Claude already wrote hands them over, with a note (`note: feed clk now owns existing ids …`).
+3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the feed's section; a whole-artifact `put` must carry the feed's components through unchanged. Registering a feed over ids Claude already wrote hands them over, with a note (`note: feed clk now owns 3 existing ids (…)`).
 
 ## Cheat sheet
 
@@ -336,7 +336,7 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 | command | does |
 |---|---|
 | `margin feed add N --every 10s\|--watch P…\|--stream -- CMD…` | register; `--artifact` `--owns` `--min-gap` `--timeout` `--replace` |
-| `margin feed ls` | state, trigger, restarts, last write |
+| `margin feed ls` | state, trigger, restarts, last run and its outcome |
 | `margin feed run N` | once, in the foreground; leaves the daemon's status alone |
 | `margin feed logs N [--follow] [--lines N]` | stderr and the daemon's notes |
 | `margin feed pause\|resume\|rm N` | stop or start it; `rm` keeps its last output |

@@ -79,7 +79,7 @@ contract and a complete script; test it by hand with `./script | margin apply re
 
 ```sh
 margin feed add reviews --every 2m --artifact reviews --owns pr -- ./reviews-feed.sh
-margin feed ls            # live / restarting, last write, last error
+margin feed ls            # live / restarting, the last run (`ran 2s ago · unchanged`), the error
 ```
 
 From now on the ids `pr` and `pr-…` are read-only for you, and a whole-document `margin apply`

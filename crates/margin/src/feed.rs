@@ -366,6 +366,49 @@ pub struct Status {
     pub last_write: String,
     #[serde(default)]
     pub last_error: String,
+    /// When the command last ran to its end (a stream: when its lines were last taken), apart
+    /// from `last_write`: a run that printed what is already there writes nothing, and "wrote
+    /// never" beside a feed that runs every 10 s read as "not running".
+    #[serde(default)]
+    pub last_run: String,
+    /// How that run went: `wrote`, `unchanged` or `failed` (the reason is `last_error`).
+    #[serde(default)]
+    pub last_outcome: String,
+}
+
+impl Status {
+    /// The last run for `margin feed ls`: `ran 2s ago · unchanged (wrote 3m ago)`, `ran 2s ago ·
+    /// wrote`, `failed 5s ago: <the last stderr line>`, or `not run yet`.
+    pub fn last_run_text(&self, now: f64) -> String {
+        let ago = |t: &str| crate::util::parse_rfc3339(t).map(|t| crate::util::ago(now - t));
+        let Some(ran) = ago(&self.last_run) else {
+            // a status file from before runs were tracked still knows its last write
+            return ago(&self.last_write).map(|w| format!("wrote {w}")).unwrap_or_else(|| "not run yet".into());
+        };
+        match self.last_outcome.as_str() {
+            "failed" => format!("failed {ran}: {}", vellum::text::truncate(&self.last_error, 90)),
+            "wrote" => format!("ran {ran} · wrote"),
+            _ => match ago(&self.last_write) {
+                Some(w) => format!("ran {ran} · unchanged (wrote {w})"),
+                None => format!("ran {ran} · unchanged"),
+            },
+        }
+    }
+}
+
+/// `margin feed rm` and `margin feed pause`: say so on the feed's health line now. The daemon's
+/// worker does the same as it stops, but with no daemon up (or no worker: the feed was already
+/// paused) nobody else would, and the line went on saying `paused` or `live` for a feed that
+/// was gone. A health line that isn't in the artifact is left out.
+pub fn mark_health(st: &Store, f: &Feed, state: &str) {
+    let sid = f.status_id();
+    let Ok(d) = st.load(&f.artifact) else { return };
+    if d.find(&sid).map(|b| b.kind != "feed" || b.s("state") == state).unwrap_or(true) {
+        return;
+    }
+    let set = |field: &str, value: Value| Op::Set { id: sid.clone(), field: field.into(), value };
+    let ops = vec![set("state", json!(state)), set("since", json!(now_rfc3339())), set("until", Value::Null), set("note", Value::Null)];
+    let _ = st.feed_write(&f.artifact, &[ops], &f.writer(), &[]);
 }
 
 pub fn feeds_dir(st: &Store) -> PathBuf {
@@ -516,6 +559,17 @@ impl Worker {
         let (_, errs) = self.st.feed_write(&self.f.artifact, &[vec![op]], &self.f.writer(), &[]);
         for e in errs {
             self.log.line(&format!("health line: {e}"));
+        }
+    }
+
+    /// Note how a run ended, for `margin feed ls` (the status file) and, with `log`, as a line
+    /// of `margin feed logs`.
+    fn ran(&mut self, outcome: &str, detail: &str, log: bool) {
+        self.status.last_run = now_rfc3339();
+        self.status.last_outcome = outcome.into();
+        self.save_status();
+        if log {
+            self.log.line(&format!("run: {outcome}{}", if detail.is_empty() { String::new() } else { format!(" ({detail})") }));
         }
     }
 
@@ -682,7 +736,11 @@ impl Worker {
                 Err(e) => self.log.line(&format!("bad line: {e}")),
             }
         }
-        Ok(self.apply(&groups))
+        let changed = self.apply(&groups);
+        // each run's outcome is a line of the log: "is it running?" is answered there too
+        let lines = groups.len();
+        self.ran(if changed { "wrote" } else { "unchanged" }, &format!("{lines} line{}", if lines == 1 { "" } else { "s" }), true);
+        Ok(changed)
     }
 
     /// The worker loop for this feed's trigger, until stopped.
@@ -740,7 +798,9 @@ impl Worker {
                     Err(e) if !self.ctl.stopped() => {
                         let d = bo.record(false, epoch_now() - t0, 30.0);
                         self.status.restarts += 1;
-                        self.log.line(&format!("run failed: {e}; next try in {}", fmt_secs(d)));
+                        self.status.last_error = e.clone();
+                        self.ran("failed", "", false);
+                        self.log.line(&format!("run: failed: {e}; next try in {}", fmt_secs(d)));
                         self.set_state("restarting", Some(epoch_now() + d), Some(e));
                         self.sleep(d);
                         due = true;
@@ -830,7 +890,10 @@ impl Worker {
                 }
                 if !pending.is_empty() && (self.gate.wait(epoch_now()) <= 0.0 || closed) {
                     let g = std::mem::take(&mut pending);
-                    self.apply(&g);
+                    // a stream's "run" is each batch of lines it hands over; not logged, or a
+                    // busy stream would write a log line a second
+                    let changed = self.apply(&g);
+                    self.ran(if changed { "wrote" } else { "unchanged" }, "", false);
                 }
                 if closed {
                     break;
@@ -861,6 +924,8 @@ impl Worker {
             // a stream should run forever: any exit is a crash, a clean one included
             let d = bo.record(false, ran, 30.0).max(if ok { 1.0 } else { 0.0 });
             self.status.restarts += 1;
+            self.status.last_error = why.clone();
+            self.ran("failed", "", false);
             self.log.line(&format!("exited ({why}) after {}; restart in {}", fmt_secs((ran * 10.0).round() / 10.0), fmt_secs(d)));
             self.set_state("restarting", Some(epoch_now() + d), Some(why));
             self.sleep(d);
@@ -1099,6 +1164,86 @@ mod tests {
             3600.0,
         );
         assert_eq!(left, -1);
+    }
+
+    /// A run that changes nothing still counts as a run: the status says when it ran and how it
+    /// went, apart from the last write, and the log has a line per run.
+    #[test]
+    fn a_run_is_tracked_apart_from_a_write() {
+        let st = temp_store();
+        let mut f = feed("jj", "jj");
+        f.trigger = Trigger::Interval { every: 60.0 };
+        f.min_gap = 0.0;
+        f.cmd = vec!["printf".into(), r#"{"type":"section","id":"jj","title":"t"}\n"#.into()];
+        let mut w = Worker::new(Store::new(st.home.clone(), st.project.clone()), f.clone(), Arc::new(Ctl::default()), false);
+        assert_eq!(Status::default().last_run_text(epoch_now()), "not run yet");
+        assert_eq!(w.run_once(), Ok(true));
+        let s = read_status(&st, "jj").unwrap();
+        let at = |s: &Status| crate::util::parse_rfc3339(&s.last_run).unwrap() + 2.0;
+        assert_eq!((s.last_outcome.as_str(), s.last_run_text(at(&s)).as_str()), ("wrote", "ran 2s ago · wrote"), "{s:?}");
+        // the same output again: it ran, and wrote nothing
+        assert_eq!(w.run_once(), Ok(false));
+        let s = read_status(&st, "jj").unwrap();
+        let text = s.last_run_text(at(&s));
+        assert!(text.starts_with("ran 2s ago · unchanged (wrote ") && text.ends_with("s ago)"), "{text}");
+        // registered over content that is already there: never wrote, and still visibly ran
+        let fresh = Status { last_run: now_rfc3339(), last_outcome: "unchanged".into(), ..Status::default() };
+        assert_eq!(fresh.last_run_text(epoch_now() + 2.0), "ran 2s ago · unchanged");
+        let failed = Status { last_run: now_rfc3339(), last_outcome: "failed".into(), last_error: "exit 1: cannot read prs.json".into(), ..Status::default() };
+        assert_eq!(failed.last_run_text(epoch_now() + 5.0), "failed 5s ago: exit 1: cannot read prs.json");
+        let old = Status { last_write: now_rfc3339(), ..Status::default() };
+        assert_eq!(old.last_run_text(epoch_now() + 60.0), "wrote 1m ago", "a status file from before runs were tracked");
+        let log = std::fs::read_to_string(log_path(&st, "jj")).unwrap();
+        assert!(log.contains("run: wrote (1 line)") && log.contains("run: unchanged (1 line)"), "{log}");
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// `feed rm` / `feed pause` with no worker to do it: the health line says so, once.
+    #[test]
+    fn rm_and_pause_mark_the_health_line_themselves() {
+        let st = temp_store();
+        let f = feed("jj", "jj");
+        let block = |v: Value| -> Block { serde_json::from_value(v).unwrap() };
+        let health = block(json!({"type": "feed", "id": "jj-feed", "name": "jj", "state": "live", "until": "2026-11-10T00:00:00Z", "note": "exit 1"}));
+        st.feed_write("plan", &[vec![Op::Add { parent: None, block: health, before: None, after: None }]], &f.writer(), &[]);
+        mark_health(&st, &f, "paused");
+        let d = st.load("plan").unwrap();
+        let h = d.find("jj-feed").unwrap();
+        assert_eq!((h.s("state"), h.f.contains_key("until"), h.f.contains_key("note")), ("paused", false, false));
+        // the registry has forgotten the feed by the time rm marks it
+        mark_health(&st, &f, "removed");
+        let d = st.load("plan").unwrap();
+        assert_eq!(d.find("jj-feed").unwrap().s("state"), "removed");
+        let rev = d.rev;
+        mark_health(&st, &f, "removed");
+        assert_eq!(st.load("plan").unwrap().rev, rev, "already says so: no write");
+        // no health line, no artifact: nothing to do, nothing created
+        mark_health(&st, &feed("x", "x"), "removed");
+        mark_health(&st, &Feed { artifact: "absent".into(), ..feed("y", "y") }, "removed");
+        assert!(st.load("plan").unwrap().find("x-feed").is_none() && !st.exists("absent"));
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A watched file replaced by rename (how editors, `jq … > tmp && mv tmp file` and jj write)
+    /// is still watched: the watch on its directory outlives the inode.
+    #[test]
+    fn a_watched_file_replaced_by_rename_is_still_watched() {
+        let dir = std::env::temp_dir().join(format!("margin-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("data.json"), "1").unwrap();
+        let w = Watcher::new(&dir.to_string_lossy(), &["data.json".to_string()]).unwrap();
+        assert!(!w.wait(50), "quiet until something changes");
+        for round in 0..3 {
+            std::fs::write(dir.join("data.tmp"), format!("{round}")).unwrap();
+            std::fs::rename(dir.join("data.tmp"), dir.join("data.json")).unwrap();
+            assert!(w.wait(2000), "replacement {round} was seen");
+            while w.wait(50) {}
+        }
+        // and a plain write to the file that is there now
+        std::fs::write(dir.join("data.json"), "x").unwrap();
+        assert!(w.wait(2000));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// One non-UTF-8 byte in a one-shot run's output costs that byte, not the run.
