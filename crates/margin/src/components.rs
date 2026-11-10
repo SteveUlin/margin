@@ -25,45 +25,80 @@ use vellum::widgets::{self, Align, Outcome, Piece, Slot, Theme};
 /// wider than their one cell, so a single space reads as touching.
 pub(crate) const TX: u16 = 3;
 
-pub mod icon {
-    pub const DONE: &str = "\u{f058}";
-    pub const TODO: &str = "\u{f10c}";
-    pub const BLOCKED: &str = "\u{f057}";
-    pub const CHECK: &str = "\u{f00c}";
-    pub const INFO: &str = "\u{f05a}";
-    pub const CLOCK: &str = "\u{f017}";
-    pub const QUESTION: &str = "\u{f059}";
-    pub const BULB: &str = "\u{f0eb}";
-    pub const ROBOT: &str = "\u{f06a9}";
-    pub const USER: &str = "\u{f007}";
-    pub const EYE: &str = "\u{f06e}";
-    pub const HOURGLASS: &str = "\u{f252}";
-    pub const RIGHT: &str = "\u{f054}";
-    pub const DOWN: &str = "\u{f078}";
-    pub const IMAGE: &str = "\u{f03e}";
-    pub const LINK: &str = "\u{f0c1}";
-    pub const SEND: &str = "\u{f1d8}";
-    pub const LEAF: &str = "\u{f06c}";
-    pub const PLAN: &str = "\u{f0ae}";
-    pub const DIFF: &str = "\u{f440}";
-    pub const RADIO_ON: &str = "\u{f192}";
-    pub const RADIO_OFF: &str = "\u{f10c}";
-    pub const WARN: &str = "\u{f071}";
-    pub const PIN: &str = "\u{f08d}";
-    pub const BELL: &str = "\u{f0f3}";
-    pub const LOCK: &str = "\u{f023}";
-    pub const COMMIT: &str = "\u{f417}";
-    pub const DOT: &str = "\u{f192}";
-    pub const FILE: &str = "\u{f15b}";
-    pub const STOP: &str = "\u{f28d}";
-    pub const PAUSE: &str = "\u{f04c}";
-    pub const FEED: &str = "\u{f09e}";
-    pub const MOON: &str = "\u{f186}";
-    pub const TERM: &str = "\u{f120}";
-    pub const SKIP: &str = "\u{f05e}";
-    pub const UP: &str = "\u{f062}";
+/// The pane's icons: Nerd Font glyphs (private-use codepoints), each with the ordinary character
+/// that stands in for it where no Nerd Font can be assumed (`margin render` without `--ansi`,
+/// through [`plain_text`]). One table, so an icon can't be added without its stand-in.
+macro_rules! icons {
+    ($($(#[$doc:meta])* $name:ident = $glyph:literal => $plain:literal),* $(,)?) => {
+        pub mod icon {
+            $($(#[$doc])* pub const $name: &str = $glyph;)*
+            /// Every icon above with its plain-text stand-in (one cell wide, no private-use codepoint).
+            pub const PLAIN: &[(&str, &str)] = &[$(($glyph, $plain)),*];
+        }
+    };
+}
+
+icons! {
+    DONE = "\u{f058}" => "✓",
+    TODO = "\u{f10c}" => "○",
+    BLOCKED = "\u{f057}" => "✗",
+    CHECK = "\u{f00c}" => "✓",
+    INFO = "\u{f05a}" => "ℹ",
+    CLOCK = "\u{f017}" => "◷",
+    QUESTION = "\u{f059}" => "?",
+    BULB = "\u{f0eb}" => "✦",
+    ROBOT = "\u{f06a9}" => "◈",
+    USER = "\u{f007}" => "☺",
+    EYE = "\u{f06e}" => "◎",
+    HOURGLASS = "\u{f252}" => "⧗",
+    RIGHT = "\u{f054}" => "▸",
+    DOWN = "\u{f078}" => "▾",
+    IMAGE = "\u{f03e}" => "▣",
+    LINK = "\u{f0c1}" => "↗",
+    SEND = "\u{f1d8}" => "➤",
+    LEAF = "\u{f06c}" => "❧",
+    PLAN = "\u{f0ae}" => "≡",
+    DIFF = "\u{f440}" => "±",
+    RADIO_ON = "\u{f192}" => "◉",
+    RADIO_OFF = "\u{f10c}" => "○",
+    WARN = "\u{f071}" => "⚠",
+    PIN = "\u{f08d}" => "⚑",
+    BELL = "\u{f0f3}" => "!",
+    LOCK = "\u{f023}" => "⊠",
+    COMMIT = "\u{f417}" => "◇",
+    DOT = "\u{f192}" => "◉",
+    FILE = "\u{f15b}" => "▤",
+    STOP = "\u{f28d}" => "□",
+    PAUSE = "\u{f04c}" => "‖",
+    FEED = "\u{f09e}" => "≋",
+    MOON = "\u{f186}" => "☾",
+    TERM = "\u{f120}" => "❯",
+    SKIP = "\u{f05e}" => "⊘",
+    UP = "\u{f062}" => "↑",
     /// The up chevron of DOWN and RIGHT's family: a folded head.
-    pub const CHEVRON_UP: &str = "\u{f077}";
+    CHEVRON_UP = "\u{f077}" => "▴",
+}
+
+/// The shapes outside the icon set that are Nerd Font glyphs too: a pill's round caps (the tab
+/// on show reads `[ Mine ]`) and the live strip's slanted ends.
+const PLAIN_SHAPES: &[(&str, &str)] = &[(parts::CAP_L, "["), (parts::CAP_R, "]"), (crate::scene::STRIP_CAP_L, "◢"), (crate::scene::STRIP_CAP_R, "◣")];
+
+/// A frame's text for a reader with no Nerd Font (`margin render` without `--ansi`): each
+/// private-use glyph becomes its stand-in, one cell for one cell, so columns keep their places.
+/// Without this a `state` cell of `done` or `fail` printed as a blank (or a box), and the column
+/// read as broken. A private-use codepoint with no stand-in (an author's own glyph) becomes `·`.
+pub fn plain_text(text: &str) -> String {
+    let private = |c: char| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0x10FFFD);
+    text.chars()
+        .map(|c| {
+            if !private(c) {
+                return c;
+            }
+            let mut b = [0u8; 4];
+            let s: &str = c.encode_utf8(&mut b);
+            icon::PLAIN.iter().chain(PLAIN_SHAPES).find(|(g, _)| *g == s).and_then(|(_, plain)| plain.chars().next()).unwrap_or('·')
+        })
+        .collect()
 }
 
 /// Compact age for rows: "now", "12s", "4m", "2h", "3d".
@@ -2158,6 +2193,39 @@ mod dash_tests {
         };
         assert!(bad(json!({"key": "a", "summary": true})).contains("only a runs column"), "a text column");
         assert!(bad(json!({"key": "a", "kind": "runs", "summary": "yes"})).contains("true or false"));
+    }
+
+    /// Plain-text frames carry no private-use codepoint: every icon has a one-cell stand-in, the
+    /// state glyphs a reader looks for are a check and a cross, and the grid itself is untouched.
+    #[test]
+    fn plain_text_swaps_nerd_font_glyphs_for_ordinary_characters() {
+        let private = |c: char| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0x10FFFD);
+        for (glyph, plain) in icon::PLAIN.iter().chain(PLAIN_SHAPES) {
+            assert!(glyph.chars().count() == 1 && glyph.chars().all(private), "{glyph:?} is not a Nerd Font glyph");
+            assert!(plain.chars().count() == 1 && !plain.chars().any(private) && width(plain) == 1, "{glyph:?} → {plain:?}: one ordinary cell");
+            assert_eq!(plain_text(glyph), *plain);
+        }
+        assert_eq!((plain_text(icon::DONE), plain_text(icon::BLOCKED), plain_text(icon::TODO), plain_text(icon::RIGHT)), ("✓".into(), "✗".into(), "○".into(), "▸".into()));
+        assert_eq!(plain_text("a \u{e123} b ▪✗ ● é"), "a · b ▪✗ ● é", "an unknown private glyph is a dot; ordinary text passes");
+        let d = doc(1, json!([
+            {"type": "section", "id": "s", "title": "Checks", "children": [
+                {"type": "todo", "id": "t1", "text": "step", "status": "done"},
+                {"type": "row", "id": "r1", "glyph": "fail", "text": "ingest"},
+                {"type": "row", "id": "r2", "glyph": "you", "text": "waits"},
+                {"type": "status", "id": "s1", "text": "deploy", "state": "pass"},
+                {"type": "claim", "id": "c1", "text": "assumed"},
+                {"type": "link", "id": "l1", "text": "runbook", "target": "https://example.com"},
+                {"type": "table", "id": "t", "columns": [{"key": "st", "kind": "state"}, {"key": "n"}], "children": [
+                    {"type": "tr", "id": "x", "cells": {"st": "done", "n": "backup"}},
+                    {"type": "tr", "id": "y", "cells": {"st": "fail", "n": "mailer"}}]}]}]));
+        let (raw, _) = render_at(&d, 60, false, 0.0);
+        assert!(raw.chars().any(private), "the pane's own frame keeps its icons");
+        let text = plain_text(&raw);
+        assert!(!text.chars().any(private), "{text}");
+        assert_eq!(text.lines().map(|l| l.chars().count()).collect::<Vec<_>>(), raw.lines().map(|l| l.chars().count()).collect::<Vec<_>>(), "one cell for one cell");
+        let line = |word: &str| text.lines().find(|l| l.contains(word)).unwrap_or_else(|| panic!("{word}: {text}")).to_string();
+        assert!(line("backup").contains('✓') && line("mailer").contains('✗'), "a state column reads: {text}");
+        assert!(line("ingest").contains('✗') && line("step").contains('✓') && line("waits").contains('!'), "{text}");
     }
 
     #[test]

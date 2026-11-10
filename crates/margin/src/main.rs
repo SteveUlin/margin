@@ -1157,7 +1157,8 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 activity: &acts,
             };
             let f = sc.frame(&inp);
-            print!("{}", if a.has("--ansi") { f.grid.to_ansi() } else { f.grid.to_text() });
+            // plain text is read where no Nerd Font can be assumed: icons become ordinary characters
+            print!("{}", if a.has("--ansi") { f.grid.to_ansi() } else { components::plain_text(&f.grid.to_text()) });
         }
         "select" => {
             let text = if a.pos.is_empty() { stdin() } else { a.pos.join(" ") };

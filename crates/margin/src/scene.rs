@@ -91,8 +91,8 @@ struct Item {
 
 /// The live strip's end caps: Powerline's lower-right and lower-left triangles, so the band's
 /// bottom corners slant in.
-const STRIP_CAP_L: &str = "\u{e0ba}";
-const STRIP_CAP_R: &str = "\u{e0b8}";
+pub(crate) const STRIP_CAP_L: &str = "\u{e0ba}";
+pub(crate) const STRIP_CAP_R: &str = "\u{e0b8}";
 
 /// Seconds a change must go unseen before the header counts it: longer than the pane takes to
 /// mark a change seen while it is on screen (1.5 s, plus a 1 s visibility poll).

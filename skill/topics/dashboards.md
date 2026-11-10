@@ -95,6 +95,9 @@ margin tab reviews rm services | margin tab reviews show services | margin tab r
 margin view reviews services tracker          # the renderer itself, for a plain terminal
 ```
 
+- The live pane's status glyphs (a `state` cell, a row's `glyph`, a todo's circle) are Nerd Font
+  icons: without one they show as boxes or blanks, and the board still works. `margin render`
+  prints ordinary stand-ins (`✓ ✗ ○ ▸`, `[ Mine ]` for the tab on show) unless `--ansi`.
 - `open` never moves the focus. Outside Zellij it prints the `margin view …` command for
   {{user}} to run in a terminal. Open a pane only when {{user}} asked for one.
 - A tab that is not on screen carries marks: one for changes not yet seen, one when the board
