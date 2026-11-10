@@ -1233,12 +1233,23 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("data.json"), "1").unwrap();
         let w = Watcher::new(&dir.to_string_lossy(), &["data.json".to_string()]).unwrap();
-        assert!(!w.wait(50), "quiet until something changes");
+        // wait for quiet first: something else on the machine may touch a new file in the temp
+        // directory (an attribute change is an event too), and that must not count as ours
+        let settle = |w: &Watcher| {
+            for _ in 0..30 {
+                if !w.wait(200) {
+                    break;
+                }
+            }
+        };
+        settle(&w);
         for round in 0..3 {
             std::fs::write(dir.join("data.tmp"), format!("{round}")).unwrap();
+            settle(&w);
+            // the rename alone: the old inode's watch ends here, the directory's goes on
             std::fs::rename(dir.join("data.tmp"), dir.join("data.json")).unwrap();
             assert!(w.wait(2000), "replacement {round} was seen");
-            while w.wait(50) {}
+            settle(&w);
         }
         // and a plain write to the file that is there now
         std::fs::write(dir.join("data.json"), "x").unwrap();

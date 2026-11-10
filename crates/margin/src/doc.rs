@@ -108,41 +108,41 @@ const PROPOSAL: (&str, Ty, &str) = ("proposal", Ty::Any, "written by margin prop
 /// type is a row here plus its drawing in components.rs.
 pub const SCHEMA: &[Kind] = &[
     Kind { name: "section", about: "a titled group", children: true, action: "fold (click the header)",
-        fields: &[("title", Ty::Text, ""), ("note", Ty::Text, "shown open"), ("summary", Ty::Text, "shown folded"), ("folded", Ty::Bool, "starts folded"), ("tone", Ty::Enum(TONES), "")] },
+        fields: &[("title", Ty::Text, "the header line"), ("note", Ty::Text, "right of the title, shown open"), ("summary", Ty::Text, "right of the title, shown folded"), ("folded", Ty::Bool, "starts folded"), ("tone", Ty::Enum(TONES), "the header's color")] },
     Kind { name: "tabs", about: "views of one dashboard: its children are sections, their titles a tab strip, one section's content shown at a time", children: true, action: "switch (click a tab, ]t / [t)",
         fields: &[] },
     Kind { name: "text", about: "a paragraph", children: false, action: "",
-        fields: &[("text", Ty::Text, ""), ("style", Ty::Enum(&["note", "dim", "warn"]), ""), ("tone", Ty::Enum(TONES), "")] },
+        fields: &[("text", Ty::Text, "the paragraph; wraps; **bold** `code` @[name]"), ("style", Ty::Enum(&["note", "dim", "warn"]), "note: an aside, dim: grey, warn: yellow"), ("tone", Ty::Enum(TONES), "the text's color")] },
     Kind { name: "tail", about: "a command's output, live (made by margin tail; the lines live beside the doc)", children: false, action: "open (click: 30 lines)",
-        fields: &[("title", Ty::Text, ""), ("lines", Ty::Num, "lines shown while it runs (default 6)")] },
+        fields: &[("title", Ty::Text, "the header (default: the command)"), ("lines", Ty::Num, "lines shown while it runs (default 6)")] },
     Kind { name: "code", about: "monospace lines: a fenced block or a table (margin doc makes them)", children: false, action: "",
-        fields: &[("text", Ty::Text, "lines, kept as written"), ("language", Ty::Text, "")] },
+        fields: &[("text", Ty::Text, "lines, kept as written"), ("language", Ty::Text, "the fence's language, as a label")] },
     Kind { name: "bullet", about: "a bullet; children are sub-bullets", children: true, action: "",
-        fields: &[("text", Ty::Text, ""), ("tone", Ty::Enum(TONES), "")] },
+        fields: &[("text", Ty::Text, "one idea; wraps; **bold** `code` @[name]"), ("tone", Ty::Enum(TONES), "the text's color")] },
     Kind { name: "todo", about: "a plan step", children: false, action: "tick (mg:todo/<id>, space)",
-        fields: &[("text", Ty::Text, ""), ("note", Ty::Text, ""), ("status", Ty::Enum(STATUSES), ""), ("after", Ty::List, "ids of the steps in this section it waits on (drawn as a graph)"), ("rests_on", Ty::List, "ids of the claims this step assumes; striking one flags the step"), ("owner", Ty::Enum(&["you", "claude"]), "you: sulin's own step; Claude stops there and they mark it done"), PROPOSAL] },
+        fields: &[("text", Ty::Text, "the step; wraps; **bold** `code` @[name]"), ("note", Ty::Text, "dim text after the step: a result, a reason"), ("status", Ty::Enum(STATUSES), "default todo; next: sulin's mark for what to do next"), ("after", Ty::List, "ids of the steps in this section it waits on (drawn as a graph)"), ("rests_on", Ty::List, "ids of the claims this step assumes; striking one flags the step"), ("owner", Ty::Enum(&["you", "claude"]), "you: sulin's own step; Claude stops there and they mark it done"), PROPOSAL] },
     Kind { name: "progress", about: "a bar: a section's done todos, or a value", children: false, action: "",
-        fields: &[("of", Ty::Text, "a section id"), ("value", Ty::Num, "0-1"), ("label", Ty::Text, "")] },
+        fields: &[("of", Ty::Text, "a section id"), ("value", Ty::Num, "0-1"), ("label", Ty::Text, "text before the bar")] },
     Kind { name: "timer", about: "elapsed since, or left until", children: false, action: "",
-        fields: &[("since", Ty::Text, "RFC 3339"), ("until", Ty::Text, "RFC 3339"), ("label", Ty::Text, "")] },
+        fields: &[("since", Ty::Text, "RFC 3339"), ("until", Ty::Text, "RFC 3339"), ("label", Ty::Text, "text before the time")] },
     Kind { name: "status", about: "a check or job", children: false, action: "open",
-        fields: &[("text", Ty::Text, ""), ("state", Ty::Enum(&["running", "pass", "fail"]), ""), ("result", Ty::Text, ""), ("spark", Ty::Nums, ""), ("target", Ty::Text, "URL or mg: token")] },
+        fields: &[("text", Ty::Text, "what is checked"), ("state", Ty::Enum(&["running", "pass", "fail"]), "its glyph; fail marks the tab"), ("result", Ty::Text, "a short outcome at the right: exit 2, 14 passed"), ("spark", Ty::Nums, "recent values, drawn as a sparkline"), ("target", Ty::Text, "URL or mg: token")] },
     Kind { name: "question", about: "a choice sulin makes", children: false, action: "pick (1-9, mg:pick/<id>=<opt>)",
-        fields: &[("text", Ty::Text, ""), ("options", Ty::List, ""), ("suggest", Ty::Text, "one of options: your recommendation, a line on the card; no option is highlighted until sulin picks"), ("default", Ty::Text, "one of options; only when sulin asked for a default"), ("why", Ty::Text, ""), ("applies", Ty::Text, "a step id (the default is taken when that step starts), or prose"), ("takes_at", Ty::Any, "RFC 3339: the default is taken then (a countdown on the card)"), ("applied", Ty::Bool, "you took the default"), ("applied_at", Ty::Text, "set for you when applied goes true"), PROPOSAL] },
+        fields: &[("text", Ty::Text, "the question"), ("options", Ty::List, "the answers, two or more; each is a button"), ("suggest", Ty::Text, "one of options: your recommendation, a line on the card; no option is highlighted until sulin picks"), ("default", Ty::Text, "one of options; only when sulin asked for a default"), ("why", Ty::Text, "why it matters or what each answer costs; a line on the card"), ("applies", Ty::Text, "a step id (the default is taken when that step starts), or prose"), ("takes_at", Ty::Any, "RFC 3339: the default is taken then (a countdown on the card)"), ("applied", Ty::Bool, "you took the default"), ("applied_at", Ty::Text, "set for you when applied goes true"), PROPOSAL] },
     Kind { name: "claim", about: "an assumption sulin can strike", children: false, action: "strike (mg:strike/<id>, x)",
-        fields: &[("text", Ty::Text, ""), ("ack", Ty::Text, ""), PROPOSAL] },
+        fields: &[("text", Ty::Text, "the assumption; wraps; **bold** `code` @[name]"), ("ack", Ty::Text, "your reply once it is struck, shown under it"), PROPOSAL] },
     Kind { name: "decided", about: "a settled decision", children: false, action: "",
-        fields: &[("text", Ty::Text, ""), ("by", Ty::Text, "claude or you"), ("at", Ty::Text, "")] },
+        fields: &[("text", Ty::Text, "what was decided; wraps; **bold**"), ("by", Ty::Text, "claude or you"), ("at", Ty::Text, "when: RFC 3339, or a short label")] },
     Kind { name: "link", about: "a link", children: false, action: "open",
-        fields: &[("text", Ty::Text, ""), ("target", Ty::Text, "URL or mg: token")] },
+        fields: &[("text", Ty::Text, "the label shown"), ("target", Ty::Text, "URL or mg: token")] },
     Kind { name: "image", about: "a PNG", children: false, action: "",
-        fields: &[("path", Ty::Text, "PNG"), ("alt", Ty::Text, ""), ("rows", Ty::Num, ""), ("cols", Ty::Num, "")] },
+        fields: &[("path", Ty::Text, "PNG"), ("alt", Ty::Text, "shown where images can't draw (default: the path)"), ("rows", Ty::Num, "most rows it takes (default 18)"), ("cols", Ty::Num, "most cells wide (default: the pane)")] },
     Kind { name: "diff", about: "a structural diff (made by margin diff)", children: false, action: "approve / reject / ask",
-        fields: &[("path", Ty::Text, ""), ("language", Ty::Any, ""), ("adds", Ty::Num, ""), ("dels", Ty::Num, ""), ("rows", Ty::Any, ""), ("max_rows", Ty::Num, ""), ("text", Ty::Text, ""), PROPOSAL] },
+        fields: &[("path", Ty::Text, "the file's label in the header"), ("language", Ty::Any, "what difftastic detected"), ("adds", Ty::Num, "added lines"), ("dels", Ty::Num, "removed lines"), ("rows", Ty::Any, "the diff's lines, written by margin diff"), ("max_rows", Ty::Num, "rows shown before it is cut"), ("text", Ty::Text, "a plain-text diff when there are no rows"), PROPOSAL] },
     Kind { name: "row", about: "one line of a ledger or monitor", children: true, action: "open (click or enter, when it has a target)",
-        fields: &[("text", Ty::Text, ""), ("glyph", Ty::Text, "spin done fail you perm idle ended commit wc file term, or any character"), ("tone", Ty::Enum(TONES), ""), ("tag", Ty::Text, ""), ("tag_tone", Ty::Enum(TONES), ""), ("aside", Ty::Text, ""), ("aside_tone", Ty::Enum(TONES), ""), ("since", Ty::Any, "RFC 3339 or unix seconds"), ("meta", Ty::Text, ""), ("detail", Ty::Text, "longer text under the row: wraps, three rows at most until the row has the focus"), ("text_tone", Ty::Enum(TONES), ""), ("bold", Ty::Bool, ""), ("who", Ty::Text, "a name, drawn as its badge (glyph + name in the name's color) before the text"), ("target", Ty::Text, "URL or mg: token, opened on click or enter")] },
+        fields: &[("text", Ty::Text, "the line; cut at the edge, in full when focused; **bold** `code` @[name]"), ("glyph", Ty::Text, "spin done (ok) fail you (bell) perm (lock) idle ended commit wc file term, or any character; fail marks the tab"), ("tone", Ty::Enum(TONES), "the glyph's color"), ("tag", Ty::Text, "a short pill before the text: a ticket, a kind"), ("tag_tone", Ty::Enum(TONES), "the pill's color"), ("aside", Ty::Text, "dim text right of the text: exit 1, 3 files"), ("aside_tone", Ty::Enum(TONES), "the aside's color"), ("since", Ty::Any, "RFC 3339 or unix seconds"), ("meta", Ty::Text, "dim text at the far right, when there is no since"), ("detail", Ty::Text, "longer text under the row: wraps, three rows at most until the row has the focus"), ("text_tone", Ty::Enum(TONES), "the text's color"), ("bold", Ty::Bool, "the whole text bold"), ("who", Ty::Text, "a name, drawn as its badge (glyph + name in the name's color) before the text"), ("target", Ty::Text, "URL or mg: token, opened on click or enter")] },
     Kind { name: "feed", about: "a feed's health line (written by the daemon)", children: false, action: "",
-        fields: &[("name", Ty::Text, ""), ("state", Ty::Text, ""), ("trigger", Ty::Text, ""), ("since", Ty::Any, ""), ("until", Ty::Any, ""), ("last", Ty::Any, ""), ("restarts", Ty::Num, ""), ("note", Ty::Text, "")] },
+        fields: &[("name", Ty::Text, "the feed's name"), ("state", Ty::Text, "not registered, live, restarting, failed, paused, removed, stopped"), ("trigger", Ty::Text, "every 30s, watch <path>, stream"), ("since", Ty::Any, "RFC 3339: when the state began"), ("until", Ty::Any, "RFC 3339: the next restart (a countdown)"), ("last", Ty::Any, "RFC 3339: its last write"), ("restarts", Ty::Num, "restarts so far"), ("note", Ty::Text, "the last error, shown under the line")] },
     Kind { name: "rule", about: "a horizontal line: a break between parts of a dashboard", children: false, action: "",
         fields: &[("text", Ty::Text, "a label inset at the left")] },
     Kind { name: "table", about: "a table: a header and aligned columns; its children are tr rows", children: true, action: "",
@@ -150,7 +150,18 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "tr", about: "one table row, only inside a table; give it a stable id so a rewrite reconciles", children: false, action: "open (click, when it has a target)",
         fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)")] },
     Kind { name: "runs", about: "a run strip: the last n outcomes as small squares, oldest left, a cross for a failure", children: false, action: "",
-        fields: &[("label", Ty::Text, ""), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed")] },
+        fields: &[("label", Ty::Text, "text at the left: what ran"), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed")] },
+];
+
+/// The fields of the document itself: the envelope a whole-document `margin apply` takes
+/// (main.rs `apply_cmd`). `id`, `rev`, `updated` and `by` are margin's and never written.
+pub const DOC_FIELDS: &[(&str, Ty, &str)] = &[
+    ("title", Ty::Text, "the pane's title line and its tab's name (margin title; default: the artifact id)"),
+    ("purpose", Ty::Text, "what the pane is for, one line pinned at the top (margin purpose)"),
+    ("hints", Ty::List, "reminders at the pane's bottom, one each; `key  text` (two spaces) draws a key (margin hints)"),
+    ("kind", Ty::Text, "a free label for what the artifact is (plan, dashboard); listed by margin ls --json, never drawn"),
+    ("blocks", Ty::Any, "the top-level components, in order: a list of {type, id, fields…, children}"),
+    ("v", Ty::Num, "the format version, optional: 1"),
 ];
 
 /// Kinds that carry sulin's decisions (tick, pick, strike, verdict): a write that leaves their id
@@ -384,40 +395,63 @@ fn pick(only: Option<&str>) -> Result<Vec<&'static Kind>, String> {
     }
 }
 
-/// `margin schema [type]`, for reading.
+/// `document` is not a component type: `margin schema document` prints the envelope's fields.
+const DOCUMENT: &str = "document";
+const DOCUMENT_ABOUT: &str = "the artifact itself: the envelope of a whole-document `margin apply <art>`; a write without purpose or hints keeps the ones it has";
+
+fn field_json(fields: &[(&str, Ty, &str)]) -> Map<String, Value> {
+    fields
+        .iter()
+        .map(|(f, t, note)| {
+            let mut o = serde_json::json!({"type": t.tag()});
+            if let Ty::Enum(v) = t {
+                o["values"] = serde_json::json!(v);
+            }
+            if !note.is_empty() {
+                o["note"] = serde_json::json!(note);
+            }
+            (f.to_string(), o)
+        })
+        .collect()
+}
+
+fn field_text(fields: &[(&str, Ty, &str)]) -> String {
+    fields.iter().map(|(f, t, note)| format!("  {f:<11} {}{}\n", t.name(), if note.is_empty() { String::new() } else { format!("  ({note})") })).collect()
+}
+
+/// `margin schema [type]`, for reading: the document's own fields first, then each component
+/// type. Every field has a few words on what it is.
 pub fn schema_text(only: Option<&str>) -> Result<String, String> {
     let mut out = String::new();
+    if only.is_none() || only == Some(DOCUMENT) {
+        out += &format!("{DOCUMENT}: {DOCUMENT_ABOUT}\n{}", field_text(DOC_FIELDS));
+        if only.is_some() {
+            return Ok(out);
+        }
+        out += "every component below also takes: type, id (letters, digits, - and _; unique in the artifact), and children where it holds them\n";
+    }
     for k in pick(only)? {
         let action = if k.action.is_empty() { String::new() } else { format!("; sulin: {}", k.action) };
-        out += &format!("{}: {}{}{action}\n", k.name, k.about, if k.children { "; holds children" } else { "" });
-        for (f, t, note) in k.fields {
-            out += &format!("  {f:<11} {}{}\n", t.name(), if note.is_empty() { String::new() } else { format!("  ({note})") });
-        }
+        out += &format!("{}: {}{}{action}\n{}", k.name, k.about, if k.children { "; holds children" } else { "" }, field_text(k.fields));
     }
     Ok(out)
 }
 
 /// `margin schema [type] --json`.
 pub fn schema_json(only: Option<&str>) -> Result<Value, String> {
+    let document = serde_json::json!({"about": DOCUMENT_ABOUT, "fields": field_json(DOC_FIELDS)});
+    if only == Some(DOCUMENT) {
+        return Ok(serde_json::json!({"v": 1, "document": document, "types": {}}));
+    }
     let mut m = Map::new();
     for k in pick(only)? {
-        let fields: Map<String, Value> = k
-            .fields
-            .iter()
-            .map(|(f, t, note)| {
-                let mut o = serde_json::json!({"type": t.tag()});
-                if let Ty::Enum(v) = t {
-                    o["values"] = serde_json::json!(v);
-                }
-                if !note.is_empty() {
-                    o["note"] = serde_json::json!(note);
-                }
-                (f.to_string(), o)
-            })
-            .collect();
-        m.insert(k.name.into(), serde_json::json!({"about": k.about, "children": k.children, "action": k.action, "fields": fields}));
+        m.insert(k.name.into(), serde_json::json!({"about": k.about, "children": k.children, "action": k.action, "fields": field_json(k.fields)}));
     }
-    Ok(serde_json::json!({"v": 1, "types": m}))
+    let mut out = serde_json::json!({"v": 1, "types": m});
+    if only.is_none() {
+        out["document"] = document;
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -870,6 +904,37 @@ mod tests {
         assert_eq!(d.ids().last().unwrap(), "fresh");
         let (ids, parent) = Op::Rm { id: "steps".into() }.touched(&d);
         assert_eq!((ids, parent), (vec!["steps".to_string(), "t9".to_string()], None));
+    }
+
+    /// `margin schema` describes the document's own fields and every field of every type, and
+    /// the document section lists exactly the keys an envelope may carry.
+    #[test]
+    fn schema_describes_the_document_and_every_field() {
+        for k in SCHEMA {
+            for (f, _, note) in k.fields {
+                assert!(note.trim().len() >= 3, "{}.{f} has no description", k.name);
+            }
+        }
+        let all = schema_text(None).unwrap();
+        assert!(all.starts_with("document: "), "the document comes first: {}", &all[..80]);
+        for f in ["title", "purpose", "hints", "kind", "blocks"] {
+            assert!(DOC_FIELDS.iter().any(|d| d.0 == f && !d.2.is_empty()), "document.{f}");
+            assert!(all.lines().take(8).any(|l| l.trim_start().starts_with(f)), "{f} is listed under document");
+        }
+        let doc = schema_text(Some("document")).unwrap();
+        assert!(doc.contains("purpose") && !doc.contains("section:"), "{doc}");
+        let glyph = schema_text(Some("row")).unwrap();
+        for alias in ["(ok)", "(bell)", "(lock)"] {
+            assert!(glyph.contains(alias), "row.glyph doesn't name the alias {alias}");
+        }
+        let j = schema_json(None).unwrap();
+        assert_eq!(j["document"]["fields"]["hints"]["type"], "list");
+        assert!(j["types"]["feed"]["fields"]["state"]["note"].as_str().unwrap().contains("paused"));
+        assert!(schema_json(Some("document")).unwrap()["document"]["fields"]["title"].is_object());
+        assert!(schema_json(Some("todo")).unwrap().get("document").is_none());
+        // a document with each of the described fields is one the store's envelope takes
+        let d: Doc = serde_json::from_value(serde_json::json!({"id": "a", "v": 1, "title": "T", "purpose": "p", "hints": ["k  v"], "kind": "dashboard", "blocks": []})).unwrap();
+        assert_eq!((d.title.as_str(), d.purpose.as_str(), d.kind.as_str(), d.hints.len()), ("T", "p", "dashboard", 1));
     }
 
     #[test]

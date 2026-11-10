@@ -45,7 +45,7 @@ const HELP: &str = "margin: live artifacts beside the chat
 
 content (Claude):
   margin apply <art> [--base-rev N] [--json] < input   the one write: ops, components (upsert), or a whole doc
-  margin schema [type] [--json]                       component types, fields, values
+  margin schema [type|document] [--json]              the document's fields, component types, fields, values
   margin put <art> [--title T] [--kind K] < doc.json   alias of apply (whole doc)
   margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]
   margin set <art> <id> <field> <value> | <field>=<value>... [--base-rev N]   typed by the schema
@@ -128,7 +128,7 @@ global flags (before or after the command):
 const CMDS: &[Cmd] = &[
     Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  the one write: stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (create or replace)\n  several lines are one write; creates the artifact on first write\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n", flags: &["--base-rev", "--json", "--title", "--kind"], max_pos: Some(1) },
     Cmd { name: "put", help: "margin put <art> [--title T] [--kind K] [--base-rev N] < doc.json\n  alias of apply that reads a bare array as the block list: create or replace a whole artifact\n", flags: &["--title", "--kind", "--base-rev", "--json"], max_pos: Some(1) },
-    Cmd { name: "schema", help: "margin schema [type] [--json]\n  the component types, their fields, types and allowed values (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
+    Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  add one component under <parent> (- = top level); creates the artifact on first write\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
     Cmd { name: "set", help: "margin set <art> <id> <field> <value> [--base-rev N]\nmargin set <art> <id> <field>=<value>... [--base-rev N]\n  set fields; text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
     Cmd { name: "rm", help: "margin rm <art> <id> [--base-rev N] [--json]\n  remove a component and its children\nmargin rm <art> [--yes]\n  remove a whole artifact. Without --yes it prints what would go (title, rev, the feeds\n  registered on it, the panes showing it) and removes nothing. With --yes the artifact moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and its feeds are unregistered. Panes are left\n  open: margin close <art>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
@@ -633,9 +633,10 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "schema" => {
             let only = a.pos.first().map(String::as_str);
             if a.has("--json") {
-                println!("{}", serde_json::to_string_pretty(&doc::schema_json(only)?).unwrap());
+                println!("{}", who::say(&serde_json::to_string_pretty(&doc::schema_json(only)?).unwrap()));
             } else {
-                print!("{}", doc::schema_text(only)?);
+                // the schema's notes name the person as every other message does
+                print!("{}", who::say(&doc::schema_text(only)?));
             }
         }
         "apply" | "patch" | "put" => {

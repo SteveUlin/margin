@@ -64,7 +64,8 @@ margin render services --focus svc-db --focused   # the focus on a block; its se
 margin show reviews                               # the tree: type, id, text
 ```
 
-- Envelope keys: `title`, `purpose`, `hints`, `blocks` (nothing else). It prints `reviews rev N`.
+- Envelope keys: `title`, `purpose`, `hints`, `kind`, `blocks`, nothing else (`margin schema
+  document` describes each). It prints `reviews rev N`.
 - A schema error names the block and the field and writes nothing; `margin schema <type>` lists
   a type's fields.
 - The last block above places the feed's health line (state, trigger, last write, the error when
