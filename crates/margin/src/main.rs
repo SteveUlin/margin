@@ -96,7 +96,8 @@ setup and reference:
   margin example [<name> [--feed|--data]]   complete dashboards to copy from: artifact, feed script, sample data
   margin help [<command>|<topic>]
 
-global: --home DIR  --project NAME  --by you|claude|NAME      margin <command> --help for each
+global, before or after the command: --home DIR  --project NAME  --by you|claude|NAME
+margin <command> --help for each
 ";
 
 /// One subcommand: its help, the flags it takes and how many positionals. Every flag outside
@@ -116,7 +117,7 @@ struct Cmd {
 const GLOBAL_FLAGS: &[&str] = &["--home", "--project", "--by"];
 
 const GLOBAL_HELP: &str = "
-global flags:
+global flags (before or after the command):
   --home DIR       the store root (default $MARGIN_HOME, else ~/.local/state/margin)
   --project NAME   the project inside it (default $MARGIN_PROJECT, else from the working directory)
   --by WHO         who a write is logged as: you, claude, or a name (default: claude when run
@@ -407,8 +408,65 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool) -> Resul
     Ok(())
 }
 
+/// Take the global flags written before the subcommand (`margin --home DIR apply …`) off the
+/// front: what is left starts with the command, and the flags are handed back to be read with
+/// the ones written after it. A global flag with no value there is an error.
+fn leading_globals(argv: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut globals = Vec::new();
+    let mut i = 0;
+    while i < argv.len() {
+        let a = &argv[i];
+        let name = a.split_once('=').map(|(k, _)| k).unwrap_or(a);
+        if !GLOBAL_FLAGS.contains(&name) {
+            break;
+        }
+        globals.push(a.clone());
+        if !a.contains('=') {
+            let v = argv.get(i + 1).ok_or_else(|| format!("{a} needs a value"))?;
+            globals.push(v.clone());
+            i += 1;
+        }
+        i += 1;
+    }
+    Ok((globals, argv[i..].to_vec()))
+}
+
+/// `--home` and `--project` reach every code path through the environment the store already
+/// reads (`$MARGIN_HOME`, `$MARGIN_PROJECT`): `select`, the hooks and the hosts resolve their
+/// store without an `Args` in hand, and `margin select --home DIR` once acted on the real store.
+fn export_store_flags(a: &Args) {
+    if let Some(h) = a.get("--home") {
+        // absolute: a feed or a pane started from here runs in another directory
+        let h = std::path::absolute(h).map(|p| p.display().to_string()).unwrap_or_else(|_| h.to_string());
+        std::env::set_var("MARGIN_HOME", h);
+    }
+    if let Some(p) = a.get("--project") {
+        std::env::set_var("MARGIN_PROJECT", p);
+    }
+}
+
+/// A closed stdout (`margin ls | head -3`) ends the command quietly, as it does any Unix tool:
+/// Rust starts with SIGPIPE ignored, and `println!` then panics with "failed printing to
+/// stdout". The commands that live long or write into a pipe of their own keep it ignored: the
+/// pane must restore the terminal on its way out, `select` falls back when a clipboard tool
+/// exits early, and the daemon outlives whoever started it.
+fn quiet_on_closed_stdout(cmd: &str) {
+    if !matches!(cmd, "view" | "select" | "daemon") {
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    let (globals, argv) = match leading_globals(&argv) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("margin: {e}; margin --help");
+            std::process::exit(1);
+        }
+    };
+    quiet_on_closed_stdout(argv.first().map(String::as_str).unwrap_or(""));
+    export_store_flags(&Args::parse(&globals));
     // help names the person as the messages do (who.rs): the source says "sulin", `say` swaps it
     let overview = || format!("{}\n{}", who::say(HELP), help::topic_list(&help::Ctx::here()));
     if argv.is_empty() {
@@ -447,7 +505,10 @@ fn main() {
         print!("{}{GLOBAL_HELP}", who::say(spec.help));
         return;
     }
-    let a = Args::parse(mine);
+    // the global flags read the same on either side of the command; one written after it wins
+    let mine: Vec<String> = globals.iter().chain(mine.iter()).cloned().collect();
+    let a = Args::parse(&mine);
+    export_store_flags(&a);
     let r = if cmd == "feed" {
         feed_cmd(&a, rest)
     } else if cmd == "tail" {

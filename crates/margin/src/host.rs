@@ -148,9 +148,8 @@ impl Host for PlainHost {
             return Ok(Opened::Pane { handle: format!("pid {pid}"), created: false });
         }
         let mut cmd = format!("{} view {art}", crate::util::self_cmd());
-        if std::env::var("MARGIN_PROJECT").is_err() {
-            cmd += &format!(" --project {}", st.project);
-        }
+        // always named: the terminal it is pasted into may sit in another directory
+        cmd += &format!(" --project {}", st.project);
         if std::env::var("MARGIN_HOME").is_ok() {
             cmd += &format!(" --home {}", st.home.display());
         }

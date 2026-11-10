@@ -314,7 +314,7 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
 | `margin show A [--json]` | content + your decisions |
 | `margin ls` / `margin gc [--days N]` | list; archive untouched ones (30 days) |
 
-Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project NAME` and `--by you|claude|NAME` (who the write is logged as; default claude inside Claude Code, you elsewhere), and `margin CMD --help` (or `-h`, or `margin help CMD`) prints its usage without acting. A flag a command doesn't take is refused before it runs.
+Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project NAME` and `--by you|claude|NAME`, before or after the command (who the write is logged as; default claude inside Claude Code, you elsewhere), and `margin CMD --help` (or `-h`, or `margin help CMD`) prints its usage without acting. A flag a command doesn't take is refused before it runs.
 
 ### Return channel and screen (fold)
 
