@@ -110,6 +110,10 @@ margin view reviews services tracker          # the renderer itself, for a plain
   panel (the focused row's `detail` and every field); `]c` / `[c` walk what changed; `zh` folds the
   pinned head; `za` folds a section; `?` lists the rest.
 
+- To take a board down: `margin rm <art>` prints what would go (title, rev, its feeds, the panes
+  showing it) and removes nothing; `margin rm <art> --yes` unregisters its feeds and moves it to
+  the project's `.archive/` directory (nothing is deleted). Ask {{user}} first.
+
 **(f) Purpose and hints** (in the envelope, or later; a whole-document write without them keeps them):
 
 ```sh

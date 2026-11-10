@@ -935,6 +935,26 @@ impl Store {
         v
     }
 
+    /// Move one artifact's directory (document, decisions, history, views) into `.archive/`,
+    /// under `<id>-<date>` (with `-2`, `-3`… when that name is taken). The store never deletes:
+    /// `margin rm <art>` and `margin gc` both end here, and moving the directory back restores it.
+    pub fn archive(&self, a: &str) -> Result<PathBuf, String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        self.archive_locked(a)
+    }
+
+    fn archive_locked(&self, a: &str) -> Result<PathBuf, String> {
+        if !crate::util::valid_id(a) || !self.exists(a) {
+            return Err(format!("no artifact {a:?} in project {}", self.project));
+        }
+        let dir = self.dir().join(".archive");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let base = format!("{a}-{}", &now_rfc3339()[..10]);
+        let dest = (1..).map(|n| dir.join(if n == 1 { base.clone() } else { format!("{base}-{n}") })).find(|p| !p.exists()).unwrap();
+        fs::rename(self.art(a), &dest).map_err(|e| format!("archive {a}: {e}"))?;
+        Ok(dest)
+    }
+
     /// Move artifacts untouched for `days` into `.archive/` (never deletes). Returns moved names.
     pub fn archive_stale(&self, days: u32) -> Vec<String> {
         if days == 0 {
@@ -948,11 +968,8 @@ impl Store {
                 .filter_map(|f| fs::metadata(self.art(&d.id).join(f)).ok()?.modified().ok())
                 .chain(fs::read_dir(self.art(&d.id).join("view")).into_iter().flatten().filter_map(|e| e.ok()?.metadata().ok()?.modified().ok()))
                 .max();
-            if newest.map(|t| t < cutoff).unwrap_or(false) {
-                let dest = self.dir().join(".archive").join(format!("{}-{}", d.id, &now_rfc3339()[..10]));
-                if fs::create_dir_all(self.dir().join(".archive")).is_ok() && fs::rename(self.art(&d.id), &dest).is_ok() {
-                    moved.push(d.id.clone());
-                }
+            if newest.map(|t| t < cutoff).unwrap_or(false) && self.archive(&d.id).is_ok() {
+                moved.push(d.id.clone());
             }
         }
         moved

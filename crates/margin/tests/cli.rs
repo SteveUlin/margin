@@ -127,6 +127,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("init", s(&["--dry-run", "--claude-dir", &claude_dir]), "", true),
         ("example", s(&[]), "", true),
         ("skill", s(&[]), "", true),
+        ("rm", s(&["b", "--yes"]), "", true),
     ];
     // `view` is the live pane: it needs a terminal
     let skipped = ["view"];
@@ -154,7 +155,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         }
         // what the walk did is in the store the flags named
         let dir = home.join(project);
-        assert!(dir.join("a/doc.json").exists(), "flags {side}");
+        assert!(dir.join("a/doc.json").exists() && !dir.join("b").exists() && dir.join(".archive").exists(), "flags {side}");
         let state = std::fs::read_to_string(dir.join("a/state.json")).unwrap();
         assert!(state.contains("\"t3\"") && state.contains("next"), "flags {side}: select's decision landed: {state}");
         assert!(dir.join("plan/doc.json").exists(), "flags {side}: demo");

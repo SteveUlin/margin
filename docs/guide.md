@@ -304,6 +304,7 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
 | `margin add A PARENT\|- TYPE ID [text…] [k=v…]` | insert; every bare word is text; `--before X`/`--after X` |
 | `margin set A ID FIELD VALUE` or `A ID k=v…` | fields, typed by the schema (text stays text) |
 | `margin rm A ID` | remove (decisions on it show as orphaned) |
+| `margin rm A [--yes]` | remove a whole artifact: a preview without `--yes`; with it, its feeds are unregistered and it moves to `.archive/` |
 | `margin move A ID --before X\|--after X\|--parent P` | reorder |
 | `margin title A "T"` | rename |
 | `margin patch A < ops.json` | alias of apply |

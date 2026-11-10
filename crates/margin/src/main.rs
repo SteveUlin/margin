@@ -50,6 +50,7 @@ content (Claude):
   margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]
   margin set <art> <id> <field> <value> | <field>=<value>... [--base-rev N]   typed by the schema
   margin rm <art> <id>          margin move <art> <id> --before X|--after X|--parent P
+  margin rm <art> [--yes]                              remove a whole artifact (to .archive/; without --yes: a preview)
   margin title <art> <title>                                        rename the artifact
   margin hints <art> [text...]                                      reminders at the pane's bottom (none: clear)
   margin purpose <art> [\"text\"]                                     the pane's one line of orientation (none: clear)
@@ -130,7 +131,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "schema", help: "margin schema [type] [--json]\n  the component types, their fields, types and allowed values (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  add one component under <parent> (- = top level); creates the artifact on first write\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
     Cmd { name: "set", help: "margin set <art> <id> <field> <value> [--base-rev N]\nmargin set <art> <id> <field>=<value>... [--base-rev N]\n  set fields; text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
-    Cmd { name: "rm", help: "margin rm <art> <id> [--base-rev N] [--json]\n  remove a component and its children\n", flags: &["--base-rev", "--json"], max_pos: Some(2) },
+    Cmd { name: "rm", help: "margin rm <art> <id> [--base-rev N] [--json]\n  remove a component and its children\nmargin rm <art> [--yes]\n  remove a whole artifact. Without --yes it prints what would go (title, rev, the feeds\n  registered on it, the panes showing it) and removes nothing. With --yes the artifact moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and its feeds are unregistered. Panes are left\n  open: margin close <art>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
     Cmd { name: "move", help: "margin move <art> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
     Cmd { name: "title", help: "margin title <art> <title> [--base-rev N]\n  rename the artifact (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
     Cmd { name: "hints", help: "margin hints <art> [text...] [--json]\n  the artifact's reminders: a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
@@ -300,7 +301,7 @@ struct Args {
 }
 
 const BOOL_FLAGS: &[&str] = &[
-    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run",
+    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes",
 ];
 
 impl Args {
@@ -691,7 +692,16 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             };
             patch(&st, art, ops, a)?;
         }
+        "rm" if a.pos.len() == 1 => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            let panes = host::pick(&cfg, None).find(&st, art).unwrap_or_default();
+            print!("{}", rm_artifact(&st, art, a.has("--yes"), &panes)?);
+        }
         "rm" => {
+            if a.has("--yes") {
+                return Err("--yes is for removing a whole artifact: margin rm <art> --yes".into());
+            }
             let st = store(a);
             patch(&st, a.pos(0, "artifact")?, vec![Op::Rm { id: a.pos(1, "id")?.into() }], a)?;
         }
@@ -1295,6 +1305,35 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// `margin rm <art>`: what would go, and with `yes` the removal. The store never deletes
+/// (`Store::archive`, as `margin gc`): the artifact's directory moves to `.archive/`, so a
+/// mistaken removal is one `mv` from undone. Its feeds are unregistered first, since a feed left
+/// registered would write the artifact back into being on its next run. Without `yes` nothing
+/// changes and the command fails, so a script can't take the preview for the removal.
+fn rm_artifact(st: &Store, art: &str, yes: bool, panes: &[String]) -> Result<String, String> {
+    let d = st.load(art)?;
+    let feeds: Vec<feed::Feed> = feed::Registry::load_strict(&st.dir())?.feeds.into_iter().filter(|f| f.artifact == art).collect();
+    let mut out = format!("{art}  \"{}\"  rev {}  updated {}\n", d.title, d.rev, d.updated);
+    out += &format!("  components: {}\n", d.ids().len());
+    out += &match feeds.len() {
+        0 => "  feeds: none\n".to_string(),
+        _ => format!("  feeds registered on it (unregistered with it): {}\n", feeds.iter().map(|f| format!("{} ({})", f.name, f.trigger.describe())).collect::<Vec<_>>().join(", ")),
+    };
+    out += &match panes.len() {
+        0 => "  panes showing it: none\n".to_string(),
+        _ => format!("  panes showing it (left open; margin close {art}): {}\n", panes.join(", ")),
+    };
+    if !yes {
+        eprint!("{out}");
+        return Err(format!("nothing removed: `margin rm {art} --yes` moves it to the project's .archive/ directory"));
+    }
+    for f in &feeds {
+        feed::edit_registry(st, |r| r.remove(&f.name))?;
+    }
+    let dest = st.archive(art)?;
+    Ok(format!("{out}removed {art}: archived as {}\n", dest.strip_prefix(st.dir()).unwrap_or(&dest).display()))
+}
+
 /// The note `feed add` prints when ids that were Claude's change hands: how many, and the first
 /// few (a table of 200 rows once printed 200 ids).
 fn owns_note(name: &str, taken: &[String]) -> String {
@@ -1734,6 +1773,39 @@ mod tests {
         let ids: Vec<String> = (0..14).map(|i| format!("pr-{i}")).collect();
         assert_eq!(owns_note("reviews", &ids), "note: feed reviews now owns 14 existing ids (pr-0, pr-1, pr-2, pr-3, pr-4, … 9 more): read-only for you from here");
         assert_eq!(owns_note("x", &ids[..1]), "note: feed x now owns 1 existing id (pr-0): read-only for you from here");
+    }
+
+    /// `margin rm <art>`: a preview and a refusal without --yes; with it the artifact is archived
+    /// (never deleted), its feeds unregistered, and a second one of the same name can follow.
+    #[test]
+    fn rm_of_an_artifact_previews_then_archives() {
+        let (st, f) = tmp_store("rmart");
+        go("add", &["scratch", "-", "todo", "t1", "one"], &f).unwrap();
+        go("title", &["scratch", "Scratch board"], &f).unwrap();
+        go("add", &["keep", "-", "todo", "t1", "stays"], &f).unwrap();
+        let fd = feed::Feed { name: "sc".into(), cmd: vec!["true".into()], trigger: feed::Trigger::Interval { every: 60.0 }, artifact: "scratch".into(), owns: "sc".into(), paused: true, cwd: "/".into(), min_gap: 1.0, timeout: 60.0, added: String::new() };
+        feed::edit_registry(&st, |r| r.add(fd, false)).unwrap();
+        let e = rm_artifact(&st, "scratch", false, &["pid 7".into()]).unwrap_err();
+        assert!(e.contains("nothing removed") && e.contains("margin rm scratch --yes"), "{e}");
+        assert!(st.exists("scratch") && st.claims("scratch").len() == 1, "the preview changes nothing");
+        assert!(go("rm", &["scratch"], &f).is_err() && st.exists("scratch"));
+        let out = rm_artifact(&st, "scratch", true, &["pid 7".into()]).unwrap();
+        for must in ["\"Scratch board\"", "rev 2", "sc (every 1m)", "pid 7", "removed scratch: archived as .archive/scratch-"] {
+            assert!(out.contains(must), "{must}: {out}");
+        }
+        assert!(!st.exists("scratch") && st.exists("keep") && st.claims("scratch").is_empty());
+        let kept: Vec<_> = std::fs::read_dir(st.dir().join(".archive")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert!(kept.len() == 1 && kept[0].join("doc.json").exists() && kept[0].join("history.jsonl").exists(), "archived whole: {kept:?}");
+        // the same name again on the same day gets its own place in the archive
+        go("add", &["scratch", "-", "todo", "t1", "again"], &f).unwrap();
+        go("rm", &["scratch", "--yes"], &f).unwrap();
+        assert_eq!(std::fs::read_dir(st.dir().join(".archive")).unwrap().count(), 2);
+        assert!(rm_artifact(&st, "scratch", true, &[]).unwrap_err().contains("no artifact"));
+        // a component removal is unchanged, and --yes isn't its flag
+        assert!(go("rm", &["keep", "t1", "--yes"], &f).is_err() && st.load("keep").unwrap().find("t1").is_some());
+        go("rm", &["keep", "t1"], &f).unwrap();
+        assert!(st.exists("keep") && st.load("keep").unwrap().find("t1").is_none());
+        let _ = std::fs::remove_dir_all(&st.home);
     }
 
     #[test]
