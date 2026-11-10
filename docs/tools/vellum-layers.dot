@@ -1,0 +1,17 @@
+digraph V {
+  bgcolor="#2d353b"; pad=0.3; nodesep=0.4; ranksep=0.55; fontname="DejaVu Sans"; fontcolor="#9da9a0"; fontsize=12;
+  node [shape=box style="rounded,filled" fillcolor="#343f44" color="#7a8478" fontcolor="#d3c6aa" fontname="DejaVu Sans" fontsize=12.5 penwidth=1.2 margin="0.18,0.08"];
+  edge [color="#859289" fontcolor="#9da9a0" fontname="DejaVu Sans" fontsize=10.5 arrowsize=0.7 penwidth=1.1];
+  rankdir=BT; ranksep=0.35;
+  term [label="term   raw mode · alt screen · capability probe (kitty a=q, DA1, mode 2026, cell pixels)" width=7];
+  input [label="input   keys (legacy + kitty keyboard) · SGR mouse · focus · paste · kitty replies from Zellij" width=7];
+  grid [label="grid   double-buffered cells · grapheme + width · styles · OSC 8 · damage diff · 2026-wrapped flush" width=7 fillcolor="#425047" color="#a7c080"];
+  img [label="images   kitty at cursor (t=f / chunked t=d), id = content hash · halfblock fallback"];
+  text [label="text   NFC · wrap by grapheme · ellipsis · styled spans" width=7];
+  layout [label="layout   rows / cols with fixed · min · flex · flow column anchored by component id" width=7];
+  comp [label="components   retained tree keyed by id · one-line + full form · focus chain · tokens" width=7 fillcolor="#425047" color="#a7c080"];
+  anim [label="animation   frame clock (idle = no writes) · eases · critically damped springs · fades"];
+  app [label="margin view   reconcile doc.json + state.json + view.json → tree" fillcolor="#3a515d" color="#7fbbb3"];
+  term -> grid [dir=back]; grid -> text [dir=back]; text -> layout [dir=back]; layout -> comp [dir=back]; comp -> app [dir=back];
+  input -> comp [label="events"]; term -> input; img -> grid; anim -> comp;
+}

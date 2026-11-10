@@ -1,0 +1,28 @@
+{
+  "items": [
+    {"key": "OPS-212", "lane": "now", "status": "doing", "owner": "sam",
+     "title": "Migrate the billing cron to the new scheduler", "note": "dry run passed",
+     "url": "https://example.com/issues/OPS-212"},
+    {"key": "OPS-207", "lane": "now", "status": "todo", "owner": "sam",
+     "title": "Write the rollback steps for the scheduler migration", "note": "",
+     "url": "https://example.com/issues/OPS-207"},
+    {"key": "OPS-198", "lane": "now", "status": "blocked", "owner": "sam",
+     "title": "Rotate the staging database credentials", "note": "needs the vault role",
+     "url": "https://example.com/issues/OPS-198"},
+    {"key": "OPS-215", "lane": "next", "status": "todo", "owner": "sam",
+     "title": "Alert when a queue stays above 10k for 15 minutes", "note": "",
+     "url": "https://example.com/issues/OPS-215"},
+    {"key": "OPS-220", "lane": "next", "status": "todo", "owner": "lena",
+     "title": "Pair on the capacity plan for Q1", "note": "",
+     "url": "https://example.com/issues/OPS-220"},
+    {"key": "OPS-190", "lane": "waiting", "owner": "sam", "waiting_on": "priya", "why": "review",
+     "since": "2026-11-08T15:20:00Z",
+     "title": "Retry budget for the ingest client",
+     "detail": "The PR is up; priya asked for a load test before approving, and the test results are attached to the issue.",
+     "url": "https://example.com/issues/OPS-190"},
+    {"key": "OPS-185", "lane": "waiting", "owner": "sam", "waiting_on": "infra", "why": "access",
+     "since": "2026-11-05T09:00:00Z",
+     "title": "Read access to the cost dashboards",
+     "detail": "", "url": "https://example.com/issues/OPS-185"}
+  ]
+}

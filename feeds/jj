@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# margin feed: the current jj repo's recent changes as a ledger.
+#
+#   margin feed add jj --watch .jj/repo/op_heads/heads --artifact changes -- /path/to/margin/feeds/jj
+#
+# Prints one line: the whole `jj` section (rows `jj-c-<change>`, plus a `jj-wc` section listing the
+# working copy's files), which margin applies as a replace of the component with id "jj". The
+# daemon reruns it whenever jj records an operation (op_heads changes).
+#
+# Reads with --ignore-working-copy, so the feed itself never snapshots the working copy and never
+# records an operation: a feed that wrote ops would retrigger its own watch forever. The cost is
+# that unsnapshotted edits show up at the next jj command anyone runs, which the section note says.
+#
+# Env: JJ_FEED_REVS (revset, default: the last 8 ancestors of @, without the root), JJ_FEED_PREFIX (default "jj").
+set -euo pipefail
+P=${JJ_FEED_PREFIX:-jj}
+REVS=${JJ_FEED_REVS:-'ancestors(@, 8) ~ root()'}
+root=$(jj root --ignore-working-copy)
+J=(jj --ignore-working-copy --no-pager --color never)
+
+# one TSV line per change; descriptions can hold tabs only in theory, so they go last
+T='change_id.shortest(4) ++ "\t" ++ current_working_copy ++ "\t" ++ empty ++ "\t" ++ conflict ++ "\t"
+  ++ committer.timestamp().utc().format("%Y-%m-%dT%H:%M:%SZ") ++ "\t" ++ self.diff().stat().total_added()
+  ++ "\t" ++ self.diff().stat().total_removed() ++ "\t" ++ self.diff().stat().files().len() ++ "\t"
+  ++ description.first_line() ++ "\n"'
+log=$("${J[@]}" log --no-graph -r "$REVS" -T "$T")
+
+# the working copy's files: one per line, "path<TAB>added<TAB>removed"
+F='f.path().display() ++ "\t" ++ f.lines_added() ++ "\t" ++ f.lines_removed() ++ "\n"'
+files=$("${J[@]}" log --no-graph -r @ -T "self.diff().stat().files().map(|f| $F).join(\"\")" 2>/dev/null || true)
+
+jq -cn --arg p "$P" --arg root "$root" --arg log "$log" --arg files "$files" '
+  def rows: split("\n") | map(select(length > 0) | split("\t"));
+  def stat($a; $d; $n): (if ($n|tonumber) == 0 then "" else "+\($a) −\($d) · \($n) file\(if $n == "1" then "" else "s" end)" end);
+  ($log | rows) as $cs
+  | ($files | rows) as $fs
+  | ($cs | map(select(.[1] == "true")) | first) as $wc
+  | {
+      type: "section", id: $p,
+      title: "jj · \($root | split("/") | last)",
+      note: (if $wc then "@ \(stat($wc[5]; $wc[6]; $wc[7]) | if . == "" then "clean" else . end) · as of last jj op" else "" end),
+      children: (
+        [ $cs[] | {
+            type: "row", id: "\($p)-c-\(.[0])",
+            glyph: (if .[3] == "true" then "fail" elif .[1] == "true" then "wc" else "commit" end),
+            tag: .[0], tag_tone: (if .[1] == "true" then "aqua" else "grey" end),
+            text: (if .[8] == "" then (if .[2] == "true" then "(empty)" else "(no description)" end) else .[8] end),
+            text_tone: (if .[8] == "" then "grey" else "fg" end),
+            aside: stat(.[5]; .[6]; .[7]),
+            since: .[4]
+          } ]
+        + (if ($fs | length) > 0 then [{
+            type: "section", id: "\($p)-wc", title: "working copy", note: "\($fs | length) file\(if ($fs | length) == 1 then "" else "s" end)",
+            children: [ $fs | to_entries[] | {
+              type: "row", id: "\($p)-f\(.key)", glyph: "file",
+              text: .value[0], aside: "+\(.value[1]) −\(.value[2])", aside_tone: "grey"
+            } ]
+          }] else [] end)
+      )
+    }'

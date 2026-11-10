@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# margin feed: a ledger of the current Claude Code session's turns, one folded section per turn.
+#
+#   margin feed add turns --stream --artifact live --owns tn -- /path/to/margin/feeds/turns [SESSION]
+#
+# A turn starts at a prompt (typed, a slash command, or a delivered notification) and ends at the
+# assistant's `end_turn`. Each section's header reads `#n  14:02  @kxyz  <prompt's first line>` with a note
+# `4m12s · 9 tools · 3 files` (the prompt comes last, so a narrow pane cuts it first); unfolded it lists the files the turn wrote (Edit, Write,
+# MultiEdit, NotebookEdit) and the tools it used by count. The latest turn stays unfolded.
+#
+# jj: when the session's directory is a jj repo, `@kxyz` is the working-copy change at the turn's
+# end: the newest jj operation at or before that moment, read with `--at-op` (cached per operation,
+# never snapshots, so the feed records no operations of its own).
+#
+# Privacy: the prompt shows as its first line cut to TURNS_CHARS (default 18); tool inputs never
+# show beyond file paths.
+#
+# SESSION: a session id or transcript path; default the newest transcript for this directory
+# (feeds/lib/session.sh). Env: TURNS_EVERY (s, default 2), TURNS_MAX (turns, default 12),
+# TURNS_PREFIX (default tn), TURNS_ONCE=1 prints once and exits (tests).
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$HERE/lib/session.sh"
+EVERY=${TURNS_EVERY:-2}
+MAX=${TURNS_MAX:-12}
+P=${TURNS_PREFIX:-tn}
+CHARS=${TURNS_CHARS:-18}
+prev="" last_sig=""
+declare -A JJAT ISJJ
+TMPC=$(mktemp)
+trap 'rm -f "$TMPC"' EXIT
+
+# the turns as JSON lines: {n, at, end, tools, by_tool, files, prompt, cwd}
+facts() {
+  jq -cRn -L "$HERE/lib" --argjson max "$MAX" --argjson chars "$CHARS" '
+    include "transcript";
+    def content: .message.content | if type == "array" then . else [] end;
+    reduce entries[] as $x ({t: [], cwd: ""};
+      (if $x.cwd then .cwd = $x.cwd else . end)
+      | (if (.t | length) > 0 and $x.timestamp then .t[-1].last = $x.timestamp else . end)
+      | if ($x | starts_turn) then
+          .t += [{n: ((.t | length) + 1), at: $x.timestamp, end: null, tools: 0, by_tool: {}, files: {},
+                  prompt: ($x.message.content | if type == "string" then . else (map(select(.type == "text") | .text) | join(" ")) end | short($chars))}]
+        elif (.t | length) == 0 then .
+        elif $x.type == "assistant" then
+          reduce ($x | content[] | select(.type == "tool_use")) as $u (.;
+            .t[-1].tools += 1
+            | .t[-1].by_tool[$u.name] += 1
+            | (($u.input.file_path // $u.input.notebook_path // null)) as $fp
+            | if $fp and ($u.name | test("^(Edit|Write|MultiEdit|NotebookEdit)$")) then .t[-1].files[$fp] += 1 else . end)
+          | if ($x | ends_turn) then .t[-1].end = $x.timestamp else . end
+        else . end)
+    | .cwd as $cwd | .t[-$max:][] | . + {cwd: $cwd}'
+}
+
+# the working-copy change in $1 (a repo dir) at the newest operation no later than epoch $2, in
+# REPLY (not printed: a $(…) subshell would drop the caches)
+jj_at() {
+  local dir=$1 when=$2 op
+  REPLY=""
+  [[ -d "$dir" ]] || return 0
+  [[ -n "${JJOPS[$dir]+x}" ]] || JJOPS[$dir]=$(cd "$dir" && jj --ignore-working-copy --no-pager --color never op log --no-graph \
+      -T 'self.id().short(12) ++ "\t" ++ self.time().end().format("%s") ++ "\n"' --limit 400 2>/dev/null)
+  op=$(awk -F'\t' -v w="$when" '$2 <= w { print $1; exit }' <<<"${JJOPS[$dir]}")
+  [[ -n "$op" ]] || return 0
+  if [[ -z "${JJAT[$op]+x}" ]]; then
+    JJAT[$op]=$(cd "$dir" && jj --ignore-working-copy --no-pager --color never --at-op "$op" log --no-graph -r @ \
+      -T 'change_id.shortest(4)' 2>/dev/null)
+  fi
+  REPLY=${JJAT[$op]}
+}
+
+render() {
+  local f=$1 facts cwd now ends=() e changes=()
+  declare -gA JJOPS=()   # fresh each render: new operations land between renders
+  now=$(date +%s)
+  facts=$(facts < "$f")
+  # a handful of processes per render, not a few per turn: the turns' end times in one jq call, the
+  # repo check cached per directory, the operation log once, `--at-op` once per operation
+  cwd=$(jq -rn '[inputs | .cwd] | last // ""' <<<"$facts")
+  mapfile -t ends < <(jq -r --argjson now "$now" '(.end // empty | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) // $now' <<<"$facts")
+  if [[ -n "$cwd" ]]; then
+    [[ -n "${ISJJ[$cwd]+x}" ]] || { jj --ignore-working-copy root -R "$cwd" >/dev/null 2>&1 && ISJJ[$cwd]=1 || ISJJ[$cwd]=0; }
+  fi
+  for e in "${ends[@]}"; do
+    if [[ -n "$cwd" && "${ISJJ[$cwd]}" == 1 ]]; then jj_at "$cwd" "$e"; changes+=("$REPLY"); else changes+=(""); fi
+  done
+  jq -cn --args '$ARGS.positional' "${changes[@]}" > "$TMPC"
+  jq -cs --slurpfile ch "$TMPC" --arg p "$P" --arg sid "$(basename "$f" .jsonl)" --argjson now "$now" '
+    def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0;
+    def dur: if . >= 3600 then "\(. / 3600 | floor)h\(. % 3600 / 60 | floor)m"
+             elif . >= 60 then "\(. / 60 | floor)m\(. % 60 | floor)s" else "\(. | floor)s" end;
+    def plural($n; $w): "\($n) \($w)\(if $n == 1 then "" else "s" end)";
+    # a turn with no end_turn, quiet for 10 min, was interrupted or the session stopped
+    [to_entries[] | .value + {change: ($ch[0][.key] // "")}]
+    | map(select(. != null) | if .end == null and ($now - ((.last // .at) | epoch)) > 600 then . + {end: .last, stopped: true} else . end) as $ts
+    | {
+        type: "section", id: $p,
+        title: "turns · \($sid[0:8])",
+        note: (if ($ts | length) == 0 then "no turns yet"
+               else "\(plural($ts[-1].n; "turn"))" + (if $ts[-1].end == null then " · #\($ts[-1].n) running" else "" end) end),
+        children: [ $ts | to_entries[] | .key as $k | .value | . as $t
+          | (.files | keys) as $fs
+          | {
+              type: "section", id: "\($p)-\(.n)",
+              title: ([ "#\(.n)", (.at | epoch | strflocaltime("%H:%M")), (select(.change != "") | "@\($t.change)"), (if .prompt == "" then "(no text)" else .prompt end) ] | join("  ")),
+              note: ([ ((if .end then (.end | epoch) else $now end) - (.at | epoch) | dur | if $t.stopped then "stopped after \(.)" elif $t.end then . else "\(.) so far" end),
+                       (select(.tools > 0) | plural($t.tools; "tool")),
+                       (select(($fs | length) > 0) | plural($fs | length; "file")) ] | join(" · ")),
+              tone: (if .end == null then "aqua" else null end),
+              folded: ($k != ($ts | length) - 1),
+              children: (
+                [ $fs[] as $fp | {type: "row", id: "\($p)-\($t.n)-f\($fs | index($fp))", glyph: "file",
+                    text: ($fp | sub("^\($t.cwd)/"; "") | sub("^\(env.HOME)/"; "~/")), aside: "×\($t.files[$fp])", aside_tone: "grey"} ]
+                + (if .tools > 0 then [{type: "row", id: "\($p)-\($t.n)-tools", glyph: (if $t.end then "done" else "spin" end),
+                    text: (.by_tool | to_entries | sort_by(-.value) | map("\(.key | sub("^mcp__[^_]+__"; "")) \(.value)") | join(" · ")),
+                    text_tone: "grey"}] else [] end)
+                + (if (.tools == 0 and ($fs | length) == 0) then [{type: "text", id: "\($p)-\($t.n)-none", style: "dim", text: "no tool calls"}] else [] end))
+            } | with_entries(select(.value != null)) ]
+      }' <<<"$facts"
+}
+
+while :; do
+  f=$(session_file "${1:-${TURNS_SESSION:-}}")
+  if [[ -z "$f" ]]; then
+    out=$(jq -cn --arg p "$P" '{type: "section", id: $p, title: "turns", note: "no transcript for this directory", children: []}')
+  else
+    s="$f:$(sig "$f")"
+    if [[ "$s" != "$last_sig" ]]; then
+      last_sig=$s
+      out=$(render "$f") || out=""
+    fi
+  fi
+  if [[ -n "$out" && "$out" != "$prev" ]]; then
+    printf '%s\n' "$out"
+    prev=$out
+  fi
+  [[ -n "${TURNS_ONCE:-}" ]] && exit 0
+  sleep "$EVERY"
+done

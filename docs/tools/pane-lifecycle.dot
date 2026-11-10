@@ -1,0 +1,18 @@
+digraph L {
+  bgcolor="#2d353b"; pad=0.3; nodesep=0.4; ranksep=0.55; fontname="DejaVu Sans"; fontcolor="#9da9a0"; fontsize=12;
+  node [shape=box style="rounded,filled" fillcolor="#343f44" color="#7a8478" fontcolor="#d3c6aa" fontname="DejaVu Sans" fontsize=12.5 penwidth=1.2 margin="0.18,0.08"];
+  edge [color="#859289" fontcolor="#9da9a0" fontname="DejaVu Sans" fontsize=10.5 arrowsize=0.7 penwidth=1.1];
+  rankdir=LR;
+  none [label="no pane"];
+  find [label="find\nlist-panes -j: title == margin:<id>\nand tab_id == home tab"];
+  live [label="live\npane id cached in view.json" fillcolor="#425047" color="#a7c080"];
+  gone [label="gone\nuser closed it / tab closed"];
+  none -> find [label="margin open plan"];
+  find -> live [label="found: reuse\n(renderer reloads by itself)"];
+  find -> live [label="missing: new-pane --tab-id T\n--no-focus [--floating --pinned]"];
+  live -> live [label="margin put/patch:\nno pane calls at all"];
+  live -> gone [label="pane closed"];
+  gone -> find [label="next margin open"];
+  homeless [label="home tab gone\nask: which tab?" fillcolor="#514045" color="#e67e80"];
+  find -> homeless [label="tab_id missing"];
+}

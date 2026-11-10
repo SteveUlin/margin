@@ -1,0 +1,16 @@
+digraph S {
+  bgcolor="#2d353b"; pad=0.3; nodesep=0.4; ranksep=0.55; fontname="DejaVu Sans"; fontcolor="#9da9a0"; fontsize=12;
+  node [shape=box style="rounded,filled" fillcolor="#343f44" color="#7a8478" fontcolor="#d3c6aa" fontname="DejaVu Sans" fontsize=12.5 penwidth=1.2 margin="0.18,0.08"];
+  edge [color="#859289" fontcolor="#9da9a0" fontname="DejaVu Sans" fontsize=10.5 arrowsize=0.7 penwidth=1.1];
+  rankdir=LR;
+  t [label="pane shows\nmg:todo/t3\n(underlined token)"];
+  z [label="Zellij selects word\non double-click"];
+  c [label="copy_command\nmargin select"];
+  m [label="match?" shape=diamond style=filled fillcolor="#4d4c43" color="#dbbc7f"];
+  act [label="act on artifact\ntoggle t3, append event" fillcolor="#425047" color="#a7c080"];
+  url [label="open URL\nopener (ssh) / xdg-open"];
+  clip [label="plain text\nwl-copy, else OSC 52\nto client ttys"];
+  r [label="renderer redraws\n(animated tick)"];
+  t -> z [label="ran: 0.45.1"]; z -> c [label="stdin: 'mg:todo/3'"]; c -> m;
+  m -> act [label="mg:*"]; m -> url [label="https?://"]; m -> clip [label="else"]; act -> r;
+}

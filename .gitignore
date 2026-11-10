@@ -1,0 +1,29 @@
+# build output
+/target
+result
+result-*
+
+# nix / direnv
+.direnv/
+.gcroots/
+.envrc.local
+
+# python (docs/tools, tests/e2e)
+__pycache__/
+*.pyc
+
+# machine-local Claude Code settings (absolute paths); hooks/settings.example.json is the template
+.claude/
+
+# scratch files
+strace.txt
+*.log
+*.tmp
+
+# editor and OS junk
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/

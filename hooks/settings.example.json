@@ -1,0 +1,95 @@
+{
+  "_comment": "Example only, not installed. Merge into a project's .claude/settings.json (or ~/.claude/settings.json) to hand your margin actions to Claude. UserPromptSubmit delivers them at the start of the next turn; PostToolUse delivers them mid-turn after a tool call (research.md \u00a77: additionalContext reaches the model on its next call). Both mark events delivered per session, so nothing arrives twice. Both print nothing when nothing happened. The second Stop hook, `margin hook rewake`, waits in the background (asyncRewake) for you to finish in the pane while Claude is idle, then exits 2 with those same lines on stderr, which wakes Claude.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook prompt",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook post-tool",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook pre-tool",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook stop",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook rewake",
+            "asyncRewake": true,
+            "timeout": 3600
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook start",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook permission",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "margin hook notify",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

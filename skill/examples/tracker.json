@@ -1,0 +1,25 @@
+{
+  "title": "Work",
+  "purpose": "What I am doing, what comes next, and what waits on someone else",
+  "hints": ["space  mark a step next or skipped", "d  detail of the focused row", "Waiting: the badge is who it waits on"],
+  "blocks": [
+    {"type": "section", "id": "wk-now", "title": "Now", "children": [
+      {"type": "todo", "id": "wk-OPS-212", "text": "**OPS-212** Migrate the billing cron to the new scheduler @[sam]", "status": "doing", "note": "dry run passed"},
+      {"type": "todo", "id": "wk-OPS-207", "text": "**OPS-207** Write the rollback steps for the scheduler migration @[sam]", "status": "todo", "note": ""},
+      {"type": "todo", "id": "wk-OPS-198", "text": "**OPS-198** Rotate the staging database credentials @[sam]", "status": "blocked", "note": "needs the vault role"}
+    ]},
+    {"type": "section", "id": "wk-next", "title": "Next", "children": [
+      {"type": "todo", "id": "wk-OPS-215", "text": "**OPS-215** Alert when a queue stays above 10k for 15 minutes @[sam]", "status": "todo", "note": ""},
+      {"type": "todo", "id": "wk-OPS-220", "text": "**OPS-220** Pair on the capacity plan for Q1 @[lena]", "status": "todo", "note": ""}
+    ]},
+    {"type": "section", "id": "wk-waiting", "title": "Waiting", "note": "on someone else", "children": [
+      {"type": "row", "id": "wk-OPS-190", "tag": "OPS-190", "who": "priya", "text": "Retry budget for the ingest client", "aside": "review", "since": "2026-11-08T15:20:00Z", "detail": "The PR is up; priya asked for a load test before approving, and the test results are attached to the issue.", "target": "https://example.com/issues/OPS-190"},
+      {"type": "row", "id": "wk-OPS-185", "tag": "OPS-185", "who": "infra", "text": "Read access to the cost dashboards", "aside": "access", "since": "2026-11-05T09:00:00Z", "detail": "", "target": "https://example.com/issues/OPS-185"}
+    ]},
+    {"type": "section", "id": "decided", "title": "Decided", "folded": true, "children": [
+      {"type": "decided", "id": "D1", "text": "Scheduler migration goes service by service, billing first", "by": "you", "at": "2026-11-06T10:00:00Z"},
+      {"type": "decided", "id": "D2", "text": "No new alerts until the queue dashboards exist", "by": "claude", "at": "2026-11-09T14:30:00Z"}
+    ]},
+    {"type": "feed", "id": "wk-feed", "name": "tracker", "state": "not registered"}
+  ]
+}

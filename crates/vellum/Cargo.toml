@@ -1,0 +1,13 @@
+[package]
+name = "vellum"
+description = "margin's terminal toolkit: raw terminal, damage-tracked cell grid, retained keyed tree, animation, kitty images"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+png = "0.17"

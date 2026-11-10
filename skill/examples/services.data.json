@@ -1,0 +1,19 @@
+[
+  {"name": "ingest-worker", "owner": "ada", "state": "failed", "last_run": "2026-11-10T17:40:00Z",
+   "url": "https://example.com/services/ingest-worker",
+   "error": "exit 1: connection refused (db:5432) after 3 retries",
+   "runs": ["success", "success", "success", "success", "success", "success", "success", "success", "failure", "failure", "failure", "failure"]},
+  {"name": "nightly-backup", "owner": "bo", "state": "ok", "last_run": "2026-11-10T03:00:00Z",
+   "url": "https://example.com/services/nightly-backup", "error": "",
+   "runs": ["success", "success", "success", "success", "skipped", "success", "success", "success", "success", "success", "success", "success"]},
+  {"name": "report mailer", "owner": "ada", "state": "failed", "last_run": "2026-11-10T08:15:00Z",
+   "url": "https://example.com/services/report-mailer",
+   "error": "exit 2: template `weekly.html` not found",
+   "runs": ["success", "failure", "success", "success", null, "success", "success", "success", "success", "success", "success", "failure"]},
+  {"name": "index-rebuild", "owner": "chen", "state": "running", "last_run": "2026-11-10T18:30:00Z",
+   "url": "https://example.com/services/index-rebuild", "error": "",
+   "runs": ["success", "success", "success", "success", "success", "success", "success", "success", "success", "success", "success", "in_progress"]},
+  {"name": "cert-renew", "owner": "bo", "state": "inactive", "last_run": "2026-10-28T00:00:00Z",
+   "url": "https://example.com/services/cert-renew", "error": "",
+   "runs": ["success", "success", "success"]}
+]

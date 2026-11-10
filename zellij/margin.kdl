@@ -1,0 +1,18 @@
+// `margin session` starts Zellij with this layout plus session-only options:
+//   copy_command "margin select", copy_on_select true, mouse_click_through true
+// Nothing here touches your own config.kdl; your theme and keybindings still load.
+// One tab with a shell for Claude Code. Claude opens margin panes beside it with `margin open`.
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="claude" focus=true {
+        pane
+    }
+}

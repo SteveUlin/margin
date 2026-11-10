@@ -1,0 +1,1512 @@
+//! margin: live artifacts beside the chat. One binary, four roles: the CLI Claude calls through
+//! its Bash tool, the renderer in a pane (`margin view`), the selection dispatcher Zellij pipes
+//! copies into (`margin select`), and the feed supervisor (`margin daemon`).
+
+mod agents;
+mod app;
+mod attention;
+mod components;
+mod config;
+mod daemon;
+mod demo;
+mod detail;
+mod diffblock;
+mod doc;
+mod example;
+mod feed;
+mod graph;
+mod help;
+mod hook;
+mod host;
+mod init;
+mod link;
+mod mdoc;
+mod recap;
+mod rewake;
+mod scene;
+mod select;
+mod store;
+mod tabs;
+mod tail;
+mod theme;
+mod toast;
+mod util;
+mod wake;
+mod who;
+mod zj;
+
+use config::Config;
+use doc::{Block, Doc, Op};
+use serde_json::{json, Value};
+use std::io::Read;
+use store::Store;
+
+const HELP: &str = "margin: live artifacts beside the chat
+
+content (Claude):
+  margin apply <art> [--base-rev N] [--json] < input   the one write: ops, components (upsert), or a whole doc
+  margin schema [type] [--json]                       component types, fields, values
+  margin put <art> [--title T] [--kind K] < doc.json   alias of apply (whole doc)
+  margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]
+  margin set <art> <id> <field> <value> | <field>=<value>... [--base-rev N]   typed by the schema
+  margin rm <art> <id>          margin move <art> <id> --before X|--after X|--parent P
+  margin title <art> <title>                                        rename the artifact
+  margin hints <art> [text...]                                      reminders at the pane's bottom (none: clear)
+  margin purpose <art> [\"text\"]                                     the pane's one line of orientation (none: clear)
+  margin patch <art> < ops.json                        alias of apply
+  margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W]
+  margin propose <art> <id> <verb> [value] [--why W]                 offer a change to one of his decisions
+  margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]
+  margin diff <art> <id> --rev R [--to R2] <file> [--parent P]      jj revisions
+  margin image <art> <id> <png> [--alt A] [--parent P] [--rows N]
+  margin doc <art> <id> [--title T] < notes.md                      long-form markdown as a section
+  margin toast <art> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
+  margin tail <art> <id> [--title T] -- <command...>                a command's output, live
+  margin show <art> [--json]    margin ls [--json]    margin gc
+
+return channel:
+  margin events [--unread --session S] [--artifact A] [--since N] [--kind K] [--all] [--json]
+  margin wait <art>.<id> [--timeout 10m]                          block until sulin decides (exit 2 on timeout)
+  margin hook start|prompt|pre-tool|post-tool|stop|permission|notify              Claude Code hook (stdin JSON)
+  margin hook rewake [--timeout 58m]                              the Stop hook that waits: exit 2 wakes an idle Claude
+
+feeds (scripts that keep an artifact current without Claude):
+  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
+                  [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
+  margin feed ls | rm <name> | pause <name> | resume <name> | logs <name> [--follow] [--lines N]
+  margin feed run <name>        once, in the foreground (stream: until it exits or ctrl-c)
+  margin daemon                 the supervisor (the CLI starts it on demand; units/ has a systemd unit)
+
+panes and screen (host: zellij or plain; config key host):
+  margin open <art> [--float|--split|--stacked] [--tab-id N] [--session S]   anchored to Claude's tab, no focus change
+                                --stacked: onto the tab's margin pane (focus returns where it was)
+                                plain host: prints the `margin view` command to run in a terminal
+  margin close <art>            margin panes <art>   (where it's showing)
+  margin link [<art>]           the pane this Claude session keeps (margin unlink to drop it)
+  margin view <art> [<art>...]  the live renderer (what the pane runs); more artifacts are tabs (gt / gT)
+  margin tab <art> [add|rm|show <tab-art>] [--pane P]   the tabs of the pane showing <art>
+  margin render <art> [--width W] [--height H] [--ansi] [--focused] [--at SECS]
+  margin select [TEXT]          Zellij copy_command target (stdin if no TEXT)
+  margin session [NAME]         start a Zellij session wired for margin (copy_command)
+  margin demo [live [--speed X]]
+
+setup and reference:
+  margin init [--user-name NAME] [--claude-dir DIR] [--dry-run]   name, skill and hooks: one command per machine
+  margin skill                  the skill Claude loads, rendered for this machine
+  margin example [<name> [--feed|--data]]   complete dashboards to copy from: artifact, feed script, sample data
+  margin help [<command>|<topic>]
+
+global: --home DIR  --project NAME  --by you|claude|NAME      margin <command> --help for each
+";
+
+/// One subcommand: its help, the flags it takes and how many positionals. Every flag outside
+/// `flags` (and the global ones) is refused before the command runs, so a typo or a `--help`
+/// never starts a session, a daemon or a write (2026-11-06: `margin session --help` started
+/// Zellij, `daemon --help` a daemon, `select --help` copied an empty selection).
+struct Cmd {
+    name: &'static str,
+    help: &'static str,
+    flags: &'static [&'static str],
+    /// most positionals it takes (None: free text, like `select TEXT` or `ask`'s options)
+    max_pos: Option<usize>,
+}
+
+/// Flags every command takes: the store (`--home DIR`, `--project NAME`) and who a write is
+/// logged as (`--by`).
+const GLOBAL_FLAGS: &[&str] = &["--home", "--project", "--by"];
+
+const GLOBAL_HELP: &str = "
+global flags:
+  --home DIR       the store root (default $MARGIN_HOME, else ~/.local/state/margin)
+  --project NAME   the project inside it (default $MARGIN_PROJECT, else from the working directory)
+  --by WHO         who a write is logged as: you, claude, or a name (default: claude when run
+                   from Claude Code, i.e. $CLAUDECODE or $CLAUDE_CODE_ENTRYPOINT is set; else you)
+";
+
+const CMDS: &[Cmd] = &[
+    Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  the one write: stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (create or replace)\n  several lines are one write; creates the artifact on first write\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n", flags: &["--base-rev", "--json", "--title", "--kind"], max_pos: Some(1) },
+    Cmd { name: "put", help: "margin put <art> [--title T] [--kind K] [--base-rev N] < doc.json\n  alias of apply that reads a bare array as the block list: create or replace a whole artifact\n", flags: &["--title", "--kind", "--base-rev", "--json"], max_pos: Some(1) },
+    Cmd { name: "schema", help: "margin schema [type] [--json]\n  the component types, their fields, types and allowed values (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
+    Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  add one component under <parent> (- = top level); creates the artifact on first write\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
+    Cmd { name: "set", help: "margin set <art> <id> <field> <value> [--base-rev N]\nmargin set <art> <id> <field>=<value>... [--base-rev N]\n  set fields; text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
+    Cmd { name: "rm", help: "margin rm <art> <id> [--base-rev N] [--json]\n  remove a component and its children\n", flags: &["--base-rev", "--json"], max_pos: Some(2) },
+    Cmd { name: "move", help: "margin move <art> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
+    Cmd { name: "title", help: "margin title <art> <title> [--base-rev N]\n  rename the artifact (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
+    Cmd { name: "hints", help: "margin hints <art> [text...] [--json]\n  the artifact's reminders: a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
+    Cmd { name: "purpose", help: "margin purpose <art> [\"text\"] [--json]\n  what the pane is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
+    Cmd { name: "patch", help: "margin patch <art> [--base-rev N] < ops.json\n  alias of margin apply (one op, an op array, or components)\n", flags: &["--base-rev", "--json"], max_pos: Some(1) },
+    Cmd { name: "ask", help: "margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  Creates the artifact on first write; an id that exists is refused (use set)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
+    Cmd { name: "propose", help: "margin propose <art> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
+    Cmd { name: "diff", help: "margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <art> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
+    Cmd { name: "image", help: "margin image <art> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
+    Cmd { name: "show", help: "margin show <art> [--json]\n  what the person sees: content merged with their decisions\n", flags: &["--json"], max_pos: Some(1) },
+    Cmd { name: "ls", help: "margin ls [--json]\n  this project's artifacts (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
+    Cmd { name: "gc", help: "margin gc [--days N]\n  archive artifacts untouched for N days (default: config archive_days)\n", flags: &["--days"], max_pos: Some(0) },
+    Cmd { name: "events", help: "margin events [--unread [--session S]] [--artifact A] [--since N] [--kind K] [--all] [--json]\n  sulin's decisions, in local time (with the date when not today); --all adds everyone's\n  events and the passive kinds (view, seen, fold...), --kind K lists one kind\n", flags: &["--unread", "--session", "--artifact", "--since", "--kind", "--all", "--json"], max_pos: Some(0) },
+    Cmd { name: "wait", help: "margin wait <art>.<id> [--timeout 10m]\n  block until sulin decides and print the decision; exit 2 on timeout\n", flags: &["--timeout"], max_pos: Some(1) },
+    Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
+    Cmd { name: "doc", help: "margin doc <art> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
+    Cmd { name: "tail", help: "margin tail <art> <id> [--title T] [--parent P] [--lines N] -- <command...>\n  run a command with its output live in the pane (and through to you): a header with a spinner\n  and the time, the last N lines (default 6), errors red; it folds to its outcome when the command\n  ends, and a toast says how it went. Exits with the command's code.\n", flags: &["--title", "--parent", "--lines"], max_pos: Some(2) },
+    Cmd { name: "toast", help: "margin toast <art> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
+    Cmd { name: "stop", help: "margin stop [<art>]\n  the stop signal: Claude's tool calls in this project are refused until sulin next sends a\n  message (the pane's S key does the same)\n", flags: &[], max_pos: Some(1) },
+    Cmd { name: "link", help: "margin link [<art>] [--session S]\n  the artifact this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
+    Cmd { name: "unlink", help: "margin unlink [--session S]\n  drop this session's link\n", flags: &["--session"], max_pos: Some(0) },
+    Cmd { name: "open", help: "margin open <art> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the artifact in a pane anchored to Claude's tab, without moving focus\n  --tabs B,C: with those artifacts as tabs beside it (added to the pane if it is already open)\n  --stacked: onto the tab's margin pane (focus returns where it was)\n  an artifact already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
+    Cmd { name: "tab", help: "margin tab <art> [--pane P] [--session S]\n  the tabs of the pane whose own artifact is <art>\nmargin tab <art> add|rm|show <tab-art> [--pane P] [--session S]\n  add an artifact as a tab, remove one, or bring one on screen. The pane follows without a\n  restart: the set lives in its view file. --pane names the pane (zj-12, tty) when it can't be\n  found by its title. In the pane: click a tab, gt / gT, or 3gt for the third\n", flags: &["--pane", "--session"], max_pos: Some(3) },
+    Cmd { name: "close", help: "margin close <art> [--session S]\n  close the panes showing it\n", flags: &["--session"], max_pos: Some(1) },
+    Cmd { name: "panes", help: "margin panes <art> [--session S]\n  where it's showing (pane ids, or pids under the plain host)\n", flags: &["--session"], max_pos: Some(1) },
+    Cmd { name: "view", help: "margin view <art> [<art>...]\n  the live renderer (what a margin pane runs). More artifacts show as tabs on the title line\n  (click, gt / gT, 3gt); with one artifact the pane shows the tabs its view file remembers\n", flags: &[], max_pos: None },
+    Cmd { name: "render", help: "margin render <art> [<art>...] [--tab ART] [--width W] [--height H] [--ansi] [--focused] [--at SECS] [--pane P] [--motion M] [--detail] [--focus ID]\n  one frame to stdout (text, or ANSI with --ansi); more artifacts draw the tab bar, --tab picks\n  the one on screen; --detail opens the detail panel, --focus puts the focus on a block\n", flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus"], max_pos: None },
+    Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
+    Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
+    Cmd { name: "daemon", help: "margin daemon\n  the feed supervisor, in the foreground (the CLI starts it on demand; units/ has a systemd unit)\n", flags: &[], max_pos: Some(0) },
+    Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  set up the demo plan artifact; `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
+    Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
+    Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
+    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data]\n  print one: the artifact (a whole document: margin example reviews | margin apply reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data"], max_pos: Some(1) },
+    Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
+];
+
+const FEED_HELP: &str = "feeds: scripts that keep an artifact current without Claude
+  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
+                  [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
+  margin feed ls
+  margin feed rm <name>
+  margin feed pause <name>          margin feed resume <name>
+  margin feed logs <name> [--follow] [--lines N]
+  margin feed run <name>            once, in the foreground (stream: until it exits or ctrl-c);
+                                    leaves the daemon's status alone
+";
+
+/// Flags each `feed` subcommand takes, and its most positionals.
+fn feed_spec(sub: &str) -> Option<(&'static [&'static str], Option<usize>)> {
+    Some(match sub {
+        "add" => (&["--every", "--watch", "--stream", "--artifact", "--owns", "--min-gap", "--timeout", "--replace"][..], None),
+        "ls" => (&[][..], Some(1)),
+        "rm" | "pause" | "resume" | "run" => (&[][..], Some(2)),
+        "logs" => (&["--follow", "--lines"][..], Some(2)),
+        _ => return None,
+    })
+}
+
+fn wants_help(v: &[String]) -> bool {
+    v.iter().any(|x| x == "-h" || x == "--help")
+}
+
+/// Refuse flags a command doesn't take and surplus positionals, before it acts.
+fn check_args(name: &str, a: &Args, flags: &[&str], max_pos: Option<usize>) -> Result<(), String> {
+    if let Some((f, _)) = a.flags.iter().find(|(f, _)| !flags.contains(&f.as_str()) && !GLOBAL_FLAGS.contains(&f.as_str())) {
+        return Err(format!("unknown flag {f}; margin {name} --help"));
+    }
+    if let Some(m) = max_pos {
+        if a.pos.len() > m {
+            return Err(format!("unexpected argument {:?}; margin {name} --help", a.pos[m]));
+        }
+    }
+    Ok(())
+}
+
+/// Who a write is logged as: `--by`, else claude inside Claude Code (its Bash tool sets
+/// CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), else the person (`who::HUMAN`). `you` (or the old
+/// `sulin`) is stored as `who::HUMAN`, so the pane and `margin show` treat it as theirs.
+fn author(a: &Args) -> Result<String, String> {
+    match a.get("--by") {
+        Some("you") | Some("sulin") => Ok(crate::who::HUMAN.into()),
+        Some(n) if n.starts_with("feed:") => Err("--by feed:… is reserved for feeds".into()),
+        Some(n) if util::valid_id(n) => Ok(n.into()),
+        Some(n) => Err(format!("bad --by {n:?}: you, claude, or a name (letters, digits, - and _)")),
+        None if a.has("--by") => Err("--by needs a value: you, claude, or a name".into()),
+        None => Ok(if std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some() { "claude" } else { crate::who::HUMAN }.into()),
+    }
+}
+
+struct Args {
+    pos: Vec<String>,
+    flags: Vec<(String, Option<String>)>,
+}
+
+const BOOL_FLAGS: &[&str] = &[
+    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run",
+];
+
+impl Args {
+    fn parse(v: &[String]) -> Args {
+        let mut pos = Vec::new();
+        let mut flags = Vec::new();
+        let mut i = 0;
+        while i < v.len() {
+            let a = &v[i];
+            if a.starts_with("--") && a.len() > 2 {
+                if let Some((k, val)) = a.split_once('=') {
+                    flags.push((k.to_string(), Some(val.to_string())));
+                } else if i + 1 >= v.len() || (BOOL_FLAGS.contains(&a.as_str()) && !(a == "--json" && v[i + 1].starts_with('{'))) {
+                    // `--json` is a switch on show/events but carries fields on add: an object
+                    // after it is its value
+                    flags.push((a.clone(), None));
+                } else {
+                    flags.push((a.clone(), Some(v[i + 1].clone())));
+                    i += 1;
+                }
+            } else {
+                pos.push(a.clone());
+            }
+            i += 1;
+        }
+        Args { pos, flags }
+    }
+    fn get(&self, k: &str) -> Option<&str> {
+        self.flags.iter().rev().find(|(f, _)| f == k).and_then(|(_, v)| v.as_deref())
+    }
+    fn has(&self, k: &str) -> bool {
+        self.flags.iter().any(|(f, _)| f == k)
+    }
+    fn pos(&self, i: usize, name: &str) -> Result<&str, String> {
+        self.pos.get(i).map(|s| s.as_str()).ok_or_else(|| format!("missing <{name}>"))
+    }
+    fn rev(&self) -> Result<Option<u64>, String> {
+        self.get("--base-rev").map(|s| s.parse().map_err(|_| format!("bad --base-rev {s}"))).transpose()
+    }
+}
+
+fn store(a: &Args) -> Store {
+    let mut st = Store::open_cwd();
+    // check_args validated --by before any command ran
+    st.author = author(a).unwrap_or_else(|_| "claude".into());
+    if let Some(h) = a.get("--home") {
+        st.home = h.into();
+    }
+    if let Some(p) = a.get("--project") {
+        st.project = p.into();
+    }
+    st
+}
+
+fn json_or_str(s: &str) -> Value {
+    serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
+}
+
+fn stdin() -> String {
+    let mut s = String::new();
+    let _ = std::io::stdin().read_to_string(&mut s);
+    s
+}
+
+/// `add` and `ask`: like `apply`, the first write to an artifact creates it (title = its id), so
+/// Claude never needs to know whether it exists. The store decides which under its lock.
+fn create_or_patch(st: &Store, art: &str, ops: Vec<Op>, a: &Args) -> Result<(), String> {
+    let rev = st.apply(art, &ops, a.rev()?)?;
+    report(art, rev, a);
+    Ok(())
+}
+
+/// A `set` value typed by the schema; an empty one removes the field (`note=`), since an empty
+/// string stored in its place still drew as a field with nothing in it.
+fn set_value(kind: &str, field: &str, raw: &str) -> Value {
+    if raw.is_empty() {
+        Value::Null
+    } else {
+        doc::coerce(kind, field, raw)
+    }
+}
+
+/// An event's time for a person: local `HH:MM:SS`, with the date in front when it isn't today.
+fn local_stamp(at: &str, now: f64) -> String {
+    let Some(t) = util::parse_rfc3339(at) else { return at.to_string() };
+    let tm = |epoch: f64| unsafe {
+        let t = epoch as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    let (e, n) = (tm(t), tm(now));
+    let time = format!("{:02}:{:02}:{:02}", e.tm_hour, e.tm_min, e.tm_sec);
+    if (e.tm_year, e.tm_yday) == (n.tm_year, n.tm_yday) {
+        time
+    } else {
+        format!("{:04}-{:02}-{:02} {time}", e.tm_year + 1900, e.tm_mon + 1, e.tm_mday)
+    }
+}
+
+fn patch(st: &Store, art: &str, ops: Vec<Op>, a: &Args) -> Result<(), String> {
+    let rev = st.patch(art, &ops, a.rev()?)?;
+    report(art, rev, a);
+    Ok(())
+}
+
+/// Print a write's result: `art rev N`, or with `--json` `{"v":1,"artifact","rev"}`.
+fn report(art: &str, rev: u64, a: &Args) {
+    if a.has("--json") {
+        println!("{}", json!({"v": 1, "artifact": art, "rev": rev}));
+    } else {
+        println!("{art} rev {rev}");
+    }
+}
+
+/// `margin apply` (and its aliases `put`, `patch`): stdin in the feed line grammar, or a
+/// whole-document envelope `{"title", "blocks"}`. One all-or-nothing write. `whole`: `put`'s
+/// reading, where a bare array is the block list, not an op list.
+fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool) -> Result<(), String> {
+    let t = input.trim();
+    let v: Option<Value> = if t.is_empty() { Some(json!({})) } else { serde_json::from_str(t).ok() };
+    let envelope = match &v {
+        Some(Value::Object(m)) => m.get("op").is_none() && m.get("type").is_none(),
+        Some(Value::Array(_)) => whole,
+        _ => false,
+    };
+    if envelope || (whole && v.is_none()) {
+        let mut v = v.ok_or("stdin JSON: not one JSON value")?;
+        if v.is_array() {
+            v = json!({ "blocks": v });
+        }
+        if let Some(n) = v.get("v").and_then(|x| x.as_u64()) {
+            if n != 1 {
+                return Err(format!("envelope version {n}: this margin reads v 1"));
+            }
+        }
+        if let Some(m) = v.as_object_mut() {
+            m.remove("v");
+            if let Some(k) = m.keys().find(|k| !["title", "kind", "blocks", "icon", "id", "hints", "purpose"].contains(&k.as_str())) {
+                return Err(format!("unknown envelope key {k:?}: an envelope is {{\"title\", \"kind\", \"blocks\", \"hints\", \"purpose\"}}"));
+            }
+        }
+        v["id"] = json!(art);
+        if let Some(t) = a.get("--title") {
+            v["title"] = json!(t);
+        }
+        if let Some(k) = a.get("--kind") {
+            v["kind"] = json!(k);
+        }
+        if v.get("blocks").is_none() {
+            v["blocks"] = json!([]);
+        }
+        // the reminders are the artifact's, not this revision's: a whole document that doesn't
+        // carry its own keeps the ones there
+        // (and so is its purpose)
+        if v.get("hints").is_none() || v.get("purpose").is_none() {
+            if let Ok(old) = st.load(art) {
+                if v.get("hints").is_none() && !old.hints.is_empty() {
+                    v["hints"] = json!(old.hints);
+                }
+                if v.get("purpose").is_none() && !old.purpose.is_empty() {
+                    v["purpose"] = json!(old.purpose);
+                }
+            }
+        }
+        let d: Doc = serde_json::from_value(v).map_err(|e| e.to_string())?;
+        let rev = st.put(d, a.rev()?)?;
+        report(art, rev, a);
+        return Ok(());
+    }
+    let ops = feed::parse_input(t)?;
+    if ops.is_empty() {
+        return Err("nothing to apply".into());
+    }
+    // patch, or create on a first write: the store decides which under its lock
+    let rev = st.apply(art, &ops, a.rev()?)?;
+    report(art, rev, a);
+    Ok(())
+}
+
+fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // help names the person as the messages do (who.rs): the source says "sulin", `say` swaps it
+    let overview = || format!("{}\n{}", who::say(HELP), help::topic_list(&help::Ctx::here()));
+    if argv.is_empty() {
+        print!("{}", overview());
+        return;
+    }
+    let cmd = argv[0].clone();
+    if cmd == "help" || cmd == "-h" || cmd == "--help" {
+        // `margin help <cmd>`, `margin help <topic>`
+        match argv.get(1).map(String::as_str) {
+            None => print!("{}", overview()),
+            Some(n) => {
+                if let Some(c) = CMDS.iter().find(|c| c.name == n) {
+                    print!("{}{GLOBAL_HELP}", who::say(c.help));
+                } else if let Some(t) = help::topic(n) {
+                    print!("{}", help::render(t, &help::Ctx::here()));
+                } else {
+                    let topics: Vec<&str> = help::TOPICS.iter().map(|(n, _)| *n).collect();
+                    eprintln!("margin help: no command or topic {n:?}; topics: {}", topics.join(", "));
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
+    let Some(spec) = CMDS.iter().find(|c| c.name == cmd) else {
+        eprintln!("margin: unknown command {cmd:?}; margin --help");
+        std::process::exit(1);
+    };
+    // everything after `--` is a feed's command, untouched by flag parsing
+    let (mine, rest) = match argv.iter().position(|x| x == "--") {
+        Some(i) => (&argv[1..i], argv[i + 1..].to_vec()),
+        None => (&argv[1..], vec![]),
+    };
+    if wants_help(mine) {
+        print!("{}{GLOBAL_HELP}", who::say(spec.help));
+        return;
+    }
+    let a = Args::parse(mine);
+    let r = if cmd == "feed" {
+        feed_cmd(&a, rest)
+    } else if cmd == "tail" {
+        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| tail_cmd(&a, rest))
+    } else {
+        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for feed add".into()) }).and_then(|_| run(&cmd, &a))
+    };
+    if let Err(e) = r {
+        eprintln!("margin {cmd}: {}", who::say(&e));
+        std::process::exit(1);
+    }
+}
+
+/// `margin tail`: make sure the tail component exists, run the command into it, exit with its code.
+fn tail_cmd(a: &Args, rest: Vec<String>) -> Result<(), String> {
+    author(a)?;
+    let st = store(a);
+    let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+    if rest.is_empty() {
+        return Err("margin tail needs a command after --".into());
+    }
+    let title = a.get("--title").map(String::from).unwrap_or_else(|| rest.join(" "));
+    let mut c = json!({"type": "tail", "id": id, "title": title});
+    if let Some(n) = a.get("--lines").and_then(|n| n.parse::<u64>().ok()) {
+        c["lines"] = json!(n);
+    }
+    if let Some(p) = a.get("--parent") {
+        c["parent"] = json!(p);
+    }
+    apply_cmd(&st, art, &c.to_string(), a, false)?;
+    let code = tail::run(&st, art, id, &title, &rest)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+fn run(cmd: &str, a: &Args) -> Result<(), String> {
+    author(a)?;
+    let cfg = Config::load();
+    match cmd {
+        "schema" => {
+            let only = a.pos.first().map(String::as_str);
+            if a.has("--json") {
+                println!("{}", serde_json::to_string_pretty(&doc::schema_json(only)?).unwrap());
+            } else {
+                print!("{}", doc::schema_text(only)?);
+            }
+        }
+        "apply" | "patch" | "put" => {
+            let st = store(a);
+            apply_cmd(&st, a.pos(0, "artifact")?, &stdin(), a, cmd == "put")?;
+        }
+        "add" => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            let parent = a.pos(1, "parent")?;
+            let kind = a.pos(2, "type")?;
+            let id = a.pos(3, "id")?;
+            let mut f = serde_json::Map::new();
+            if let Some(j) = a.get("--json") {
+                if let Value::Object(m) = json_or_str(j) {
+                    f.extend(m);
+                }
+            }
+            // bare words are the text, all of them, in order; k=v pairs are fields typed by the schema
+            let mut words: Vec<&str> = Vec::new();
+            for p in &a.pos[4..] {
+                match p.split_once('=') {
+                    // a key that names no field still goes in as one, so the schema check names it
+                    Some((k, v)) if util::valid_id(k) => {
+                        f.insert(k.into(), doc::coerce(kind, k, v));
+                    }
+                    _ => words.push(p),
+                }
+            }
+            if !words.is_empty() {
+                f.insert("text".into(), json!(words.join(" ")));
+            }
+            let block = Block { kind: kind.into(), id: id.into(), children: vec![], f };
+            let parent = (parent != "-").then(|| parent.to_string());
+            create_or_patch(&st, art, vec![Op::Add { parent, block, before: a.get("--before").map(String::from), after: a.get("--after").map(String::from) }], a)?;
+        }
+        "set" => {
+            let st = store(a);
+            let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+            // the value is typed by the schema: a text field keeps "2026" as text
+            let k = st.load(art)?.find(id).map(|b| b.kind.clone()).ok_or_else(|| format!("no component {id:?} in {art}"))?;
+            let rest = &a.pos[2..];
+            let ops = if rest.first().map(|w| w.contains('=')).unwrap_or(false) {
+                // set <art> <id> k=v [k=v ...]
+                rest.iter()
+                    .map(|p| p.split_once('=').map(|(f, v)| Op::Set { id: id.into(), field: f.into(), value: set_value(&k, f, v) }).ok_or_else(|| format!("{p:?}: write field=value")))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                let (field, val) = (a.pos(2, "field")?, a.pos(3, "value")?);
+                if rest.len() > 2 {
+                    return Err(format!("unexpected argument {:?}: quote a value with spaces, or use field=value pairs", rest[2]));
+                }
+                vec![Op::Set { id: id.into(), field: field.into(), value: set_value(&k, field, val) }]
+            };
+            patch(&st, art, ops, a)?;
+        }
+        "rm" => {
+            let st = store(a);
+            patch(&st, a.pos(0, "artifact")?, vec![Op::Rm { id: a.pos(1, "id")?.into() }], a)?;
+        }
+        "move" => {
+            let st = store(a);
+            let op = Op::Move {
+                id: a.pos(1, "id")?.into(),
+                before: a.get("--before").map(String::from),
+                after: a.get("--after").map(String::from),
+                parent: a.get("--parent").map(String::from),
+            };
+            patch(&st, a.pos(0, "artifact")?, vec![op], a)?;
+        }
+        "title" => {
+            let st = store(a);
+            patch(&st, a.pos(0, "artifact")?, vec![Op::Title { value: a.pos(1, "title")?.into() }], a)?;
+        }
+        "hints" => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            let rev = set_hints(&st, art, a.pos[1..].iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())?;
+            report(art, rev, a);
+        }
+        "purpose" => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            let text = a.pos.get(1).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
+            let rev = set_doc_field(&st, art, |d| if d.purpose == text { false } else { d.purpose = text.clone(); true })?;
+            report(art, rev, a);
+        }
+        "ask" => {
+            let st = store(a);
+            let (art, id, q) = (a.pos(0, "artifact")?, a.pos(1, "id")?, a.pos(2, "question")?);
+            let opts: Vec<String> = a.pos[3..].to_vec();
+            if opts.len() < 2 {
+                return Err("ask needs at least two options".into());
+            }
+            // no default unless asked for one: the card waits for sulin, and `--suggest` only names
+            // your recommendation
+            for flag in ["--default", "--suggest"] {
+                if let Some(v) = a.get(flag) {
+                    if !opts.iter().any(|o| o == v) {
+                        return Err(format!("{} {v:?} isn't one of the options", &flag[2..]));
+                    }
+                }
+            }
+            let mut f = serde_json::Map::new();
+            f.insert("text".into(), json!(q));
+            f.insert("options".into(), json!(opts));
+            for flag in ["--default", "--suggest"] {
+                if let Some(v) = a.get(flag) {
+                    f.insert(flag[2..].into(), json!(v));
+                }
+            }
+            if let Some(w) = a.get("--why") {
+                f.insert("why".into(), json!(w));
+            }
+            if let Some(w) = a.get("--applies") {
+                f.insert("applies".into(), json!(w));
+            }
+            let block = Block { kind: "question".into(), id: id.into(), children: vec![], f };
+            if st.load(art).map(|d| d.find(id).is_some()).unwrap_or(false) {
+                return Err(format!("{id} already exists in {art}: change it with `margin set {art} {id} <field>=<value>`, or ask under a new id"));
+            }
+            create_or_patch(&st, art, vec![Op::Add { parent: a.get("--parent").map(String::from), block, before: None, after: None }], a)?;
+        }
+        "propose" => {
+            // a change to one of the person's decisions, offered on the component; his accept applies it
+            let st = store(a);
+            let (art, id, verb) = (a.pos(0, "artifact")?, a.pos(1, "id")?, a.pos(2, "verb")?);
+            if !crate::select::PROPOSABLE.contains(&verb) {
+                return Err(format!("propose takes one of {}, not {verb:?}", crate::select::PROPOSABLE.join(", ")));
+            }
+            let value = a.pos.get(3).cloned();
+            let doc = st.load(art)?;
+            let b = doc.find(id).ok_or_else(|| format!("no component {id:?} in {art}"))?;
+            let fits = match verb {
+                "tick" => b.kind == "todo" && value.as_deref().map(|v| doc::STATUSES.contains(&v)).unwrap_or(false),
+                "pick" => b.kind == "question" && value.as_ref().map(|v| b.strs("options").contains(v)).unwrap_or(false),
+                "strike" => b.kind == "claim",
+                _ => b.kind == "diff",
+            };
+            if !fits {
+                return Err(format!("can't propose {verb}{} on {id} (a {})", value.as_ref().map(|v| format!(" {v}")).unwrap_or_default(), b.kind));
+            }
+            let pr = json!({"verb": verb, "value": value, "why": a.get("--why").unwrap_or(""), "at": crate::util::now_rfc3339()});
+            patch(&st, art, vec![Op::Set { id: id.into(), field: "proposal".into(), value: pr }], a)?;
+        }
+        "diff" => {
+            let st = store(a);
+            let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+            let tmp = std::env::temp_dir().join(format!("margin-diff-{}", std::process::id()));
+            let (old, new, label) = if let Some(rev) = a.get("--rev") {
+                let file = a.pos(2, "file")?;
+                std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+                let show = |r: &str, out: &str| -> Result<String, String> {
+                    let o = std::process::Command::new("jj").args(["file", "show", "-r", r, file]).output().map_err(|e| e.to_string())?;
+                    let p = tmp.join(out).join(std::path::Path::new(file).file_name().unwrap_or_default());
+                    std::fs::create_dir_all(p.parent().unwrap()).ok();
+                    std::fs::write(&p, &o.stdout).map_err(|e| e.to_string())?;
+                    Ok(p.to_string_lossy().into_owned())
+                };
+                let o = show(rev, "a")?;
+                let n = match a.get("--to") {
+                    Some(t) => show(t, "b")?,
+                    None => file.to_string(),
+                };
+                (o, n, file.to_string())
+            } else {
+                let o = a.get("--old").ok_or("--old and --new, or --rev")?.to_string();
+                let n = a.get("--new").ok_or("--new")?.to_string();
+                let l = a.get("--path").unwrap_or(&n).to_string();
+                (o, n, l)
+            };
+            let block = diffblock::compute(id, &old, &new, Some(&label), 2)?;
+            let _ = std::fs::remove_dir_all(&tmp);
+            let d = st.load(art)?;
+            let ops = if d.find(id).is_some() {
+                // replace in place, keeping its position
+                block.f.iter().map(|(k, v)| Op::Set { id: id.into(), field: k.clone(), value: v.clone() }).collect()
+            } else {
+                vec![Op::Add { parent: a.get("--parent").map(String::from), block, before: None, after: None }]
+            };
+            patch(&st, art, ops, a)?;
+        }
+        "image" => {
+            let st = store(a);
+            let (art, id, png) = (a.pos(0, "artifact")?, a.pos(1, "id")?, a.pos(2, "png")?);
+            let path = std::fs::canonicalize(png).map_err(|e| format!("{png}: {e}"))?;
+            vellum::image::Image::load_png(&path)?;
+            let mut f = serde_json::Map::new();
+            f.insert("path".into(), json!(path.to_string_lossy()));
+            if let Some(alt) = a.get("--alt") {
+                f.insert("alt".into(), json!(alt));
+            }
+            if let Some(r) = a.get("--rows") {
+                f.insert("rows".into(), json_or_str(r));
+            }
+            let block = Block { kind: "image".into(), id: id.into(), children: vec![], f };
+            patch(&st, art, vec![Op::Add { parent: a.get("--parent").map(String::from), block, before: None, after: None }], a)?;
+        }
+        "show" => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            let d = st.load(art)?;
+            let s = st.state(art);
+            if a.has("--json") {
+                println!("{}", serde_json::to_string_pretty(&json!({"doc": d, "state": s})).unwrap());
+            } else {
+                print!("{}", crate::who::say(&show_text(&d, &s, &st.claims(art), st.delivered_max())));
+            }
+        }
+        "ls" => {
+            let st = store(a);
+            for m in st.archive_stale(cfg.archive_days) {
+                eprintln!("archived {m} (untouched {} days)", cfg.archive_days);
+            }
+            let docs = st.list();
+            if a.has("--json") {
+                let v: Vec<Value> = docs.iter().map(|d| json!({"id": d.id, "rev": d.rev, "updated": d.updated, "title": d.title, "kind": d.kind})).collect();
+                println!("{}", json!({"v": 1, "artifacts": v}));
+                return Ok(());
+            }
+            for d in docs {
+                println!("{:<16} rev {:<4} {:<20} {}", d.id, d.rev, d.updated, d.title);
+            }
+        }
+        "gc" => {
+            let st = store(a);
+            let days = a.get("--days").and_then(|d| d.parse().ok()).unwrap_or(cfg.archive_days);
+            for m in st.archive_stale(days) {
+                println!("archived {m}");
+            }
+        }
+        "events" => {
+            let st = store(a);
+            let mut evs = if a.has("--unread") {
+                let sess = a.get("--session").map(String::from).or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok()).unwrap_or("default".into());
+                hook::unread(&st, &sess)
+            } else {
+                st.events()
+            };
+            if let Some(art) = a.get("--artifact") {
+                evs.retain(|e| e.artifact == art);
+            }
+            if let Some(s) = a.get("--since").and_then(|s| s.parse::<u64>().ok()) {
+                evs.retain(|e| e.seq > s);
+            }
+            if let Some(k) = a.get("--kind") {
+                evs.retain(|e| e.kind == k);
+            }
+            // by default the person's decisions only: the passive kinds (view, seen, fold…) and
+            // other writers' events buried them (2026-11-10)
+            if !a.has("--all") && a.get("--kind").is_none() {
+                evs.retain(|e| who::is_human(&e.by) && !store::is_passive(&e.kind));
+            }
+            let now = util::epoch_now();
+            for e in &evs {
+                if a.has("--json") {
+                    println!("{}", serde_json::to_string(e).unwrap());
+                } else {
+                    println!("{:>4} {} {}", e.seq, local_stamp(&e.at, now), who::say(&hook::describe(&st, e)));
+                }
+            }
+        }
+        "wait" => {
+            let st = store(a);
+            let target = a.pos(0, "artifact.id")?;
+            let (art, id) = target.split_once('.').ok_or("wait <artifact>.<id>")?;
+            let timeout = a.get("--timeout").and_then(util::parse_duration).unwrap_or(600.0);
+            let start = util::epoch_now();
+            // a missing id would wait out the whole timeout for a decision that can never come
+            let d = st.load(art)?;
+            if d.find(id).is_none() {
+                return Err(format!("no component {id:?} in {art}; margin show {art}"));
+            }
+            // a missing id would wait out the whole timeout for a decision that can never come
+            if st.load(art)?.find(id).is_none() {
+                return Err(format!("no component {id:?} in {art}; margin show {art}"));
+            }
+            let from = st.last_seq();
+            // a decision sulin already made counts: waiting only for new events missed a pick made
+            // before `wait` started and handed Claude the default instead
+            if let Some(d) = st.state(art).decisions.get(id).filter(|d| crate::who::is_human(&d.by)) {
+                println!("{}", d.value.as_str().map(String::from).unwrap_or(d.value.to_string()));
+                return Ok(());
+            }
+            loop {
+                if let Some(e) = st.events().into_iter().find(|e| e.seq > from && e.artifact == art && e.id == id && crate::who::is_human(&e.by) && !store::is_passive(&e.kind)) {
+                    println!("{}", e.value.as_str().map(String::from).unwrap_or(e.value.to_string()));
+                    return Ok(());
+                }
+                if util::epoch_now() - start > timeout {
+                    let d = st.load(art)?;
+                    let def = d.find(id).map(|b| b.s("default").to_string()).unwrap_or_default();
+                    eprintln!("timed out; no decision on {target}");
+                    if !def.is_empty() {
+                        println!("{def}");
+                    }
+                    std::process::exit(2);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        "hook" => match a.pos.first().map(|s| s.as_str()).unwrap_or("prompt") {
+            // the one hook that waits (asyncRewake): exit 2 wakes Claude with what it printed
+            "rewake" => {
+                let timeout = a.get("--timeout").and_then(util::parse_duration).unwrap_or(rewake::DEADLINE);
+                std::process::exit(rewake::run(a.get("--home"), a.get("--project"), timeout))
+            }
+            kind => hook::run(kind)?,
+        },
+        "doc" => {
+            let st = store(a);
+            let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+            let mut sec = mdoc::to_section(id, a.get("--title"), &stdin());
+            // keep what this section holds that doc didn't write (a question or claim posted
+            // into it): a revision replaces the prose, never sulin's cards
+            if let Some(old) = st.load(art).ok().as_ref().and_then(|d| d.find(id)) {
+                let prefix = format!("{id}-");
+                let kept: Vec<Value> = old.children.iter().filter(|c| !c.id.starts_with(&prefix)).filter_map(|c| serde_json::to_value(c).ok()).collect();
+                if let Some(kids) = sec["children"].as_array_mut() {
+                    kids.extend(kept);
+                }
+                // a revision with no title of its own keeps the one it had
+                if sec["title"] == json!(id) && !old.s("title").is_empty() {
+                    sec["title"] = json!(old.s("title"));
+                }
+            }
+            if let Some(p) = a.get("--parent") {
+                sec["parent"] = json!(p);
+            }
+            for (pid, n) in mdoc::long_paragraphs(&sec) {
+                eprintln!("{}", who::say(&format!("hint: {pid} is a paragraph of {n} sentences; bullets (one idea each) read faster and each is a row sulin can react to")));
+            }
+            apply_cmd(&st, art, &sec.to_string(), a, false)?;
+        }
+        "toast" => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            let text = a.pos.get(1..).map(|w| w.join(" ")).unwrap_or_default();
+            let ttl = a.get("--ttl").map(|t| t.trim_end_matches('s').parse::<f64>().map_err(|_| format!("bad --ttl {t:?}: seconds"))).transpose()?;
+            let by = if st.author == crate::who::HUMAN { "you".to_string() } else { st.author.clone() };
+            let mut t = toast::send(&st, art, &text, a.get("--level").unwrap_or("info"), a.get("--at").unwrap_or(""), ttl, &by)?;
+            let (c, b) = (a.get("--countdown"), a.get("--border"));
+            if let Some(c) = c.filter(|c| !toast::COUNTDOWNS.contains(c)) {
+                return Err(format!("--countdown {c:?}: one of {}", toast::COUNTDOWNS.join(" ")));
+            }
+            if let Some(b) = b.filter(|b| !toast::BORDERS.contains(b)) {
+                return Err(format!("--border {b:?}: one of {}", toast::BORDERS.join(" ")));
+            }
+            if c.is_some() || b.is_some() {
+                toast::set_style(&st, art, &t.id, c, b);
+                t.countdown = c.unwrap_or_default().into();
+            }
+            println!("toast {}{}", t.id, if t.at.is_empty() { String::new() } else { format!(" on {}", t.at) });
+        }
+        "stop" => {
+            let st = store(a);
+            let art = a.pos.first().cloned().or_else(|| st.list().into_iter().next().map(|d| d.id)).ok_or("no artifact to log the stop in")?;
+            st.stop(&art, "cli")?;
+            println!("{}", who::say("stopped: Claude's tool calls are refused until sulin's next message"));
+        }
+        "link" | "unlink" => {
+            let st = store(a);
+            let sess = a.get("--session").map(String::from).or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok()).ok_or("no Claude session here ($CLAUDE_CODE_SESSION_ID unset): pass --session")?;
+            if cmd == "unlink" {
+                println!("{}", if link::remove(&st, &sess) { "unlinked" } else { "no link" });
+            } else if let Some(art) = a.pos.first() {
+                if !st.exists(art) {
+                    return Err(format!("no artifact {art:?}"));
+                }
+                link::set(&st, &sess, art, "explicit");
+                println!("linked {art}");
+            } else {
+                match link::get(&st, &sess) {
+                    Some(l) => println!("{}  ({}, since {})\n{}", l.art, l.how, l.since, link::status_line(&st, &l)),
+                    None => println!("no link"),
+                }
+            }
+        }
+        "open" => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            // a session with no pane yet makes this one its own (a stack opened later doesn't take over)
+            if let Ok(sess) = std::env::var("CLAUDE_CODE_SESSION_ID") {
+                if !a.has("--stacked") && link::get(&st, &sess).is_none() {
+                    link::set(&st, &sess, art, "open");
+                }
+            }
+            let o = host::OpenOpts {
+                float: if a.has("--split") {
+                    Some(false)
+                } else if a.has("--float") {
+                    Some(true)
+                } else {
+                    None
+                },
+                tab_id: a.get("--tab-id").and_then(|t| t.parse().ok()),
+                session: a.get("--session").map(String::from),
+                stacked: a.has("--stacked"),
+            };
+            let h = host::pick(&cfg, a.get("--session"));
+            let more: Vec<String> = a.get("--tabs").map(|t| t.split(',').filter(|x| !x.is_empty() && *x != art).map(String::from).collect()).unwrap_or_default();
+            if let Some(t) = more.iter().find(|t| !st.exists(t)) {
+                return Err(format!("no artifact {t:?} for --tabs"));
+            }
+            // on show already as a tab of another pane beside the chat: that pane is its pane
+            if more.is_empty() && !a.has("--stacked") {
+                if let Some((handle, primary)) = tab_hosts(&st, &*h, art, a, true).into_iter().next() {
+                    println!("reused {handle} (a tab of margin:{primary}; `margin tab {primary} show {art}` brings it on screen)");
+                    return Ok(());
+                }
+            }
+            match h.open(&st, art, &o, &cfg)? {
+                host::Opened::Pane { handle, created } => {
+                    // the pane's tab set is in its view file: a new pane starts with what was
+                    // asked for (an older pane with the same id may have left a set behind), and
+                    // --tabs on a pane already open adds to its set. The pane follows the file
+                    let key = tabs::pane_key(&handle);
+                    let mut v = st.view(art, &key);
+                    let before = v.clone();
+                    if created {
+                        tabs::store(&mut v, &[art.to_string()], 0);
+                    }
+                    for t in &more {
+                        tabs::edit(&mut v, art, "add", t)?;
+                    }
+                    if v != before {
+                        st.save_view(art, &key, &v);
+                    }
+                    println!("{} {handle}", if created { "opened" } else { "reused" });
+                }
+                host::Opened::Run(cmd) => {
+                    println!("no multiplexer (host {}): run this in a terminal beside the chat:", h.name());
+                    println!("  {}", cmd.replacen(&format!(" view {art}"), &format!(" view {}", std::iter::once(art.to_string()).chain(more.iter().cloned()).collect::<Vec<_>>().join(" ")), 1));
+                }
+            }
+        }
+        "panes" => {
+            let st = store(a);
+            let h = host::pick(&cfg, a.get("--session"));
+            let art = a.pos(0, "artifact")?;
+            for p in h.find(&st, art)? {
+                println!("{p}");
+            }
+            for (handle, primary) in tab_hosts(&st, &*h, art, a, false) {
+                println!("{handle}  (a tab of margin:{primary})");
+            }
+        }
+        "close" => {
+            let st = store(a);
+            let art = a.pos(0, "artifact")?;
+            let h = host::pick(&cfg, a.get("--session"));
+            let n = h.close(&st, art)?;
+            println!("closed {n}");
+            // a tab is not a pane: closing it would close the artifacts beside it
+            if n == 0 {
+                for (_, primary) in tab_hosts(&st, &*h, art, a, false) {
+                    println!("{art} is a tab of margin:{primary}: margin tab {primary} rm {art}");
+                }
+            }
+        }
+        "tab" => {
+            let st = store(a);
+            let primary = a.pos(0, "artifact")?;
+            if !st.exists(primary) {
+                return Err(format!("no artifact {primary:?}"));
+            }
+            let mut panes: Vec<String> = match a.get("--pane") {
+                Some(p) => vec![p.to_string()],
+                None => host::pick(&cfg, a.get("--session")).find(&st, primary)?.iter().map(|h| tabs::pane_key(h)).collect(),
+            };
+            panes.dedup();
+            if panes.is_empty() {
+                return Err(format!("no pane is showing {primary}: open one with `margin open {primary} --tabs B,C`, or name the pane with --pane"));
+            }
+            let edit = match (a.pos.get(1), a.pos.get(2)) {
+                (None, _) => None,
+                (Some(op), Some(art)) => {
+                    if op == "add" && !st.exists(art) {
+                        return Err(format!("no artifact {art:?}"));
+                    }
+                    Some((op.as_str(), art.as_str()))
+                }
+                (Some(op), None) => return Err(format!("margin tab {primary} {op} <artifact>")),
+            };
+            for p in panes {
+                let mut v = st.view(primary, &p);
+                if let Some((op, art)) = edit {
+                    if tabs::edit(&mut v, primary, op, art)? {
+                        st.save_view(primary, &p, &v);
+                    }
+                }
+                let (set, active) = tabs::resolve(primary, &[], &v);
+                let shown: Vec<String> = set.iter().enumerate().map(|(i, t)| if i == active { format!("[{t}]") } else { t.clone() }).collect();
+                println!("{p}: {}", shown.join(" "));
+            }
+        }
+        "view" => {
+            let st = store(a);
+            let h = host::pick(&cfg, None);
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let art = a.pos(0, "artifact")?.to_string();
+            if app::run(st, art.clone(), a.pos[1..].to_vec(), cfg, h)? {
+                // the terminal is restored (app::run's Terminal dropped); become the new build.
+                // Only the pane's own artifact is named again: the tab set is in the view file by
+                // now, and naming the tabs it started with would undo a `margin tab` since
+                use std::os::unix::process::CommandExt;
+                let mut args = vec!["view".to_string(), art];
+                for (k, v) in &a.flags {
+                    args.push(k.clone());
+                    args.extend(v.clone());
+                }
+                let err = std::process::Command::new(&exe).args(args).exec();
+                return Err(format!("reload {}: {err}", exe.display()));
+            }
+        }
+        "daemon" => daemon::run(store(a))?,
+        "render" => {
+            let st = store(a);
+            // more artifacts: the tab bar, with --tab (else the first) on screen
+            let set: Vec<String> = a.pos.iter().fold(Vec::new(), |mut v, x| {
+                if !v.contains(x) {
+                    v.push(x.clone());
+                }
+                v
+            });
+            let tab = a.get("--tab").map(|t| set.iter().position(|x| x == t).ok_or_else(|| format!("--tab {t}: not one of {}", set.join(" ")))).transpose()?.unwrap_or(0);
+            let art = set.get(tab).map(|s| s.as_str()).ok_or("missing <artifact>")?;
+            let d = st.load(art)?;
+            let s = st.state(art);
+            let mut v = st.view(art, a.get("--pane").unwrap_or("tty"));
+            v.detail |= a.has("--detail");
+            if let Some(f) = a.get("--focus") {
+                v.focus = Some(f.to_string());
+            }
+            let w: u16 = a.get("--width").and_then(|x| x.parse().ok()).unwrap_or(62);
+            let h: u16 = a.get("--height").and_then(|x| x.parse().ok()).unwrap_or(40);
+            let at: f64 = a.get("--at").and_then(|x| x.parse().ok()).unwrap_or(10.0);
+            let mut cfg = cfg;
+            if let Some(m) = a.get("--motion") {
+                cfg.motion = m.into();
+            }
+            let mut sc = scene::Scene::new(&cfg);
+            sc.restore(&v);
+            sc.recap = recap::for_pane(&st, art);
+            sc.agents = agents::for_pane(&st, art);
+            sc.toasts = toast::load(&st, art).into_iter().map(|t| (t, 1.0)).collect();
+            sc.tails = tail::for_doc(&st, art, &d);
+            if set.len() > 1 {
+                let docs = set.iter().map(|x| st.load(x)).collect::<Result<Vec<_>, _>>()?;
+                let titles = tabs::short_titles(&docs.iter().map(|d| if d.title.is_empty() { d.id.clone() } else { d.title.clone() }).collect::<Vec<_>>());
+                sc.tabs = docs
+                    .iter()
+                    .zip(titles)
+                    .map(|(d, title)| {
+                        let (needs, failed) = tabs::attention(d, &st.state(&d.id));
+                        tabs::TabInfo { art: d.id.clone(), title, unseen: 0, needs, failed }
+                    })
+                    .collect();
+                sc.tab = tab;
+            }
+            let acts = link::activity_for(&st, art);
+            let inp = scene::Input {
+                doc: &d,
+                state: &s,
+                view: &v,
+                delivered: st.delivered_max(),
+                unread: 0,
+                now: at,
+                wall: util::epoch_now(),
+                cfg: &cfg,
+                kitty: false,
+                cell: (10, 20),
+                focused_pane: a.has("--focused"),
+                mouse: false,
+                project: &st.project,
+                w,
+                h,
+                activity: &acts,
+            };
+            let f = sc.frame(&inp);
+            print!("{}", if a.has("--ansi") { f.grid.to_ansi() } else { f.grid.to_text() });
+        }
+        "select" => {
+            let text = if a.pos.is_empty() { stdin() } else { a.pos.join(" ") };
+            match select::dispatch(&text, "select", &cfg) {
+                select::Outcome::Applied(e) => select::log_line(&format!("  applied {} {} {}", e.kind, e.id, e.value)),
+                select::Outcome::Opened(u) => select::log_line(&format!("  opened {u}")),
+                select::Outcome::Copied(how) => select::log_line(&format!("  copied via {how}")),
+                select::Outcome::Ignored(e) => select::log_line(&format!("  ignored: {e}")),
+            }
+        }
+        "session" => {
+            let name = a.pos.first().cloned().unwrap_or_else(|| "margin".into());
+            let mut c = cfg.clone();
+            if c.host == "auto" {
+                c.host = "zellij".into(); // `margin session` starts Zellij, so auto means Zellij here
+            }
+            host::pick(&c, None).session(&name)?;
+        }
+        "demo" => {
+            let st = store(a);
+            match a.pos.first().map(|s| s.as_str()) {
+                Some("live") => {
+                    let speed = a.get("--speed").and_then(|s| s.parse().ok()).unwrap_or(1.0);
+                    demo::live(&st, speed);
+                }
+                _ => {
+                    let rev = demo::setup(&st)?;
+                    println!("plan rev {rev} in project {}", st.project);
+                    println!("next: margin open plan    (in Zellij a split; elsewhere it prints the view command), then: margin demo live");
+                }
+            }
+        }
+        "skill" => print!("{}", help::render(help::SKILL, &help::Ctx::here())),
+        "example" => {
+            // `--feed`/`--data` are switches; written before the name they swallow it as a value
+            let name = a.pos.first().map(String::as_str).or(a.get("--feed")).or(a.get("--data"));
+            let Some(name) = name else {
+                print!("{}", example::list());
+                return Ok(());
+            };
+            let names = || example::EXAMPLES.iter().map(|e| e.name).collect::<Vec<_>>().join(", ");
+            let e = example::get(name).ok_or_else(|| format!("no example {name:?}; examples: {}", names()))?;
+            match (a.has("--feed"), a.has("--data")) {
+                (true, true) => return Err("--feed or --data, one at a time".into()),
+                (true, _) => print!("{}", e.feed),
+                (_, true) => print!("{}", e.data),
+                _ => {
+                    eprint!("{}", e.notes());
+                    print!("{}", e.artifact);
+                }
+            }
+        }
+        "init" => {
+            let home = || std::env::var("HOME").map(std::path::PathBuf::from).map_err(|_| "$HOME isn't set: pass --claude-dir".to_string());
+            let abs = |p: &str| std::path::absolute(p).map_err(|e| format!("{p}: {e}"));
+            for f in ["--user-name", "--claude-dir", "--bin"] {
+                if a.has(f) && a.get(f).map(|v| v.trim().is_empty()).unwrap_or(true) {
+                    return Err(format!("{f} needs a value"));
+                }
+            }
+            let o = init::Opts {
+                claude_dir: match a.get("--claude-dir") {
+                    Some(d) => abs(d)?,
+                    None => home()?.join(".claude"),
+                },
+                config: config::config_path(),
+                bin: match a.get("--bin") {
+                    Some(b) => abs(b)?,
+                    None => help::bin_path(),
+                },
+                user_name: a.get("--user-name").map(String::from),
+                dry_run: a.has("--dry-run"),
+            };
+            print!("{}", init::run(&o)?);
+        }
+        c => return Err(format!("unknown command {c:?}; margin --help")),
+    }
+    Ok(())
+}
+
+fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
+    use feed::{edit_registry, Feed, Registry, Trigger};
+    let sub = a.pos(0, "add|rm|ls|pause|resume|logs|run")?;
+    let (flags, max_pos) = feed_spec(sub).ok_or_else(|| format!("unknown feed command {sub:?}: add, rm, ls, pause, resume, logs, run"))?;
+    check_args(&format!("feed {sub}"), a, flags, max_pos)?;
+    author(a)?;
+    if sub != "add" && !cmd.is_empty() {
+        return Err("`--` is only for feed add".into());
+    }
+    let st = store(a);
+    let name = || a.pos(1, "name");
+    match sub {
+        "add" => {
+            let name = name()?.to_string();
+            let trigger = if a.has("--stream") {
+                Trigger::Stream
+            } else if let Some(p) = a.get("--watch") {
+                // --watch takes one or more paths: the flag's value plus any positionals after the name
+                let mut paths = vec![p.to_string()];
+                paths.extend(a.pos[2..].iter().cloned());
+                Trigger::Watch { paths }
+            } else if let Some(e) = a.get("--every") {
+                Trigger::Interval { every: util::parse_duration(e).ok_or_else(|| format!("bad --every {e}"))? }
+            } else {
+                return Err("pick a trigger: --every 10s, --watch <path>..., or --stream".into());
+            };
+            let artifact = a.get("--artifact").unwrap_or(&name).to_string();
+            let owns = a.get("--owns").unwrap_or(&name).to_string();
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+            let f = Feed {
+                name: name.clone(),
+                cmd,
+                trigger,
+                artifact: artifact.clone(),
+                owns: owns.clone(),
+                paused: false,
+                cwd,
+                min_gap: a.get("--min-gap").and_then(util::parse_duration).unwrap_or(1.0),
+                timeout: a.get("--timeout").and_then(util::parse_duration).unwrap_or(60.0),
+                added: util::now_rfc3339(),
+            };
+            let desc = f.trigger.describe();
+            edit_registry(&st, |r| r.add(f, a.has("--replace")))?;
+            // ids Claude already wrote under the prefix change hands now; say so
+            if let Ok(d) = st.load(&artifact) {
+                let taken: Vec<String> = d.ids().into_iter().filter(|i| store::owns(&owns, i)).collect();
+                if !taken.is_empty() {
+                    eprintln!("note: feed {name} now owns existing ids {}", taken.join(", "));
+                }
+            }
+            let started = daemon::ensure(&st)?;
+            println!("feed {name}: {desc} → {artifact} (owns {owns:?}){}", if started.is_some() { "; daemon started" } else { "" });
+        }
+        "rm" => {
+            let n = name()?;
+            edit_registry(&st, |r| r.remove(n))?;
+            println!("removed feed {n}; its last output stays in the artifact");
+        }
+        "pause" | "resume" => {
+            let n = name()?;
+            edit_registry(&st, |r| r.set_paused(n, sub == "pause"))?;
+            if sub == "resume" {
+                daemon::ensure(&st)?;
+            }
+            println!("{} feed {n}", if sub == "pause" { "paused" } else { "resumed" });
+        }
+        "ls" => {
+            let r = Registry::load(&st.dir());
+            match daemon::running(&st) {
+                Some(p) if p > 0 => println!("daemon: running, pid {p}"),
+                Some(_) => println!("daemon: running"),
+                None => println!("daemon: not running{}", if r.feeds.iter().any(|f| !f.paused) { " (start: margin feed resume <name>)" } else { "" }),
+            }
+            if r.feeds.is_empty() {
+                println!("no feeds in project {}", st.project);
+            }
+            for f in &r.feeds {
+                let s = feed::read_status(&st, &f.name).unwrap_or_default();
+                let state = if f.paused { "paused".to_string() } else if s.state.is_empty() { "starting".into() } else { s.state.clone() };
+                let last = util::parse_rfc3339(&s.last_write).map(|t| util::ago(util::epoch_now() - t)).unwrap_or_else(|| "never".into());
+                println!(
+                    "{:<12} {:<11} {:<26} {:<20} restarts {:<3} wrote {last}",
+                    f.name,
+                    state,
+                    vellum::text::truncate(&f.trigger.describe(), 26),
+                    format!("{}/{}", f.artifact, f.owns),
+                    s.restarts
+                );
+                if !s.last_error.is_empty() && state != "live" {
+                    println!("{:<12} last error: {}", "", vellum::text::truncate(&s.last_error, 90));
+                }
+            }
+        }
+        "logs" => {
+            let n = name()?;
+            let p = feed::log_path(&st, n);
+            let lines: usize = a.get("--lines").and_then(|l| l.parse().ok()).unwrap_or(40);
+            let text = std::fs::read_to_string(&p).map_err(|_| format!("no log yet for feed {n} ({})", p.display()))?;
+            let all: Vec<&str> = text.lines().collect();
+            for l in &all[all.len().saturating_sub(lines)..] {
+                println!("{l}");
+            }
+            if a.has("--follow") {
+                let mut seen = text.len();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let t = std::fs::read_to_string(&p).unwrap_or_default();
+                    if t.len() < seen {
+                        seen = 0; // rotated
+                    }
+                    print!("{}", &t[seen..]);
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    seen = t.len();
+                }
+            }
+        }
+        "run" => {
+            let n = name()?;
+            let f = Registry::load(&st.dir()).get(n).cloned().ok_or_else(|| format!("no feed {n:?}; margin feed ls"))?;
+            let ctl = std::sync::Arc::new(feed::Ctl::default());
+            let mut w = feed::Worker::new(store(a), f.clone(), ctl, true);
+            match f.trigger {
+                Trigger::Stream => w.run(),
+                _ => match w.run_once() {
+                    Ok(true) => {}
+                    Ok(false) => {}
+                    Err(e) => return Err(e),
+                },
+            }
+        }
+        s => return Err(format!("unknown feed command {s:?}: add, rm, ls, pause, resume, logs, run")),
+    }
+    Ok(())
+}
+
+/// What sulin sees, as text for Claude: content merged with his decisions.
+/// The live panes that show `art` as a tab of another artifact: (pane handle, the pane's own
+/// artifact). A view file outlives its pane, so each is checked against the host. `beside`: only
+/// panes in the caller's Zellij tab (where `margin open` would put a new one).
+fn tab_hosts(st: &Store, h: &dyn host::Host, art: &str, a: &Args, beside: bool) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (primary, pane) in tabs::hosts_of(st, art) {
+        for handle in h.find(st, &primary).unwrap_or_default() {
+            if tabs::pane_key(&handle) != pane {
+                continue;
+            }
+            if beside && h.name() == "zellij" {
+                let here = (|| {
+                    let sess = zj::session(a.get("--session"))?;
+                    let tab = a.get("--tab-id").and_then(|t| t.parse().ok()).or_else(|| zj::home_tab(&sess).ok())?;
+                    Some(zj::list_panes(&sess).ok()?.iter().any(|p| p.handle() == handle && p.tab_id == tab))
+                })();
+                if here != Some(true) {
+                    continue;
+                }
+            }
+            out.push((handle, primary.clone()));
+        }
+    }
+    out
+}
+
+fn show_text(d: &Doc, s: &store::State, claims: &[store::Claim], delivered: u64) -> String {
+    let by = if d.by.is_empty() { String::new() } else { format!(" by {}", d.by) };
+    let mut out = format!("{} \"{}\" rev {}{by}\n", d.id, d.title, d.rev);
+    if !d.purpose.is_empty() {
+        out += &format!("purpose: {}\n", d.purpose);
+    }
+    for c in claims {
+        out += &format!("  (feed {} owns the ids {} and {}-…: read-only for you)\n", c.feed, c.owns, c.owns);
+    }
+    doc::walk(&d.blocks, &mut |b, _, depth| {
+        let pad = "  ".repeat(depth + 1);
+        let dec = s.decisions.get(&b.id);
+        let st = match (b.kind.as_str(), dec) {
+            ("todo", _) => {
+                let rests: Vec<String> = components::rests_on(s, b).into_iter().map(|(c, struck)| if struck { format!("{c} STRUCK") } else { c }).collect();
+                let r = if rests.is_empty() { String::new() } else { format!(" [rests on {}]", rests.join(", ")) };
+                format!("[{}]{r}", components::status_of(s, b))
+            }
+            ("question", Some(d)) if d.kind == "pick" => format!("[sulin picked {}]", d.value.as_str().unwrap_or("")),
+            ("question", Some(d)) if d.kind == "talk" => "[open; sulin wants to talk about it in chat before picking]".to_string(),
+            ("question", Some(d)) if d.kind == "hold" => format!("[open; default {}; HELD by sulin: stop at {} and wait for their pick]", b.s("default"), if b.s("applies").is_empty() { "the point it applies" } else { b.s("applies") }),
+            ("question", _) if b.s("default").is_empty() => format!("[open{}]", if b.s("suggest").is_empty() { String::new() } else { format!("; you suggested {}", b.s("suggest")) }),
+            ("question", _) => format!(
+                "[open; default {}{}{}]",
+                b.s("default"),
+                if b.s("applies").is_empty() { String::new() } else { format!("; taken at {}", b.s("applies")) },
+                if b.flag("applied") { ", applied" } else { "" }
+            ),
+            ("claim", Some(d)) if d.kind == "strike" => format!("[STRUCK by sulin{}]", d.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default()),
+            ("diff", Some(d)) => format!("[{}]", d.value.as_str().unwrap_or("")),
+            ("status", _) => format!("[{} {}]", b.s("state"), b.s("result")),
+            ("feed", _) => format!("[feed {} {}]", b.s("name"), b.s("state")),
+            ("row", _) => [b.s("tag"), b.s("aside"), b.s("meta")].iter().filter(|x| !x.is_empty()).map(|x| format!("[{x}]")).collect::<Vec<_>>().join(" "),
+            _ => String::new(),
+        };
+        let text = [b.s("title"), b.s("text"), b.s("path")].into_iter().find(|t| !t.is_empty()).unwrap_or("");
+        out += &format!("{pad}{} {} {} {}\n", b.kind, b.id, st, text);
+        for (_, n) in store::notes_on(d, s, &b.id) {
+            let q = n.value["quote"].as_str().unwrap_or("");
+            out += &format!("{pad}  NOTE from sulin: {}{}\n", n.value["r"].as_str().unwrap_or("?"), if q.is_empty() { String::new() } else { format!(" on “{q}”") });
+        }
+        if let Some(pr) = b.f.get("proposal").filter(|v| v.is_object()) {
+            let what = format!("{}{}", pr["verb"].as_str().unwrap_or("?"), pr["value"].as_str().map(|v| format!(" {v}")).unwrap_or_default());
+            let state = match s.decisions.get(&format!("{}#proposal", b.id)) {
+                Some(d) if d.value["at"] == pr["at"] => if d.value["accepted"] == serde_json::json!(true) { "accepted by sulin" } else { "declined by sulin" },
+                _ => "open",
+            };
+            out += &format!("{pad}  proposal: {what} [{state}]\n");
+        }
+    });
+    let ids: std::collections::HashSet<String> = d.ids().into_iter().collect();
+    for (k, v) in &s.decisions {
+        if !ids.contains(k) && !k.contains('#') && crate::who::is_human(&v.by) && v.seq > delivered {
+            out += &format!("  ORPHANED decision on removed {k}: {} {}\n", v.kind, v.value);
+        }
+    }
+    for h in &d.hints {
+        out += &format!("hint: {h}\n");
+    }
+    out
+}
+
+/// Replace an artifact's reminders (`margin hints`).
+fn set_hints(st: &Store, art: &str, hints: Vec<String>) -> Result<u64, String> {
+    set_doc_field(st, art, |d| if d.hints == hints { false } else { d.hints = hints.clone(); true })
+}
+
+/// Change a document-level field (`hints`, `purpose`): `change` edits the document and says
+/// whether anything changed. The document is otherwise written back as it was read; a write that
+/// landed in between (a feed) is taken up and the change redone.
+fn set_doc_field(st: &Store, art: &str, change: impl Fn(&mut Doc) -> bool) -> Result<u64, String> {
+    let mut last = String::new();
+    for _ in 0..8 {
+        let mut d = st.load(art)?;
+        let base = d.rev;
+        if !change(&mut d) {
+            return Ok(base);
+        }
+        match st.put(d, Some(base)) {
+            Ok(rev) => return Ok(rev),
+            Err(e) if e.starts_with("stale base") => last = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Args {
+        Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    /// Side-effecting commands refuse what they don't take instead of acting on it.
+    #[test]
+    fn unknown_flags_and_surplus_args_are_refused() {
+        let spec = |n: &str| CMDS.iter().find(|c| c.name == n).unwrap();
+        for (cmd, v) in [("daemon", &["--foo"][..]), ("session", &["a", "b"]), ("set", &["a", "b", "c", "d", "--nope"]), ("daemon", &["x"])] {
+            let s = spec(cmd);
+            assert!(check_args(cmd, &args(v), s.flags, s.max_pos).is_err(), "{cmd} {v:?}");
+        }
+        let s = spec("set");
+        assert!(check_args("set", &args(&["a", "b", "c", "d", "--by", "you", "--home", "/h"]), s.flags, s.max_pos).is_ok());
+        assert!(wants_help(&["x".into(), "-h".into()]) && !wants_help(&["x".into()]));
+        assert!(CMDS.iter().all(|c| !c.help.is_empty()));
+    }
+
+    /// A store in a throwaway home, and the flags that point a command at it.
+    fn tmp_store(name: &str) -> (Store, Vec<String>) {
+        let home = std::env::temp_dir().join(format!("margin-main-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let st = Store::new(home.clone(), "t".into());
+        (st, vec!["--home".into(), home.display().to_string(), "--project".into(), "t".into(), "--by".into(), "claude".into()])
+    }
+    fn go(cmd: &str, v: &[&str], flags: &[String]) -> Result<(), String> {
+        let mut all: Vec<String> = v.iter().map(|s| s.to_string()).collect();
+        all.extend(flags.iter().cloned());
+        run(cmd, &Args::parse(&all))
+    }
+
+    /// `add` and `ask` on an artifact that doesn't exist yet create it, as `apply` does.
+    #[test]
+    fn add_and_ask_create_the_artifact() {
+        let (st, f) = tmp_store("create");
+        go("add", &["a1", "-", "section", "now", "title=Now"], &f).unwrap();
+        go("add", &["a1", "now", "todo", "t1", "first", "step"], &f).unwrap();
+        let d = st.load("a1").unwrap();
+        assert_eq!((d.title.as_str(), d.rev, d.find("t1").unwrap().s("text")), ("a1", 2, "first step"));
+        go("ask", &["a2", "Q1", "Which?", "x", "y", "--suggest", "y"], &f).unwrap();
+        let d = st.load("a2").unwrap();
+        let q = d.find("Q1").unwrap();
+        assert_eq!((q.kind.as_str(), q.s("suggest"), q.s("default")), ("question", "y", ""), "a suggestion, no default");
+        // an id that exists is refused, pointing at set; a parent that doesn't exist creates nothing
+        let e = go("ask", &["a2", "Q1", "Again?", "x", "y"], &f).unwrap_err();
+        assert!(e.contains("margin set a2 Q1"), "{e}");
+        assert!(go("add", &["a3", "nowhere", "todo", "t1", "x"], &f).is_err() && !st.exists("a3"));
+        let _ = std::fs::remove_dir_all(&st.home);
+    }
+
+    /// `set <field>=` (or an empty value) removes the field instead of storing "".
+    #[test]
+    fn set_with_an_empty_value_removes_the_field() {
+        let (st, f) = tmp_store("unset");
+        go("add", &["p", "-", "todo", "t1", "step", "note=200 runs"], &f).unwrap();
+        assert_eq!(st.load("p").unwrap().find("t1").unwrap().s("note"), "200 runs");
+        go("set", &["p", "t1", "note=", "text=renamed"], &f).unwrap();
+        let d = st.load("p").unwrap();
+        let t = d.find("t1").unwrap();
+        assert!(!t.f.contains_key("note") && t.s("text") == "renamed", "{:?}", t.f);
+        go("set", &["p", "t1", "note", "again"], &f).unwrap();
+        go("set", &["p", "t1", "note", ""], &f).unwrap();
+        assert!(!st.load("p").unwrap().find("t1").unwrap().f.contains_key("note"));
+        let _ = std::fs::remove_dir_all(&st.home);
+    }
+
+    /// Events show local time, and the date only when the event isn't from today.
+    #[test]
+    fn event_times_are_local_with_the_date_when_not_today() {
+        let now = util::epoch_now();
+        let today = local_stamp(&util::rfc3339(now), now);
+        assert_eq!((today.len(), today.matches(':').count()), (8, 2), "{today}");
+        assert!(today.starts_with(&util::local_hm(now)), "local, not UTC: {today}");
+        let old = local_stamp(&util::rfc3339(now - 3.0 * 86400.0), now);
+        assert_eq!((old.len(), old.matches('-').count()), (19, 2), "{old}");
+        assert_eq!(local_stamp("garbage", now), "garbage");
+    }
+
+    /// The help Claude reads names no one: every command's help goes out through `who::say`.
+    #[test]
+    fn init_skill_and_help_are_commands() {
+        for c in ["init", "skill"] {
+            assert!(CMDS.iter().any(|x| x.name == c), "{c}");
+        }
+        assert!(HELP.contains("margin init") && HELP.contains("margin help [<command>|<topic>]"));
+        assert!(args(&["--dry-run", "--claude-dir", "/x"]).has("--dry-run"), "--dry-run is a switch");
+        assert_eq!(args(&["--dry-run", "--claude-dir", "/x"]).get("--claude-dir"), Some("/x"));
+        // no topic shadows a command
+        assert!(help::TOPICS.iter().all(|(t, _)| CMDS.iter().all(|c| c.name != *t)));
+    }
+
+    #[test]
+    fn by_names_the_writer() {
+        assert_eq!(author(&args(&["--by", "you"])).unwrap(), crate::who::HUMAN);
+        assert_eq!(author(&args(&["--by", "claude"])).unwrap(), "claude");
+        assert_eq!(author(&args(&["--by", "jess"])).unwrap(), "jess");
+        assert!(author(&args(&["--by", "feed:x"])).is_err());
+        assert!(author(&args(&["--by"])).is_err());
+    }
+}

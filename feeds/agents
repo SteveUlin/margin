@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# margin feed: a monitor of the Claude Code sessions on this machine. Read-only.
+#
+#   margin feed add agents --stream --artifact agents -- /path/to/margin/feeds/agents
+#
+# A stream feed: it loops every AGENTS_EVERY seconds (default 2) and prints the whole `ag` section
+# only when something changed, so margin writes a revision only on real change; the rows' ages
+# tick in the renderer, not here.
+#
+# Sources, read-only:
+#   - transcripts ~/.claude/projects/*/<session>.jsonl touched in the last AGENTS_HOURS (default 6):
+#     the tail (256 KB) of each, re-read only when its size or mtime changed;
+#   - <session>/subagents/*.jsonl touched in the last 2 minutes (a count per session);
+#   - running `claude` processes (/proc), matched to sessions by working directory.
+#
+# Privacy: it never prints a message body. A row's "last action" is the tool name plus a short
+# label: Bash's own `description`, a file's basename, an Agent's description, a URL's host. Queued
+# messages are counted, not shown.
+#
+# Status per session, most urgent first:
+#   perm?   a tool call pending longer than 60 s (still running, or waiting on a permission prompt:
+#           the transcript can't tell those apart)
+#   you     Claude ended its turn: your move
+#   work    a tool is running, or the model is thinking after a result
+#   idle    your move, untouched for 30 min      ended   no live process, quiet for 5 min
+set -uo pipefail
+EVERY=${AGENTS_EVERY:-2}
+HOURS=${AGENTS_HOURS:-6}
+ROOT=${CLAUDE_PROJECTS:-$HOME/.claude/projects}
+P=${AGENTS_PREFIX:-ag}
+MAX=${AGENTS_MAX:-10}
+
+declare -A SIG FACTS
+prev=""
+
+# Facts from one transcript's tail, as one JSON object. Bodies stay inside jq; only labels leave.
+facts() {
+  tail -c 262144 "$1" | jq -cRn --arg sid "$(basename "$1" .jsonl)" '
+    def act:
+      (.name // "") as $n
+      | (.input // {}) as $i
+      | ($n | sub("^mcp__[^_]+__"; "")) as $short
+      | if $n == "Bash" then ($i.description // "command")
+        elif ($n | test("^(Read|Edit|Write|MultiEdit|NotebookEdit)$")) then (($i.file_path // $i.notebook_path // "") | split("/") | last)
+        elif ($n == "Agent" or $n == "Task") then ($i.description // "")
+        elif $n == "WebFetch" then (($i.url // "") | sub("^https?://"; "") | split("/") | first)
+        elif $n == "Skill" then ($i.skill // "")
+        else "" end
+      | (.[0:48]) as $l
+      | if $l == "" then $short else "\($short) · \($l)" end;
+    [inputs | fromjson? // empty | select(type == "object" and (.isSidechain | not))] as $e
+    | ($e | map(select(.timestamp)) | last // {}) as $last
+    | ($e | map(select(.cwd)) | last // {} | .cwd // "") as $cwd
+    | [ $e[] | select(.type == "assistant") | .timestamp as $t
+        | (.message.content // [])[]? | select(.type == "tool_use") | {id, ts: $t, act: act} ] as $uses
+    | [ $e[] | select(.type == "user") | (.message.content // []) | if type == "array" then .[] else empty end
+        | select(.type == "tool_result") | .tool_use_id ] as $done
+    | ($uses | map(select(.id as $u | $done | index($u) | not)) | last) as $pending
+    | ($e | map(select(.type == "assistant" or (.type == "user" and (.isMeta | not)))) | last // {}) as $turn
+    | (reduce ($e[] | select(.type == "queue-operation") | .operation) as $o (0;
+        if $o == "enqueue" then . + 1 elif ($o == "dequeue" or $o == "remove") then ([. - 1, 0] | max) elif $o == "popAll" then 0 else . end)) as $queued
+    | { sid: $sid, cwd: $cwd, last: ($last.timestamp // ""),
+        pending: ($pending // null),
+        action: (($uses | last | .act) // ""),
+        ended_turn: ($turn.type == "assistant" and $turn.message.stop_reason == "end_turn" and $pending == null),
+        queued: $queued }'
+}
+
+# Working directories of live claude processes (one line each; the remote-control parent excluded).
+live_cwds() {
+  for d in /proc/[0-9]*; do
+    read -r comm < "$d/comm" 2>/dev/null || continue
+    case "$comm" in claude|.claude-wrapped) ;; *) continue ;; esac
+    tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -q -- 'remote-control' && continue
+    readlink "$d/cwd" 2>/dev/null
+  done
+}
+
+while :; do
+  now=$(date +%s)
+  mapfile -t files < <(find "$ROOT" -mindepth 2 -maxdepth 2 -name '*.jsonl' -mmin "-$((HOURS * 60))" 2>/dev/null)
+  parts=()
+  subs=()
+  for f in "${files[@]}"; do
+    sig=$(stat -c '%s.%Y' "$f" 2>/dev/null) || continue
+    if [[ "${SIG[$f]:-}" != "$sig" ]]; then
+      SIG[$f]=$sig
+      FACTS[$f]=$(facts "$f" 2>/dev/null || echo null)
+    fi
+    sub=$(find "${f%.jsonl}/subagents" -name '*.jsonl' -mmin -2 2>/dev/null | wc -l)
+    parts+=("${FACTS[$f]}")
+    subs+=("$sub")
+  done
+  all=$(printf '%s\n' "${parts[@]}" | jq -cs '.')
+  subj=$(printf '%s\n' "${subs[@]}" | jq -cs '.')
+  live=$(live_cwds | jq -Rcs 'split("\n") | map(select(length > 0))')
+  out=$(jq -cn --argjson s0 "$all" --argjson subs "$subj" --argjson live "$live" --argjson now "$now" --arg p "$P" --argjson max "$MAX" '
+    def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0;
+    def project: if . == "" then "?" else split("/") | last end;
+    ($s0 | to_entries | map(select(.value != null) | .value + {subagents: ($subs[.key] // 0)})) as $s
+    # a project with k live processes marks its k most recently active sessions live
+    | ($s | map(select(.last != "")) | sort_by(.last) | reverse) as $ss
+    | [ $ss | to_entries[] | .value as $x | .key as $k
+        | ($live | map(select(. == $x.cwd)) | length) as $procs
+        | ([ $ss[0:$k][] | select(.cwd == $x.cwd) ] | length) as $ahead
+        | ($x + { live: ($ahead < $procs), age: ($now - ($x.last | epoch)) }) ]
+    | map(
+        . as $x
+        | (if .pending then ($now - (.pending.ts | epoch)) else 0 end) as $pend
+        | (if .pending and $pend > 60 then "perm"
+           elif .ended_turn and .age > 1800 then "idle"
+           elif .ended_turn then "you"
+           elif (.live | not) and .age > 300 then "ended"
+           else "work" end) as $st
+        | . + { st: $st, pend: $pend,
+                rank: ({perm: 0, you: 1, work: 2, idle: 3, ended: 4}[$st]) })
+      | map(select(.st != "ended" or .age < 3600))
+      | sort_by(.rank, -(.last | epoch)) | .[0:$max] as $rows
+      | {
+          type: "section", id: $p,
+          title: "agents · \($rows | length) session\(if ($rows | length) == 1 then "" else "s" end)",
+          note: ([ ($rows | map(select(.st == "perm" or .st == "you")) | length) as $n | select($n > 0) | "\($n) need\(if $n == 1 then "s" else "" end) you" ]
+                 + [ ($rows | map(select(.st == "work" or .st == "perm")) | length) as $n | select($n > 0) | "\($n) working" ]
+                 + [ ($rows | map(.queued) | add // 0) as $n | select($n > 0) | "\($n) queued" ]) | join(" · "),
+          children: [ $rows[] | {
+            type: "row", id: "\($p)-\(.sid[0:8])",
+            glyph: ({perm: "perm", you: "you", work: "spin", idle: "idle", ended: "ended"}[.st]),
+            tag: (.cwd | project), tag_tone: (if .st == "perm" or .st == "you" then "purple" else "grey" end),
+            text: ((if .action != "" then " · last: \(.action)" else "" end) as $was
+                   | if .st == "perm" then (.pending.act // "tool") + " · \(.pend / 60 | floor)m"
+                   elif .st == "work" then (.pending.act // "thinking")
+                   elif .st == "you" then "your turn\($was)"
+                   elif .st == "idle" then "idle\($was)"
+                   else "ended\($was)" end),
+            text_tone: (if .st == "idle" or .st == "ended" then "grey" else "fg" end),
+            aside: ([ (select(.queued > 0) | "\(.queued) queued"), (select(.subagents > 0) | "\(.subagents) subagent\(if .subagents > 1 then "s" else "" end)") ] | join(" · ")),
+            aside_tone: (if .queued > 0 then "yellow" else "grey" end),
+            since: .last,
+            detail: (if .st == "perm" then "still running, or waiting on a permission prompt" else null end)
+          } | with_entries(select(.value != null)) ]
+        }')
+  if [[ "$out" != "$prev" && -n "$out" ]]; then
+    printf '%s\n' "$out"
+    prev=$out
+  fi
+  sleep "$EVERY"
+done

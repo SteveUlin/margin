@@ -1,0 +1,14 @@
+digraph T {
+  bgcolor="#2d353b"; pad=0.3; nodesep=0.4; ranksep=0.55; fontname="DejaVu Sans"; fontcolor="#9da9a0"; fontsize=12;
+  node [shape=box style="rounded,filled" fillcolor="#343f44" color="#7a8478" fontcolor="#d3c6aa" fontname="DejaVu Sans" fontsize=12.5 penwidth=1.2 margin="0.18,0.08"];
+  edge [color="#859289" fontcolor="#9da9a0" fontname="DejaVu Sans" fontsize=10.5 arrowsize=0.7 penwidth=1.1];
+  rankdir=TB;
+  a [label="1  claude acts\nmargin patch plan --op tick t2" fillcolor="#425047" color="#a7c080"];
+  b [label="2  store writes doc.json\nrev 8 → 9 (atomic rename, flock)"];
+  c [label="3  renderer sees the change\napplies it by component id"];
+  d [label="4  view state survives\nscroll, folds, focus untouched"];
+  e [label="5  sulin interacts\nticks t3, strikes A1, picks Q1.b" fillcolor="#3a515d" color="#7fbbb3"];
+  f [label="6  event appended\n{seq 41, ticked t3, rev 9}"];
+  g [label="7  next prompt carries it\nhook: '2 margin events'"];
+  a -> b -> c -> d -> e -> f -> g; g -> a [label="claude reads + reacts" constraint=false];
+}

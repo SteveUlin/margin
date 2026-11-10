@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# margin feed: your queued messages in the current Claude Code session, as a board.
+#
+#   margin feed add queue --stream --artifact live --owns q -- /path/to/margin/feeds/queue [SESSION]
+#
+# A message typed while Claude works waits in Claude Code's queue. The transcript records each step
+# (research.md §7b): `queue-operation` enqueue (with the text) when you hit enter; a `queued_command`
+# attachment plus `remove` when it rides into the running turn beside a tool result; `dequeue` when it
+# waited for the turn to end and became the next turn; `popAll` when you pulled the queue back into
+# the input box. Each message shows as
+#   waiting     still in the queue
+#   absorbed    reached the model mid-turn (turn n), Claude is still on that turn
+#   answered    the turn that took it in has ended
+#   next turn   waited for the turn's end and became turn n (answered once that turn ends)
+#   dropped     removed without delivery, or pulled back with popAll
+# Messages typed between turns (enqueue then dequeue within 1.5 s) never waited, so they don't show.
+#
+# Privacy: a row shows only the message's first line, cut to QUEUE_CHARS (default 60). Notifications
+# and agent messages that share the queue (they start with "<") never show.
+#
+# SESSION: a session id or a transcript path; default the newest transcript for this directory
+# (feeds/lib/session.sh). Env: QUEUE_EVERY (s, default 1), QUEUE_MAX (rows, default 8),
+# QUEUE_PREFIX (default q), QUEUE_ONCE=1 prints once and exits (tests).
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$HERE/lib/session.sh"
+EVERY=${QUEUE_EVERY:-1}
+MAX=${QUEUE_MAX:-8}
+P=${QUEUE_PREFIX:-q}
+CHARS=${QUEUE_CHARS:-60}
+prev="" last_sig=""
+
+render() {
+  local f=$1
+  grep -F -e '"queue-operation"' -e '"queued_command"' -e '"user"' -e '"end_turn"' "$f" 2>/dev/null \
+  | jq -cRn -L "$HERE/lib" --arg p "$P" --argjson max "$MAX" --argjson chars "$CHARS" \
+      --arg sid "$(basename "$f" .jsonl)" --argjson now "$(date +%s)" '
+    include "transcript";
+    def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0;
+    def first_open(f): (to_entries | map(select(.value | f)) | first | .key) // null;
+    reduce entries[] as $x ({turn: 0, q: []};
+      if $x.type == "queue-operation" then
+        ($x.operation) as $op
+        | if $op == "enqueue" then
+            .q += [{n: (.q | length), text: ($x.content // "" | tostring), at: $x.timestamp,
+                    human: (($x.content // "" | tostring) | startswith("<") | not), st: "waiting", turn: null}]
+          elif $op == "dequeue" then
+            (.q | first_open(.st == "waiting")) as $i
+            | if $i == null then . else .q[$i] |= (. + {st: "dequeued", out: $x.timestamp}
+                | .quick = (($x.timestamp | epoch) - (.at | epoch) < 1.5)) end
+          elif $op == "remove" then
+            ($x.content // "" | tostring) as $c
+            | (.q | first_open(.st == "waiting" and .text == $c)) as $i
+            | if $i == null then . else .q[$i] += {st: "removed", out: $x.timestamp, turn: .turn} end
+          elif $op == "popAll" then
+            .q |= map(if .st == "waiting" then . + {st: "dropped", out: $x.timestamp} else . end)
+          else . end
+      elif $x.type == "attachment" and $x.attachment.type == "queued_command" then
+        ($x.attachment.prompt | tostring) as $c
+        | (.q | to_entries | map(select(.value.text == $c and (.value.st == "waiting" or .value.st == "removed"))) | last | .key) as $i
+        | if $i == null then . else .q[$i] += {st: "absorbed", turn: .turn} end
+      elif ($x | starts_turn) then
+        .turn += 1 | .turn as $t
+        | .q |= map(if .st == "dequeued" then . + {st: "next", turn: $t} else . end)
+      elif ($x | ends_turn) then
+        .q |= map(if .st == "absorbed" or .st == "next" then . + {st: "answered", done: $x.timestamp} else . end)
+      else . end)
+    | .q
+    | map(select(.human)
+          # typed between turns (enqueue, then dequeue at once): it never waited
+          | select(.quick | not)
+          # removed without a queued_command: dropped once the attachment had 5 s to show up
+          | if .st == "removed" then
+              (if ($now - (.out | epoch)) > 5 then .st = "dropped" else .st = "absorbed" end)
+            else . end)
+    | .[-$max:] as $rows
+    | ($rows | map(select(.st == "waiting")) | length) as $w
+    | ($rows | map(select(.st == "absorbed" or .st == "next")) | length) as $a
+    | {
+        type: "section", id: $p,
+        title: "queue · \($sid[0:8])",
+        note: ([ (select($w > 0) | "\($w) waiting"), (select($a > 0) | "\($a) in play") ] | join(" · ")
+               | if . == "" then (if ($rows | length) == 0 then "nothing queued" else "all answered" end) else . end),
+        children: (if ($rows | length) == 0 then
+            [{type: "text", id: "\($p)-empty", style: "dim", text: "messages you type while Claude works show here"}]
+          else [ $rows[] | {
+            type: "row", id: "\($p)-\(.n)",
+            glyph: ({waiting: "idle", absorbed: "spin", next: "spin", answered: "done", dropped: "ended"}[.st]),
+            tag: ({waiting: "waiting", absorbed: "absorbed", next: "next turn", answered: "answered", dropped: "dropped"}[.st]),
+            tag_tone: ({waiting: "yellow", absorbed: "aqua", next: "aqua", answered: "green", dropped: "grey"}[.st]),
+            text: (.text | short($chars)),
+            text_tone: (if .st == "answered" or .st == "dropped" then "grey" else "fg" end),
+            aside: (if .turn then "turn \(.turn)" else "" end), aside_tone: "grey",
+            since: .at
+          } ] end)
+      }'
+}
+
+while :; do
+  f=$(session_file "${1:-${QUEUE_SESSION:-}}")
+  if [[ -z "$f" ]]; then
+    out=$(jq -cn --arg p "$P" '{type: "section", id: $p, title: "queue", note: "no transcript for this directory", children: []}')
+  else
+    s="$f:$(sig "$f")"
+    # re-render on change, and every 5th pass (a removal turns into "dropped" with time alone)
+    tick=$(( ${tick:-0} + 1 ))
+    if [[ "$s" != "$last_sig" || $((tick % 5)) == 0 ]]; then
+      last_sig=$s
+      out=$(render "$f") || out=""
+    fi
+  fi
+  if [[ -n "$out" && "$out" != "$prev" ]]; then
+    printf '%s\n' "$out"
+    prev=$out
+  fi
+  [[ -n "${QUEUE_ONCE:-}" ]] && exit 0
+  sleep "$EVERY"
+done

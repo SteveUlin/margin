@@ -1,0 +1,16 @@
+[package]
+name = "margin"
+description = "live artifacts beside the chat: typed, stateful components Claude writes and you act on"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "margin"
+path = "src/main.rs"
+
+[dependencies]
+vellum = { path = "../vellum" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
