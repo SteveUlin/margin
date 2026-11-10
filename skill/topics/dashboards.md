@@ -59,6 +59,8 @@ margin apply reviews <<'EOF'
   {"type": "feed", "id": "pr-feed", "name": "reviews", "state": "not registered"}]}
 EOF
 margin render reviews --width 100 --height 40     # one frame as text: check it without a pane
+margin render services --section svc-all          # a `tabs` block's other section (default: its first)
+margin render services --focus svc-db --focused   # the focus on a block; its section comes on show
 margin show reviews                               # the tree: type, id, text
 ```
 

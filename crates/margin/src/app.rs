@@ -234,6 +234,11 @@ impl Live {
             view.seen_at = now_rfc3339();
         }
         let mut scene = Scene::new(cfg);
+        // a focus the view file names inside a section of a `tabs` block that is not on show
+        // (written from outside the pane) brings that section on show
+        if let Some(f) = view.focus.clone() {
+            crate::scene::show_in_tabs(&doc, &mut view, &f);
+        }
         scene.restore(&view);
         let _ = std::fs::create_dir_all(crate::tail::dir(st, art));
         Ok(Live {

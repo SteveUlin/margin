@@ -103,6 +103,27 @@ pub fn subtab_active<'a>(b: &'a Block, view: &View) -> Option<&'a Block> {
     view.subtabs.get(&b.id).and_then(|id| b.children.iter().find(|c| c.id == *id)).or(b.children.first())
 }
 
+/// Put block `id` on show: every `tabs` component above it switches to the section that holds
+/// it (the first section is the default, so it is never named). True when a tab changed. For a
+/// focus that arrives from outside the visible list: `margin render --focus`, a view file, a
+/// click on a line of the pinned head.
+pub fn show_in_tabs(doc: &Doc, view: &mut View, id: &str) -> bool {
+    let mut changed = false;
+    let mut at = id.to_string();
+    while let Some(p) = doc.parent_of(&at) {
+        if p.kind == "tabs" && subtab_active(p, view).map(|c| c.id != at).unwrap_or(false) {
+            if p.children.first().map(|c| c.id == at).unwrap_or(false) {
+                view.subtabs.remove(&p.id);
+            } else {
+                view.subtabs.insert(p.id.clone(), at.clone());
+            }
+            changed = true;
+        }
+        at = p.id.clone();
+    }
+    changed
+}
+
 /// What a tab of a `tabs` component is called: its section's title.
 fn subtab_label(c: &Block) -> &str {
     [c.s("title"), c.s("text")].into_iter().find(|s| !s.trim().is_empty()).unwrap_or(&c.id)

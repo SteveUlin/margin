@@ -85,7 +85,7 @@ panes and screen (host: zellij or plain; config key host):
   margin link [<art>]           the pane this Claude session keeps (margin unlink to drop it)
   margin view <art> [<art>...]  the live renderer (what the pane runs); more artifacts are tabs (gt / gT)
   margin tab <art> [add|rm|show <tab-art>] [--pane P]   the tabs of the pane showing <art>
-  margin render <art> [--width W] [--height H] [--ansi] [--focused] [--at SECS]
+  margin render <art> [--width W] [--height H] [--section ID] [--focus ID] [--ansi]   one frame, no pane
   margin select [TEXT]          Zellij copy_command target (stdin if no TEXT)
   margin session [NAME]         start a Zellij session wired for margin (copy_command)
   margin demo [live [--speed X]]
@@ -157,7 +157,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "close", help: "margin close <art> [--session S]\n  close the panes showing it\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "panes", help: "margin panes <art> [--session S]\n  where it's showing (pane ids, or pids under the plain host)\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "view", help: "margin view <art> [<art>...]\n  the live renderer (what a margin pane runs). More artifacts show as tabs on the title line\n  (click, gt / gT, 3gt); with one artifact the pane shows the tabs its view file remembers\n", flags: &[], max_pos: None },
-    Cmd { name: "render", help: "margin render <art> [<art>...] [--tab ART] [--width W] [--height H] [--ansi] [--focused] [--at SECS] [--pane P] [--motion M] [--detail] [--focus ID]\n  one frame to stdout (text, or ANSI with --ansi); more artifacts draw the tab bar, --tab picks\n  the one on screen; --detail opens the detail panel, --focus puts the focus on a block\n", flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus"], max_pos: None },
+    Cmd { name: "render", help: RENDER_HELP, flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus", "--section"], max_pos: None },
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "daemon", help: "margin daemon\n  the feed supervisor, in the foreground (the CLI starts it on demand; units/ has a systemd unit)\n", flags: &[], max_pos: Some(0) },
@@ -167,6 +167,25 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data]\n  print one: the artifact (a whole document: margin example reviews | margin apply reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
+
+const RENDER_HELP: &str = "margin render <art> [<art>...] [--width W] [--height H] [--section ID]... [--focus ID] [--focused]
+              [--detail] [--tab ART] [--ansi] [--at SECS] [--motion on|off] [--pane P]
+  one frame to stdout, with no pane and no terminal: what the pane would draw
+  --width W      the frame's width in cells (default 62)
+  --height H     its height in rows (default 40)
+  --section ID   show this section of a `tabs` block instead of its first (repeat it for
+                 nested or several tabs blocks); an id that is not such a section is an error
+  --focus ID     put the focus on a block; a block inside a hidden section of a `tabs` block
+                 brings that section on show. An id the artifact doesn't have is an error
+  --focused      draw as the pane that has the keyboard: the focus ring, the focused row in full
+  --detail       open the detail panel (the focused row's `detail` and fields)
+  --tab ART      with several artifacts (a tab bar on the title line): the one on screen
+  --ansi         ANSI escapes with colors and attributes, for a terminal; without it plain
+                 text, where Nerd Font icons are replaced by ordinary characters (a check, a cross)
+  --at SECS      the animation clock, seconds since the pane started (default 10: all settled)
+  --motion on|off  with or without animation (default: the config's)
+  --pane P       draw with pane P's saved view: folds, focus, scroll (default tty)
+";
 
 const FEED_HELP: &str = "feeds: scripts that keep an artifact current without Claude
   margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
@@ -257,6 +276,10 @@ impl Args {
     }
     fn get(&self, k: &str) -> Option<&str> {
         self.flags.iter().rev().find(|(f, _)| f == k).and_then(|(_, v)| v.as_deref())
+    }
+    /// Every value of a flag that may repeat (`--section a --section b`), in order.
+    fn all(&self, k: &str) -> Vec<&str> {
+        self.flags.iter().filter(|(f, _)| f == k).filter_map(|(_, v)| v.as_deref()).collect()
     }
     fn has(&self, k: &str) -> bool {
         self.flags.iter().any(|(f, _)| f == k)
@@ -1087,9 +1110,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let s = st.state(art);
             let mut v = st.view(art, a.get("--pane").unwrap_or("tty"));
             v.detail |= a.has("--detail");
-            if let Some(f) = a.get("--focus") {
-                v.focus = Some(f.to_string());
-            }
+            render_view(&d, &mut v, a.all("--section"), a.get("--focus"))?;
             let w: u16 = a.get("--width").and_then(|x| x.parse().ok()).unwrap_or(62);
             let h: u16 = a.get("--height").and_then(|x| x.parse().ok()).unwrap_or(40);
             let at: f64 = a.get("--at").and_then(|x| x.parse().ok()).unwrap_or(10.0);
@@ -1442,6 +1463,30 @@ fn show_text(d: &Doc, s: &store::State, claims: &[store::Claim], delivered: u64)
     out
 }
 
+/// `margin render --section S… --focus ID`: choose what a frame shows. Each `--section` names a
+/// section of a `tabs` block and puts it on show; `--focus` puts the focus on a block and brings
+/// the sections that hold it on show. An id the artifact doesn't have is an error that names it:
+/// a frame drawn as if nothing was asked reads as "the flag did nothing".
+fn render_view(d: &Doc, v: &mut store::View, sections: Vec<&str>, focus: Option<&str>) -> Result<(), String> {
+    for sec in sections {
+        if d.find(sec).is_none() {
+            return Err(format!("--section {sec:?}: no component with that id in {}; margin show {}", d.id, d.id));
+        }
+        if d.parent_of(sec).map(|p| p.kind != "tabs").unwrap_or(true) {
+            return Err(format!("--section {sec:?}: not a section of a tabs block (its children are the sections; margin show {})", d.id));
+        }
+        scene::show_in_tabs(d, v, sec);
+    }
+    if let Some(f) = focus {
+        if d.find(f).is_none() {
+            return Err(format!("--focus {f:?}: no component with that id in {}; margin show {}", d.id, d.id));
+        }
+        scene::show_in_tabs(d, v, f);
+        v.focus = Some(f.to_string());
+    }
+    Ok(())
+}
+
 /// Replace an artifact's reminders (`margin hints`).
 fn set_hints(st: &Store, art: &str, hints: Vec<String>) -> Result<u64, String> {
     set_doc_field(st, art, |d| if d.hints == hints { false } else { d.hints = hints.clone(); true })
@@ -1560,6 +1605,40 @@ mod tests {
         assert_eq!(args(&["--dry-run", "--claude-dir", "/x"]).get("--claude-dir"), Some("/x"));
         // no topic shadows a command
         assert!(help::TOPICS.iter().all(|(t, _)| CMDS.iter().all(|c| c.name != *t)));
+    }
+
+    /// `render --section` picks a tabs block's section, `--focus` inside a hidden section brings
+    /// it on show, and an id that isn't there is an error naming it.
+    #[test]
+    fn render_section_and_focus_choose_the_tab_and_refuse_unknown_ids() {
+        let d: Doc = serde_json::from_value(json!({"id": "a", "title": "A", "blocks": [
+            {"type": "tabs", "id": "views", "children": [
+                {"type": "section", "id": "mine", "title": "Mine", "children": [{"type": "row", "id": "m1", "text": "one"}]},
+                {"type": "section", "id": "team", "title": "Team", "children": [{"type": "row", "id": "t1", "text": "two"}]}]},
+            {"type": "row", "id": "out", "text": "outside"}]})).unwrap();
+        let mut v = store::View::default();
+        render_view(&d, &mut v, vec!["team"], None).unwrap();
+        assert_eq!(v.subtabs.get("views").map(String::as_str), Some("team"));
+        render_view(&d, &mut v, vec!["mine"], None).unwrap();
+        assert!(v.subtabs.is_empty(), "the first section is the default");
+        render_view(&d, &mut v, vec![], Some("t1")).unwrap();
+        assert_eq!((v.subtabs.get("views").map(String::as_str), v.focus.as_deref()), (Some("team"), Some("t1")));
+        render_view(&d, &mut v, vec![], Some("out")).unwrap();
+        assert_eq!(v.subtabs.get("views").map(String::as_str), Some("team"), "a focus outside the tabs leaves them");
+        for (sec, focus, names) in [(vec!["nope"], None, "nope"), (vec!["out"], None, "out"), (vec!["m1"], None, "m1"), (vec![], Some("gone"), "gone")] {
+            let e = render_view(&d, &mut v, sec, focus).unwrap_err();
+            assert!(e.contains(&format!("{names:?}")), "{e}");
+        }
+        // the frame itself: the section asked for is the one drawn
+        let (st, f) = tmp_store("render");
+        st.put(d, None).unwrap();
+        assert!(go("render", &["a", "--focus", "gone"], &f).unwrap_err().contains("\"gone\""));
+        go("render", &["a", "--section", "team", "--focus", "t1"], &f).unwrap();
+        assert!(RENDER_HELP.lines().filter(|l| l.starts_with("  --")).count() >= 10, "a line per flag");
+        for flag in CMDS.iter().find(|c| c.name == "render").unwrap().flags {
+            assert!(RENDER_HELP.contains(&format!("  {flag} ")), "render --help doesn't explain {flag}");
+        }
+        let _ = std::fs::remove_dir_all(&st.home);
     }
 
     #[test]
