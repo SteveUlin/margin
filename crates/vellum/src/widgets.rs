@@ -326,12 +326,16 @@ pub fn run_pieces(th: &Theme, values: &[Outcome], max: u16) -> Vec<Piece> {
 /// "2/20 failed" over the runs that happened (empty slots don't count), and whether the newest
 /// of them failed. `None` when nothing ran.
 pub fn run_summary(values: &[Outcome]) -> Option<(String, bool)> {
+    run_count(values).map(|(failed, ran, newest_failed)| (format!("{failed}/{ran} failed"), newest_failed))
+}
+
+/// How many runs failed, how many happened (empty slots don't count), and whether the newest of
+/// them failed. `None` when nothing ran. A table's `runs` column prints it as `2/20`.
+pub fn run_count(values: &[Outcome]) -> Option<(usize, usize, bool)> {
     let ran: Vec<&Outcome> = values.iter().filter(|v| **v != Outcome::None).collect();
-    if ran.is_empty() {
-        return None;
-    }
+    let newest = ran.last()?;
     let failed = ran.iter().filter(|v| ***v == Outcome::Fail).count();
-    Some((format!("{failed}/{} failed", ran.len()), **ran.last().unwrap() == Outcome::Fail))
+    Some((failed, ran.len(), **newest == Outcome::Fail))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

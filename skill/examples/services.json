@@ -16,7 +16,7 @@
            {"key": "st", "title": "", "kind": "state"},
            {"key": "name", "title": "Service"},
            {"key": "owner", "title": "Owner", "kind": "who", "optional": true},
-           {"key": "runs", "title": "Runs", "kind": "runs"},
+           {"key": "runs", "title": "Runs", "kind": "runs", "summary": true},
            {"key": "last", "title": "Last", "kind": "age"}
          ], "children": [
           {"type": "tr", "id": "svc-s-cert-renew", "target": "https://example.com/services/cert-renew", "detail": "", "cells": {"st": "idle", "name": "cert-renew", "owner": "bo", "runs": ["ok", "ok", "ok"], "last": "2026-10-28T00:00:00Z"}},

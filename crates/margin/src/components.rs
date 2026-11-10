@@ -1466,6 +1466,15 @@ pub(crate) struct TableLayout {
     cols: Vec<widgets::Column>,
     slots: Vec<Slot>,
     zebra: bool,
+    /// Per column: the cells a `runs` column keeps after its strip for the failure count
+    /// (`summary: true`), the blank between them included; 0 for every other column.
+    sum_w: Vec<u16>,
+}
+
+/// A runs cell's failure count as a `summary: true` column prints it: `1/6`, and whether the
+/// newest run failed. None when nothing ran.
+fn runs_count_text(v: Option<&serde_json::Value>) -> Option<(String, bool)> {
+    widgets::run_count(&outcomes(v)).map(|(failed, ran, newest)| (format!("{failed}/{ran}"), newest))
 }
 
 /// A cell's value as text: strings as written, numbers and bools printed, anything else empty.
@@ -1505,14 +1514,25 @@ fn cell_natural(kind: ColKind, v: Option<&serde_json::Value>, th: &Theme) -> u16
 
 /// A cell's pieces for a slot `w` cells wide. A live cell (an age, a spinner) asks for its
 /// redraw through `tick`.
-fn cell_pieces(cx: &Ctx, th: &Theme, kind: ColKind, v: Option<&serde_json::Value>, w: u16, tick: &mut Option<f64>) -> Vec<Piece> {
+fn cell_pieces(cx: &Ctx, th: &Theme, kind: ColKind, v: Option<&serde_json::Value>, w: u16, sum_w: u16, tick: &mut Option<f64>) -> Vec<Piece> {
     let p = cx.p;
     match kind {
         ColKind::Text => markup(&cell_text(v)).into_iter().map(|(s, sp)| (s, span_style(p, sp, p.fg, false, Some(th.emphasis)))).collect(),
         ColKind::Num => vec![(cell_text(v), Style::fg(p.fg))],
         ColKind::Who => widgets::who_pieces(th, &cell_text(v)),
         ColKind::Id => widgets::id_pieces(th, &cell_text(v)),
-        ColKind::Runs => widgets::run_pieces(th, &outcomes(v), w),
+        ColKind::Runs => {
+            let mut ps = widgets::run_pieces(th, &outcomes(v), w.saturating_sub(sum_w));
+            // the count sits in its own slot after the strip, right-aligned, so the strips of
+            // every row still end in one column
+            if let Some((text, newest_failed)) = runs_count_text(v).filter(|_| sum_w > 0) {
+                let pad = (sum_w as usize).saturating_sub(width(&text) + 1);
+                // the cell after the newest run is not blank (widgets::SYMBOL_SPACE)
+                ps.push((format!("{}{}", widgets::SYMBOL_SPACE, " ".repeat(pad)), Style::default()));
+                ps.push((text, Style::fg(if newest_failed { p.red } else { p.grey1 })));
+            }
+            ps
+        }
         ColKind::Age => match cell_time(v) {
             Some(t) => {
                 let s = cx.wall - t;
@@ -1540,7 +1560,7 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
     LAYOUTS.with(|n| n.set(n.get() + 1));
     let ind: u16 = if depth > 0 { 3 } else { 1 };
     let specs = t.f.get("columns").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let (mut keys, mut kinds, mut cols) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut keys, mut kinds, mut cols, mut sum_w) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for c in &specs {
         let key = c["key"].as_str().unwrap_or("").to_string();
         let kind = match c["kind"].as_str().unwrap_or("text") {
@@ -1562,19 +1582,26 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
         };
         let natural = t.children.iter().map(|r| cell_natural(kind, r.f.get("cells").and_then(|cs| cs.get(&key)), th)).max().unwrap_or(0);
         let fixed = c["width"].as_u64().map(|n| n.clamp(1, 500) as u16);
+        // a runs column's failure count: as wide as the widest count of any row, plus a blank
+        let count = if kind == ColKind::Runs && c["summary"].as_bool().unwrap_or(false) {
+            t.children.iter().filter_map(|r| runs_count_text(r.f.get("cells").and_then(|cs| cs.get(&key)))).map(|(s, _)| width(&s) as u16 + 1).max().unwrap_or(0)
+        } else {
+            0
+        };
         let (natural, min, flex) = match (fixed, kind) {
             (Some(n), _) => (n, n, false),
             (None, ColKind::Text) => (natural, TEXT_MIN, true),
-            (None, ColKind::Runs) => (natural, widgets::runs_width(RUNS_MIN, th.runs.gap), false),
+            (None, ColKind::Runs) => (natural + count, widgets::runs_width(RUNS_MIN, th.runs.gap) + count, false),
             (None, _) => (natural, natural, false),
         };
+        sum_w.push(count);
         cols.push(widgets::Column { title: c["title"].as_str().unwrap_or("").to_string(), align, natural, min, flex, optional: c["optional"].as_bool().unwrap_or(false), strip: kind == ColKind::Runs });
         keys.push(key);
         kinds.push(kind);
     }
     let slots = widgets::table_layout(&cols, w.saturating_sub(ind + 1));
     let zebra = t.f.get("zebra").and_then(|z| z.as_bool()).unwrap_or(th.zebra);
-    TableLayout { ind, keys, kinds, cols, slots, zebra }
+    TableLayout { ind, keys, kinds, cols, slots, zebra, sum_w }
 }
 
 /// The layouts of every table in the doc being drawn, built once per doc revision, pane width
@@ -1677,7 +1704,7 @@ fn draw_tr(cx: &Ctx, b: &Block, w: u16) -> Drawn {
         .iter()
         .map(|slot| {
             let kind = lay.kinds[slot.col];
-            let ps = cell_pieces(cx, &th, kind, cells.and_then(|c| c.get(&lay.keys[slot.col])), slot.w, &mut tick);
+            let ps = cell_pieces(cx, &th, kind, cells.and_then(|c| c.get(&lay.keys[slot.col])), slot.w, lay.sum_w[slot.col], &mut tick);
             if full && kind == ColKind::Text && widgets::pieces_width(&ps) > slot.w as usize {
                 wrap_runs(&ps, slot.w.max(1) as usize)
             } else {
@@ -2092,6 +2119,45 @@ mod dash_tests {
         assert!(rows[5].ends_with("▪▪✗"), "three cells hold the three newest: {}", rows[5]);
         assert!(rows[6].ends_with("✗▪     ▪"), "two strips stand three cells apart: {}", rows[6]);
         assert_eq!(rows[5].chars().count(), rows[6].chars().count());
+    }
+
+    /// `summary: true` on a runs column: the failure count after each strip, in one slot (so the
+    /// strips still end in one column), dim, red when the newest run failed, inside the column.
+    #[test]
+    fn a_runs_column_can_end_in_its_failure_count() {
+        let fails: Vec<&str> = std::iter::repeat("ok").take(11).chain(["fail"]).collect();
+        let table = |summary: bool| doc(1, json!([
+            {"type": "table", "id": "t", "columns": [{"key": "job", "title": "Job"}, {"key": "ci", "title": "Runs", "kind": "runs", "summary": summary}], "children": [
+                {"type": "tr", "id": "a", "cells": {"job": "deploy", "ci": ["ok", "fail", "ok", null, "ok", "ok", "ok"]}},
+                {"type": "tr", "id": "b", "cells": {"job": "backup", "ci": fails}},
+                {"type": "tr", "id": "c", "cells": {"job": "idle", "ci": []}}]}]));
+        let (text, drawn) = render_at(&table(true), 60, false, 0.0);
+        let text = text.replace('\u{a0}', " ");
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(rows[2].ends_with("▪✗▪·▪▪▪  1/6"), "empty slots don't count: {text}");
+        assert!(rows[3].ends_with(&format!("{}✗ 1/12", "▪".repeat(11))), "{text}");
+        assert_eq!(rows[2].chars().count(), rows[3].chars().count(), "the counts end in one column, and so do the strips");
+        assert_eq!(rows[4].trim(), "idle", "no runs, no count: {text}");
+        let p = &EVERFOREST;
+        let last = |id: &str| {
+            let g = drawn[id].grid.as_ref().unwrap();
+            let line = g.to_text().lines().next().unwrap().to_string();
+            g.get(line.chars().count() as u16 - 1, 0).unwrap().style.fg
+        };
+        assert_eq!((last("a"), last("b")), (Some(p.grey1), Some(p.red)), "dim; red when the newest run failed");
+        // without it the column is exactly the strips
+        let (plain, _) = render_at(&table(false), 60, false, 0.0);
+        let plain = plain.replace('\u{a0}', " ");
+        let prows: Vec<&str> = plain.lines().collect();
+        assert!(prows[3].trim_end().ends_with(&format!("{}✗", "▪".repeat(11))), "{plain}");
+        assert_eq!(rows[3].chars().count(), prows[3].trim_end().chars().count() + " 1/12".len(), "the count is part of the column's width");
+        // it belongs to runs columns only, and is true or false
+        let bad = |col: serde_json::Value| {
+            let b: Block = serde_json::from_value(json!({"type": "table", "id": "t", "columns": [col]})).unwrap();
+            crate::doc::check_block(&b).unwrap_err()
+        };
+        assert!(bad(json!({"key": "a", "summary": true})).contains("only a runs column"), "a text column");
+        assert!(bad(json!({"key": "a", "kind": "runs", "summary": "yes"})).contains("true or false"));
     }
 
     #[test]

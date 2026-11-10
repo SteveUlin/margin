@@ -14,7 +14,8 @@
 #
 # "Failing" holds, per failing service, a `row` (glyph `fail`: that also puts the failure mark on
 # this dashboard's tab in the pane) with the error as its `detail`, and a `runs` strip with a
-# failure count. "All" is a table with a state glyph, a run strip and the last run's age.
+# failure count. "All" is a table with a state glyph, a run strip that ends in its failure count
+# (`summary: true` on the column) and the last run's age.
 #
 # For real data, replace the file with a command (systemctl list-units --output json, your job
 # runner's API, ...) and map its words to margin's in the two `def`s below.
@@ -57,7 +58,7 @@ jq -c '
                 {key: "st",    title: "",        kind: "state"},
                 {key: "name",  title: "Service"},
                 {key: "owner", title: "Owner",   kind: "who", optional: true},
-                {key: "runs",  title: "Runs",    kind: "runs"},
+                {key: "runs",  title: "Runs",    kind: "runs", summary: true},
                 {key: "last",  title: "Last",    kind: "age"}
               ],
               children: [ $all[] | {

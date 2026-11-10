@@ -140,7 +140,7 @@ its own id.
    {"key": "pr", "title": "PR", "kind": "id"},
    {"key": "by", "title": "Author", "kind": "who"},
    {"key": "title", "title": "Title"},
-   {"key": "ci", "title": "CI", "kind": "runs", "optional": true},
+   {"key": "ci", "title": "CI", "kind": "runs", "summary": true, "optional": true},
    {"key": "age", "title": "Age", "kind": "age"}],
  "children": [
    {"type": "tr", "id": "pr-4812", "target": "https://example.com/pulls/4812",
@@ -151,9 +151,10 @@ its own id.
 
 - Table fields: `columns`, `empty` (text shown while it has no rows), `zebra` (stripe alternate
   rows; default from the config, off).
-- A column is `{key, title?, kind?, align?, width?, optional?}`. `align`: `left` `right` `center`
-  (`num`, `age` and `runs` default to right). `width`: fix it at this many cells. `optional: true`:
-  drop this column first when the pane is narrow.
+- A column is `{key, title?, kind?, align?, width?, optional?, summary?}`. `align`: `left` `right`
+  `center` (`num`, `age` and `runs` default to right). `width`: fix it at this many cells.
+  `optional: true`: drop this column first when the pane is narrow. `summary: true` (a `runs`
+  column only): each strip ends with its failure count.
 - Row fields: `cells` (an object keyed by column key; a missing key is a blank cell), `target` (a
   URL or `mg:` token that enter or a click opens), `detail` (shown in the detail panel).
 
@@ -163,7 +164,7 @@ its own id.
 | `num` | a number or text | right-aligned |
 | `who` | a name | the name's badge: a glyph and the name in that name's color |
 | `id` | a PR number, a ticket key | the id in its own stable color |
-| `runs` | a list of `"ok"` `"fail"` `"skip"` `"running"` or `null` | a run strip, newest at the right (at most the newest 20) |
+| `runs` | a list of `"ok"` `"fail"` `"skip"` `"running"` or `null` | a run strip, newest at the right (at most the newest 20); with `"summary": true` on the column, then failed/ran such as `1/6` (dim; red when the newest run failed), inside the column's width |
 | `age` | an RFC 3339 time, or unix seconds | a live age (`12s` `4m` `2h` `3d`) the pane keeps ticking |
 | `state` | `spin` `done` `fail` `you` `perm` `idle` `ended` `commit` `wc` `file` `term`, or any one character | a status glyph in its color (`spin` animates) |
 
@@ -171,7 +172,8 @@ its own id.
   with `…`. Below 20 cells of text, `optional` columns drop, rightmost first. The focused row
   shows its cut cells in full.
 - Refused on write: a `tr` outside a table, any other block inside one, a cell whose key names
-  no column, a `runs` value outside the five, an unknown `kind` or column field, a repeated key.
+  no column, a `runs` value outside the five, an unknown `kind` or column field, a repeated key,
+  `summary` on a column that is not `runs`.
 
 **runs**: a run strip on its own line: the last n outcomes, oldest left, one square each, a cross
 for a failure. `summary: true` ends it with a count such as `2/12 failed`.

@@ -146,7 +146,7 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "rule", about: "a horizontal line: a break between parts of a dashboard", children: false, action: "",
         fields: &[("text", Ty::Text, "a label inset at the left")] },
     Kind { name: "table", about: "a table: a header and aligned columns; its children are tr rows", children: true, action: "",
-        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state (default text), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows")] },
+        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state (default text), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows")] },
     Kind { name: "tr", about: "one table row, only inside a table; give it a stable id so a rewrite reconciles", children: false, action: "open (click, when it has a target)",
         fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)")] },
     Kind { name: "runs", about: "a run strip: the last n outcomes as small squares, oldest left, a cross for a failure", children: false, action: "",
@@ -268,7 +268,7 @@ pub fn check_columns(table: &Block) -> Result<Vec<(String, String)>, String> {
             return Err(format!("{id}: two columns share the key {key:?}"));
         }
         for f in o.keys() {
-            let known = ["key", "title", "kind", "align", "width", "optional"];
+            let known = ["key", "title", "kind", "align", "width", "optional", "summary"];
             if !known.contains(&f.as_str()) {
                 return Err(format!("{id}: column {key:?} has an unknown field {f:?}{}; its fields: {}", did_you_mean(f, known.iter().copied()), known.join(" ")));
             }
@@ -293,6 +293,12 @@ pub fn check_columns(table: &Block) -> Result<Vec<(String, String)>, String> {
         }
         if let Some(x) = o.get("optional").filter(|x| !x.is_null() && !x.is_boolean()) {
             return Err(format!("{id}: column {key:?} optional must be true or false, got {x}"));
+        }
+        match o.get("summary") {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+            Some(Value::Bool(true)) if kind == "runs" => {}
+            Some(Value::Bool(true)) => return Err(format!("{id}: column {key:?} summary: only a runs column has a failure count (this one is {kind})")),
+            Some(x) => return Err(format!("{id}: column {key:?} summary must be true or false, got {x}")),
         }
         out.push((key.to_string(), kind));
     }
