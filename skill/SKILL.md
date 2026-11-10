@@ -66,9 +66,9 @@ margin add plan decided decided D3 "Keep artifacts 30 days" by=claude
 margin show plan                           # the pane as text, with {{user}}'s decisions merged in
 ```
 
-1. **Start once.** Write the shape, `margin open <art>`. Outside Zellij `open` prints a
-   `margin view …` command: hand it to {{user}} to run in a terminal beside the chat. The pane
-   watches the files, so write as often as you like.
+1. **One pane per chat.** If a hook line names your pane, use it. Else write the shape and
+   `margin open <art>` once (outside Zellij it prints a `margin view …` line for {{user}} to
+   run). After that, change the pane or add a tab to it; never open a second one for a new topic.
 2. **Each turn begins with the hook's lines.** `margin: your pane is <art> · doing … · N open` is
    the pane linked to your session (`margin link <art>` switches it); the other `margin:` lines are
    what {{user}} did in the pane. Treat them as their own input. `margin events --unread` lists
