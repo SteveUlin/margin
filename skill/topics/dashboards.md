@@ -68,8 +68,21 @@ margin show reviews                               # the tree: type, id, text
 - A schema error names the block and the field and writes nothing; `margin schema <type>` lists
   a type's fields.
 - The last block above places the feed's health line (state, trigger, last write, the error when
-  it crashes). Its id is `<prefix>-feed`. Leave it out and the daemon inserts it above the block
-  whose id is the prefix (or at the end of the document), which pushes it ahead of the content.
+  it crashes): `{"type": "feed", "id": "<prefix>-feed", "name": "<feed name>", "state": "not
+  registered"}`. The daemon fills it in once the feed is registered. Leave it out and the daemon
+  inserts it above the block whose id is the prefix (or at the end of the document), which
+  pushes it ahead of the content.
+- The feed-owned block starts empty and the feed fills it: the `table` above has no rows. For a
+  feed that writes a `tabs` block, the skeleton is the block with its sections, each empty:
+
+```json
+{"type": "tabs", "id": "svc", "children": [
+  {"type": "section", "id": "svc-failing", "title": "Failing", "children": []},
+  {"type": "section", "id": "svc-all", "title": "All", "children": []}]}
+```
+
+- The pane's bottom line reads `MARGIN <artifact> <project>`: the second field is the project
+  the artifact belongs to (`--project`), not a directory.
 
 **(c) Write the feed script**: a program that prints `margin apply` input and exits 0. For a
 table that is one line: the table block with all its `tr` children. `margin help feeds` has the
@@ -102,9 +115,8 @@ margin view reviews services tracker          # the renderer itself, for a plain
   {{user}} to run in a terminal. Open a pane only when {{user}} asked for one.
 - A tab that is not on screen carries marks: one for changes not yet seen, one when the board
   waits on {{user}} (an open `question`, a `todo` with `"owner": "you"`), and `✗` when something
-  failed. The `✗` comes from a `row` with `"glyph": "fail"`, a `status` with `"state": "fail"` or a `todo` with
-  status `blocked`. A table's `state` cell does not raise it: if a failure should mark the tab,
-  give it a `row` (the `services` example does).
+  failed. The `✗` comes from a `row` with `"glyph": "fail"`, a table row whose `state` cell is
+  `fail`, a `status` with `"state": "fail"` or a `todo` with status `blocked`.
 - Keys in the pane: arrows or `gt` / `gT` switch tabs; `]t` / `[t` switch a `tabs` block's
   sections; `j` / `k` move the focus; enter opens the focused row's `target`; `d` opens the detail
   panel (the focused row's `detail` and every field); `]c` / `[c` walk what changed; `zh` folds the
@@ -202,7 +214,8 @@ on the right an aside and a live age. `detail` wraps under the row (three lines 
 - `glyph`: the `state` names above. `since`: RFC 3339 or unix seconds, drawn as an age (write the
   time, never "2h ago": the pane ticks it, and the feed writes only when something changed).
 - `tag_tone`, `aside_tone`, `text_tone`, `tone` take a tone; `bold: true`; `meta` is dim text at
-  the far right. A row's `text` is plain and cut at the edge: no `**bold**` or `@[name]` there.
+  the far right. A row's `text` takes inline markup like a text cell, and is cut at the edge
+  (shown in full when the row has the focus).
 - A row may hold children (rows under it).
 
 **status**: a check or a job: `{"type": "status", "id": "s1", "text": "deploy", "state": "fail",
@@ -232,7 +245,7 @@ holds sub-bullets as children. Both take `tone`.
 fewer with no dash. **decided**: a settled decision: `text`, `by` (`claude` or `you`), `at`.
 **question** (`margin ask … --suggest`) and **claim** work on a dashboard as in a plan.
 
-**Inline markup** in `text`, `bullet`, `todo`, `claim` and text cells: `**bold**`, `` `code` ``,
+**Inline markup** in `text`, `bullet`, `todo`, `claim`, a `row`'s `text` and text cells: `**bold**`, `` `code` ``,
 and `@[name]`, which draws the name's badge (`"review from @[ada] is pending"`). A name gets the
 same glyph and color everywhere it appears: a `who` column, a row's `who`, `@[name]`.
 

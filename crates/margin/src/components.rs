@@ -1426,11 +1426,19 @@ fn draw_row(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     let ax = rx.saturating_sub(aw + 2);
     let text_room = ax.saturating_sub(x + 1) as usize;
     let tcol = tone(p, b.s("text_tone"), p.fg);
-    let mut text = fit_lines(b.s("text"), text_room.max(4), full);
+    // authored text like a bullet's or a table cell's: `**bold**`, `code` and @[name] render.
+    // One line cut with `…`, or wrapped in its column when the row has the focus
+    let runs = markup(b.s("text"));
+    let mut text = if full { wrap_runs(&runs, text_room.max(4)) } else { vec![truncate_runs(runs, text_room.max(4))] };
     text.truncate(40);
+    // a row with a tone of its own keeps it on its bold (as `rich` does for a toned bullet)
+    let emph = (b.s("text_tone").is_empty() && b.s("tone").is_empty()).then(|| theme::current().emphasis);
     let mut tx = x;
     for (i, l) in text.iter().enumerate() {
-        let e = put(&mut g, x, i as u16, l, Style::fg(tcol).on(g0).bold_if(b.flag("bold")));
+        let mut e = x;
+        for (s, sp) in l {
+            e = put(&mut g, e, i as u16, s, span_style(p, *sp, tcol, false, emph).on(g0).bold_if(b.flag("bold") || *sp == Span::Bold));
+        }
         if i == 0 {
             tx = e;
         }
@@ -2193,6 +2201,32 @@ mod dash_tests {
         };
         assert!(bad(json!({"key": "a", "summary": true})).contains("only a runs column"), "a text column");
         assert!(bad(json!({"key": "a", "kind": "runs", "summary": "yes"})).contains("true or false"));
+    }
+
+    /// A row's text is authored text: bold, code and @[name] render there as in a bullet or a
+    /// table cell, cut on one line and wrapped when the row has the focus.
+    #[test]
+    fn a_rows_text_renders_its_markup() {
+        let d = doc(1, json!([
+            {"type": "row", "id": "r1", "text": "**ingest** worker `v2` for @[ada]", "aside": "exit 1"},
+            {"type": "row", "id": "r2", "text": "a_b * c ** d", "bold": true},
+            {"type": "row", "id": "r3", "text": "**long** text that will not fit on a single line of a narrow pane at all"}]));
+        let (text, dr) = render_at(&d, 60, false, 0.0);
+        let text = text.replace('\u{a0}', " ");
+        let rows: Vec<&str> = text.lines().collect();
+        let badge = theme::current().badge("ada");
+        assert!(rows[0].contains(&format!("ingest worker v2 for {} ada", badge.glyph)) && !rows[0].contains('*') && !rows[0].contains('`') && rows[0].contains("exit 1"), "{text}");
+        assert!(rows[1].contains("a_b * c ** d"), "markers that open nothing stay as typed: {text}");
+        let p = &EVERFOREST;
+        let g = dr["r1"].grid.as_ref().unwrap();
+        let col = |word: &str| rows[0][..rows[0].find(word).unwrap()].chars().count() as u16;
+        let st = |word: &str| g.get(col(word), 0).unwrap().style;
+        assert!(st("ingest").bold && !st("worker").bold, "bold is bold");
+        assert_eq!((st("v2").fg, st("ada").fg, st("worker").fg), (Some(p.aqua), Some(badge.color), Some(p.fg)));
+        assert!(dr["r2"].grid.as_ref().unwrap().get(col("ingest"), 0).unwrap().style.bold, "bold: true still bolds the whole text");
+        let (narrow, _) = render_at(&d, 30, false, 0.0);
+        let l3 = narrow.lines().find(|l| l.contains("long")).unwrap();
+        assert!(l3.trim_end().ends_with('…') && !l3.contains('*'), "cut with the markup applied: {narrow}");
     }
 
     /// Plain-text frames carry no private-use codepoint: every icon has a one-cell stand-in, the

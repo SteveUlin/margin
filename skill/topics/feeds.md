@@ -129,8 +129,9 @@ margin feed pause <name> | resume <name> | rm <name>
 - You can share an artifact with a feed: your ids outside the prefix, its ids inside.
 - **The health line** is a `feed` component with the id `<prefix>-feed` (state, trigger, last
   write, the error). The daemon inserts it above the component whose id is the prefix, else at the
-  end of the document. To choose its place, put `{"type": "feed", "id": "<prefix>-feed"}` where you
-  want it before registering: the daemon then updates it there.
+  end of the document. To choose its place, put `{"type": "feed", "id": "<prefix>-feed", "name":
+  "<feed name>", "state": "not registered"}` where you want it before registering: the daemon
+  then updates it there.
 - `margin feed rm` leaves the feed's last output in the artifact, unowned, and sets the health
   line to `removed` itself (daemon or not); delete what you don't want with `margin rm <art> <id>`.
 - **Don't poll something a feed could watch.** **Why:** every refresh you do costs a turn; a feed

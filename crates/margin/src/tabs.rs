@@ -35,11 +35,12 @@ pub struct TabInfo {
 }
 
 /// Does the doc wait on the person, and did something in it fail? The same rules as the pinned
-/// head's "needs you" line (scene.rs `head_lines`), plus a `status` in state `fail` and a `row`
-/// whose glyph is `fail`.
+/// head's "needs you" line (scene.rs `head_lines`), plus a `status` in state `fail`, a `row`
+/// whose glyph is `fail`, and a table row with `fail` in a `state` column: the same red cross on
+/// the board, so the same mark on its tab.
 pub fn attention(doc: &Doc, state: &State) -> (bool, bool) {
     let (mut needs, mut failed) = (false, false);
-    walk(&doc.blocks, &mut |b, _, _| match b.kind.as_str() {
+    walk(&doc.blocks, &mut |b, parent, _| match b.kind.as_str() {
         "todo" => {
             let st = crate::components::status_of(state, b);
             if crate::components::yours(state, b) && !matches!(st.as_str(), "done" | "skipped") {
@@ -53,6 +54,14 @@ pub fn attention(doc: &Doc, state: &State) -> (bool, bool) {
         "diff" if !state.decisions.get(&b.id).map(|d| d.kind == "verdict").unwrap_or(false) => needs = true,
         "status" if b.s("state") == "fail" => failed = true,
         "row" if b.s("glyph") == "fail" => failed = true,
+        "tr" => {
+            // its table's columns of kind `state`, and this row's cells in them
+            let cols = parent.and_then(|t| t.f.get("columns")).and_then(|c| c.as_array());
+            let fails = cols.into_iter().flatten().filter(|c| c["kind"] == "state").filter_map(|c| c["key"].as_str()).any(|k| b.f.get("cells").map(|cs| cs[k] == "fail").unwrap_or(false));
+            if fails {
+                failed = true;
+            }
+        }
         _ => {}
     });
     (needs, failed)
@@ -409,6 +418,24 @@ mod tests {
             {"type": "status", "id": "s", "text": "ci", "state": "fail"}]}))
         .unwrap();
         assert_eq!(attention(&doc, &State::default()), (false, true));
+    }
+
+    /// A table row whose `state` cell is `fail` marks the tab as a `row` with that glyph does;
+    /// the word in a text column, or another state, does not.
+    #[test]
+    fn a_failing_state_cell_marks_the_tab() {
+        let table = |st: &str, name: &str| -> Doc {
+            serde_json::from_value(serde_json::json!({"id": "a", "blocks": [{"type": "section", "id": "s", "children": [
+                {"type": "table", "id": "t", "columns": [{"key": "st", "kind": "state"}, {"key": "name"}], "children": [
+                    {"type": "tr", "id": "r1", "cells": {"st": "done", "name": "backup"}},
+                    {"type": "tr", "id": "r2", "cells": {"st": st, "name": name}}]}]}]}))
+            .unwrap()
+        };
+        assert_eq!(attention(&table("fail", "mailer"), &State::default()), (false, true));
+        assert_eq!(attention(&table("done", "fail"), &State::default()), (false, false), "only a state column counts");
+        assert_eq!(attention(&table("spin", "mailer"), &State::default()), (false, false));
+        let row: Doc = serde_json::from_value(serde_json::json!({"id": "a", "blocks": [{"type": "row", "id": "r", "glyph": "fail", "text": "x"}]})).unwrap();
+        assert_eq!(attention(&row, &State::default()), (false, true), "as a row with the glyph does");
     }
 
     #[test]

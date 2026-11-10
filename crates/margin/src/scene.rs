@@ -124,6 +124,18 @@ pub fn show_in_tabs(doc: &Doc, view: &mut View, id: &str) -> bool {
     changed
 }
 
+/// The status bar's second field: the project the artifact belongs to, as `--project` takes it.
+/// A long one (a directory's slug) keeps its end. It used to be drawn as a path, `~/<last
+/// word>`, which for `--project jobs` named a directory `~/jobs` that doesn't exist.
+fn project_label(project: &str) -> String {
+    const MAX: usize = 24;
+    let n = project.chars().count();
+    if n <= MAX {
+        return project.to_string();
+    }
+    format!("…{}", project.chars().skip(n - (MAX - 1)).collect::<String>())
+}
+
 /// What a tab of a `tabs` component is called: its section's title.
 fn subtab_label(c: &Block) -> &str {
     [c.s("title"), c.s("text")].into_iter().find(|s| !s.trim().is_empty()).unwrap_or(&c.id)
@@ -1590,8 +1602,7 @@ impl Scene {
             if inp.unread > 0 { format!("{} {} for Claude", icon::SEND, inp.unread) } else { format!("{} Claude is current", icon::CHECK) },
             LIPGLOSS_STATUS.nugget_b,
         ));
-        let proj = inp.project.rsplit('-').next().unwrap_or(inp.project);
-        let sb = StatusBar { key: &format!("{} MARGIN", icon::LEAF), key_bg: None, text: &inp.doc.id, dim_text: &format!("~/{proj}"), nuggets };
+        let sb = StatusBar { key: &format!("{} MARGIN", icon::LEAF), key_bg: None, text: &inp.doc.id, dim_text: &project_label(inp.project), nuggets };
         // glance mode: no status bar, the strip is the title and the head
         if !glance {
             parts::status_bar(&mut g, Rect::new(0, status_y, w, 1), &sb, &LIPGLOSS_STATUS, a);
@@ -3255,6 +3266,22 @@ mod tests {
         let t = frame(&mut sc, 34);
         assert!(t.lines().next().unwrap().contains("‹ 1/3 tour ›"), "{t}");
         assert_eq!(sc.hit_at(2, 0), Some("mg:tab/prev"));
+    }
+
+    /// The status bar names the project as `--project` takes it, never as a made-up path.
+    #[test]
+    fn the_status_bar_names_the_project_not_a_path() {
+        assert_eq!(project_label("jobs"), "jobs");
+        assert_eq!(project_label("home-me-project"), "home-me-project");
+        let long = project_label("home-someone-work-clients-acme-dashboards");
+        assert!(long.starts_with('…') && long.ends_with("acme-dashboards") && long.chars().count() == 24, "{long}");
+        let d: Doc = serde_json::from_value(json!({"id": "board", "title": "Board", "rev": 1, "blocks": [{"type": "text", "id": "t", "text": "x"}]})).unwrap();
+        let (cfg, state, view) = (Config::default(), State::default(), View::default());
+        let inp = Input { doc: &d, state: &state, view: &view, delivered: 0, unread: 0, now: 0.0, wall: 0.0, cfg: &cfg, kitty: false,
+            cell: (10, 20), focused_pane: false, mouse: false, project: "jobs", w: 70, h: 12, activity: &[] };
+        let t = Scene::new(&cfg).frame(&inp).grid.to_text();
+        let bar = t.lines().last().unwrap();
+        assert!(bar.contains("board jobs") && !bar.contains("~/"), "{bar}");
     }
 
     #[test]
