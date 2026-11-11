@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# margin feed for the `services` example: a JSON file of background services -> the tabs `svc`
-# ("Failing" and "All").
+# The script that fetches the rows of the `services` example: a JSON file of background services
+# -> the tabs `svc` ("Failing" and "All"). margin runs it as a handler, when the event
+# `services.refresh` is appended.
 #
-#   margin example services | margin new services                   # the board it updates (a feed never creates one)
-#   ./services.feed.sh services.data.json                           # look at the line it prints
-#   ./services.feed.sh services.data.json | margin apply services   # apply it by hand (before registering)
-#   margin feed add services --every 30s --board services --owns svc \
-#       -- ./services.feed.sh services.data.json
+#   margin example services | margin new services                    # the board it updates (a handler never creates one)
+#   ./services.fetch.sh services.data.json                           # look at the line it prints
+#   ./services.fetch.sh services.data.json | margin apply services   # apply it by hand (before registering)
+#   margin handler add services-refresh --on services.refresh --board services --owns svc \
+#       -- ./services.fetch.sh services.data.json
+#   margin emit services.refresh                                     # run it now; cron or a timer runs this line on a schedule
 #
 # It prints ONE line: the whole `tabs` component, id `svc`. Its two children are sections; the
 # pane shows their titles as a tab strip and one section at a time (]t / [t). Every id below
-# starts with `svc-`, the prefix the feed owns. Ids come from the service's name, so a service
+# starts with `svc-`, the prefix the handler owns. Ids come from the service's name, so a service
 # keeps its row (and the focus on it) from run to run.
 #
 # "Failing" holds, per failing service, a `row` (glyph `fail`: that also puts the failure mark on
@@ -22,7 +24,7 @@
 # runner's API, ...) and map its words to margin's in the two `def`s below.
 set -euo pipefail
 data=${1:-services.data.json}
-[ -r "$data" ] || { echo "services feed: cannot read $data" >&2; exit 1; }
+[ -r "$data" ] || { echo "services fetch: cannot read $data" >&2; exit 1; }
 
 jq -c '
   # an id may hold letters, digits, - and _ only

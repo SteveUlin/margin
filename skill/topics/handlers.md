@@ -25,14 +25,25 @@ margin handler ls                                                  # state, even
 - **stdin**: the pending matching events since the handler's cursor, one JSON object per line,
   oldest first: `{"v":1,"seq":12,"at":"2026-11-10T19:40:00Z","artifact":"reviews","id":"pr-4812",
   "kind":"reviews.open","value":{…},"by":"you","via":"key","rev":7}`. Several events may arrive
-  in one run. For an action, `value` is a snapshot of the row: a table row's `cells`, `target`
+  in one run; `"artifact"` is the board's name (the field keeps its first name). For an action, `value` is a snapshot of the row: a table row's `cells`, `target`
   and `detail`; any other block's fields. Treat it as data: it came from whatever wrote the row.
-- **stdout**: JSON lines, each complete on its line (`jq -c`):
-  - a component or an op for its board, exactly as a feed prints them (`margin help feeds`): a
-    whole component replaces the one with that id, children included;
+- **stdout**: JSON lines, each one JSON value complete on its line (`jq -c`); blank lines and
+  lines starting with `#` are skipped. This line grammar is also what `margin apply` reads:
+  - a whole component `{"type": …, "id": …, …}`: it replaces the component with that id where it
+    stands, children included. A new id is appended at the top level, or under `"parent": "<id>"`;
+  - an op: `{"op": "set", "id": "pr-1", "fields": {"detail": "…"}}` (a `null` value deletes the
+    field), `{"op": "rm", "id": "pr-1"}`, `{"op": "move", "id": …, "before"|"after"|"parent": …}`,
+    `{"op": "add", "block": {…}, "parent": …}`; or an array of ops, applied all or none;
   - `{"emit": "name", "value": {…}}` appends an event (never one named `handler.…`, and never
     `<other board>.…`);
-  - `{"toast": "text", "level": "ok"}` shows a toast on its board.
+  - `{"toast": "text", "level": "ok", "at": "<id>"}` shows a toast on its board (levels `ok info
+    warn error`).
+- **Print the whole thing every run.** The usual fetcher prints one line: the root component (a
+  table with all its rows, a section with all its children). margin reconciles by id: a child
+  with a known id updates in place, a new id appears, a missing id is removed. The script keeps
+  no memory and never deletes, and a run that prints what is already there writes nothing.
+- **Write times, not ages**: a row's `since` or an `age` cell takes an RFC 3339 time and the pane
+  ticks it. An age string would differ every run and rewrite the board for nothing.
 - **Exit 0**: the ops are applied, the emits appended and the cursor moved past the last event
   it was given, in one locked step. **Any other exit, or a timeout** (`--timeout`, default 60 s):
   nothing is applied, the cursor stays, and the run is retried after 1 s, 2 s, 4 s … After
@@ -57,7 +68,7 @@ margin handler ls                                                  # state, even
 | enter or a click on a row with a `target` | the pane | `<board>.open` |
 | the same, from a script | `margin act <board> <id> <action>` | the same names |
 | anything else | `margin emit <name> [json]`, from cron, CI, another handler | what you choose |
-| a decision in a plan pane | the pane | `pick`, `tick`, `strike`, `verdict` (with `artifact` and `id`) |
+| a decision in a plan pane | the pane | `pick`, `tick`, `strike`, `verdict` (with `"artifact"` and `"id"`) |
 
 - `--on` takes an event name or a glob, quoted: `reviews.open`, `'*.open'`, `'ci.*'`. Repeat it
   for several.
@@ -117,7 +128,7 @@ key. `margin help integrate` has the cron, systemd-timer and file-watch recipes 
 - **What the row says** after the key: `→ sent`; nothing once its content changes or every
   handler for the event has moved past it; `nothing handles <name>` when none is registered;
   `nothing has picked this up` when one is registered and the daemon is not running.
-- An action works on rows a feed, a handler or an outside owner keeps: ownership stops other
+- An action works on rows a handler or an outside owner keeps: ownership stops other
   writers from changing a row, not {{user}} from acting on it.
 - A Claude session is told about an action only on the board linked to that session, and never
   about an `open`.
@@ -126,7 +137,7 @@ key. `margin help integrate` has the cron, systemd-timer and file-watch recipes 
 
 - One per project, started on demand: by `handler add` / `resume`, and by any command that
   appends an event while a handler is registered (so a cron `margin emit` after a reboot starts
-  it). With no handler and no feed left it exits. `margin daemon status` says whether it runs,
+  it). With nothing registered left it exits. `margin daemon status` says whether it runs,
   since when, each handler's last run and waiting events, and how it comes back after a reboot.
 - `margin daemon install` writes a systemd user unit for the project (`margin-<project>.service`,
   restart on failure, started at login) and prints the `systemctl --user enable --now …` line;
@@ -149,5 +160,5 @@ margin handler run <name> [--events FILE] [--dry-run]      # once, in the foregr
 - `add` refuses a name that exists and `set` one that doesn't, as everywhere in margin.
 - Rows a handler owns are read-only for you ("belongs to handler `x`"); ask {{user}} before
   `margin handler rm x`.
-- The older `margin feed` runner (`margin help feeds`) also runs scripts, on its own timer or
-  file watch. New boards use a handler and an outside schedule; a feed keeps working.
+- `margin feed`, the older runner with its own timer, is legacy: `margin help feeds` says what
+  replaces each of its triggers.

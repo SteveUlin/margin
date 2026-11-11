@@ -34,9 +34,9 @@ Claude Code hooks as one line of context.
   reads it when the pane draws, so a live plot needs no write to the board. Whoever keeps rows
   current owns them; Claude and you cannot overwrite them. `margin help integrate` has the cron
   and systemd recipes.
-- **Shipped scripts** for the older runner (`margin feed`, a script on margin's own timer, file
-  watch or stream): a jj change ledger, a monitor of Claude Code sessions, a board of queued
-  messages, a turn ledger (`feeds/`).
+- **Shipped scripts** (`feeds/`): a jj change ledger, a monitor of Claude Code sessions, a board
+  of queued messages, a turn ledger. Each one's header gives the handler (or owner) registration
+  and the cron line that run it.
 - Also: structural diffs to approve or reject (through difftastic), PNG images (kitty graphics),
   toasts.
 
@@ -78,7 +78,7 @@ that exists; every other write refuses a name with no board (and suggests the ne
 typo is an error, never a second board. `margin demo` writes a larger sample plan (it needs
 difftastic), `margin example reviews | margin new reviews` a sample dashboard, and `margin help`
 lists every command and reference topic.
-[docs/guide.md](docs/guide.md) walks through a board, a feed, and a session with Claude;
+[docs/guide.md](docs/guide.md) walks through a board, a handler, and a session with Claude;
 `margin help dashboards` and `margin help handlers` cover standing boards.
 
 ## Requirements
@@ -92,7 +92,7 @@ lists every command and reference topic.
 - **A Nerd Font is recommended** for the state glyphs; a terminal with the kitty graphics
   protocol (Ghostty, kitty) for images.
 - Optional tools: `difft` (difftastic) for `margin diff` and the demo; `bash`, `jq` and `jj` for
-  the shipped feeds.
+  the shipped scripts.
 
 ## Documentation
 
@@ -101,7 +101,7 @@ lists every command and reference topic.
 | [docs/install.md](docs/install.md) | build, `margin init`, a first pane, undoing it |
 | [docs/guide.md](docs/guide.md) | the model, four walkthroughs, a cheat sheet of commands, keys and config |
 | [docs/dashboards.md](docs/dashboards.md) | tables, run strips, badges, rules, and the theme |
-| [docs/design.md](docs/design.md) | the original design: owners, events, the toolkit, panes, feeds (the runner that handlers, owners and datasets have since replaced as the main path) |
+| [docs/design.md](docs/design.md) | the original design: owners, events, the toolkit, panes, and the feed runner, now legacy (handlers, owners and datasets replaced it) |
 | [docs/research.md](docs/research.md), [docs/landscape.md](docs/landscape.md), [docs/research/](docs/research/) | the measurements and prior art behind the design |
 
 The design and research documents are dated notes from the build; they say "artifact" for what

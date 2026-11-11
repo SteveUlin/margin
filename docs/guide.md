@@ -6,10 +6,10 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 
 ## The model
 
-![Diagram: Claude and feed scripts write ops into doc.json; margin view watches the store and draws the pane; you act with a key or an mg: token, which writes state.json and events.jsonl; the hooks read unread events and hand them to Claude as margin: lines](img/guide/model.png "One loop: writers change content, the renderer draws it, your decisions go to their own file, and the hooks carry them back to Claude.")
+![Diagram: Claude and scripts write ops into doc.json; margin view watches the store and draws the pane; you act with a key or an mg: token, which writes state.json and events.jsonl; the hooks read unread events and hand them to Claude as margin: lines](img/guide/model.png "One loop: writers change content, the renderer draws it, your decisions go to their own file, and the hooks carry them back to Claude.")
 
 - **The store is the truth.** Each board is a folder under `~/.local/state/margin/<project>/`. `doc.json` holds content, `state.json` your decisions, `view/<pane>.json` each pane's folds and scroll, and the project's `events.jsonl` logs everything you did.
-- **Writers send ops, never files.** Claude runs `margin add/set/rm …` through its Bash tool. A feed prints the same ops as JSON lines, and the daemon applies them. You write only decisions: a key in the pane, or a double-clicked `mg:` token.
+- **Writers send ops, never files.** Claude runs `margin add/set/rm …` through its Bash tool. A handler's script prints the same ops as JSON lines, and the daemon applies them. You write only decisions: a key in the pane, or a double-clicked `mg:` token.
 - **The view only reads.** `margin view` watches the store and redraws. Nothing ever talks to the pane, so a hundred writes cost no pane churn.
 - **The return path is the hooks.** Claude Code runs `margin hook prompt` before each of your messages and `margin hook post-tool` after each tool call. Each prints your unread events as `margin:` lines, once per session.[^hook]
 - **The Host decides where the pane lives.** It's a split or float in Claude's Zellij tab, or (`plain`) any terminal you run `margin view` in.
@@ -23,11 +23,11 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 | component | a typed block with an `id`: `{"type":"todo","id":"t1","text":"…"}` |
 | op | one change to content: `add` `set` `rm` `move` `title` `replace` |
 | rev | the board's revision; every content write bumps it |
-| owner | who may write a field: Claude, you, the pane, or a feed |
+| owner | who may write a field: Claude, you, the pane, or whoever keeps rows current (a handler, an outside program) |
 | event | one line in `events.jsonl`: what you did, when, through what |
 | token | `mg:verb/id=value`: text that acts when selected |
-| feed | a registered script whose stdout keeps part of a board current |
-| daemon | the per-project process that runs feeds |
+| handler | a registered command the daemon runs when an event it asked for is appended; its stdout keeps part of a board current |
+| daemon | the per-project process that runs handlers when their events arrive |
 | host | where panes go: Zellij or plain |
 
 ### Components (fold)
@@ -50,7 +50,7 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 | `image` | `path` (PNG) `alt` `rows` | — |
 | `diff` | made by `margin diff` | approve (a), reject (r) |
 | `row` | `text` `glyph` `tag` `aside` `since` or `meta` `detail`, tones | — |
-| `feed` | written by the daemon: a feed's health line | — |
+| `feed` | legacy: the health line of the older feed runner, written by the daemon | — |
 
 An unknown `type` draws as a red "unknown component" line instead of failing, so a typo shows up on screen.
 
@@ -61,11 +61,11 @@ Four owners, enforced by the store on every write (`store.rs` `check_owner`):
 - **Claude** (any `margin` CLI write, whoever types it) owns content in `doc.json`.
 - **You** own decisions in `state.json`: ticks, picks, strikes, verdicts, pins. The CLI can't write them.
 - **The pane** owns `view/<pane>.json`: folds, focus, scroll. A content rewrite never resets them, because the renderer matches components by id.
-- **A feed** owns the ids `P` and `P-…` for its `--owns` prefix `P` in its board (`ci` owns `ci-1`, not `city`). Claude's writes there fail, and its writes elsewhere fail.
+- **Whoever keeps rows current** (a handler, or an outside program registered with `margin owner add`) owns the ids `P` and `P-…` for its `--owns` prefix `P` on its board (`ci` owns `ci-1`, not `city`). Claude's writes there fail, and its writes elsewhere fail.
 
 Todo `status` is the one shared field: Claude's `margin set plan t1 status done` and your space bar both land in `state.json`, and the latest wins. Both use one vocabulary: `todo doing done blocked skipped next` (and `clear` drops your mark).
 
-The ops, as JSON. `margin apply` reads them on stdin, and a feed prints them, one value per line:
+The ops, as JSON. `margin apply` reads them on stdin, and a handler's script prints them, one value per line:
 
 ```json
 {"op":"add","parent":"steps","block":{…},"after":"t2"}
@@ -126,7 +126,7 @@ No Claude, no Zellij. You need two terminals.
 3. [ ] **Ask a question with a default, and mark progress.**
 
    ```fish
-   margin ask tour Q1 "Which feed do you write first?" \
+   margin ask tour Q1 "Which script do you write first?" \
      jj services --default services \
      --why "services.json is one file to watch" \
      --applies "at walkthrough 2"
@@ -155,16 +155,16 @@ No Claude, no Zellij. You need two terminals.
    ```text
    $ margin events
       1 11:34:28 the user marked tour.t3 “Tick a todo from the pane” done: they did it themselves, so don't redo it
-      2 11:34:28 the user picked services for tour.Q1 “Which feed do you write first?”
+      2 11:34:28 the user picked services for tour.Q1 “Which script do you write first?”
    ```
 
    "the user" becomes your name once `user_name` is set in the config (`margin init --user-name <you>`).
 
    `margin show tour` prints the content with your decisions merged in, and `--json` gives both files raw. A token typed at the shell does the same as a key: `margin select mg:todo/t2`.
 
-## Walkthrough 2: a feed from scratch
+## Walkthrough 2: a handler from scratch
 
-A feed is any program that prints JSON lines. This one turns a `services.json`, the kind of status file a monitoring job rewrites, into one row per service.
+A handler is a command margin's daemon runs when an event it asked for is appended; what it prints updates the board. Any program that prints JSON lines will do. This one turns a `services.json`, the kind of status file a monitoring job rewrites, into one row per service. margin has no timer and watches no file: something outside (you, cron, a file watcher) appends the event.
 
 1. [ ] **Make the data and write the script.** In `/tmp/margin-tour`, a sample `services.json`:
 
@@ -176,11 +176,11 @@ A feed is any program that prints JSON lines. This one turns a `services.json`, 
    ]}
    ```
 
-   and the feed, `services-feed` (`chmod +x` it):
+   and the script, `services-fetch` (`chmod +x` it):
 
    ```bash
    #!/usr/bin/env bash
-   # margin feed: one row per service in services.json
+   # one row per service in services.json; margin runs it as a handler
    set -euo pipefail
    jq -c '{
      type: "section", id: "svc", title: "services",
@@ -194,57 +194,63 @@ A feed is any program that prints JSON lines. This one turns a `services.json`, 
 
    Run it bare first: it should print one long line starting `{"type":"section","id":"svc",…`.
 
-2. [ ] **Register it.** Pick the trigger that matches the data: another program rewrites this file, so watch it.
+2. [ ] **Register it for a refresh event.**
 
    ```fish
-   margin feed add services --watch services.json \
-     --board tour --owns svc -- ./services-feed
+   margin handler add services-refresh --on tour.refresh \
+     --board tour --owns svc -- ./services-fetch
    ```
 
-   It prints `feed services: watch services.json → tour (owns "svc"); daemon started`. The command runs from this directory, without a shell.
+   It prints `handler services-refresh: on tour.refresh → ./services-fetch (writes tour, owns "svc"); daemon started`. The command runs from this directory, without a shell.
 
-3. [ ] **Check it.** `margin feed ls` shows `live` and "ran 2s ago · wrote"; your pane grows a health line and the section. Edit `services.json` and the section follows.
-
-   ![The tour pane with a feed health line "feed services · live · watch services.json · wrote now" and a "services" section of 3 rows: web and api with a check glyph, "all N checks pass" and an age such as 10h, backup with a red cross and "last run failed"](img/guide/b-feed.png "The services feed under your own content. The ages (10h, 7h) tick in the renderer; the feed never rewrote them. Real render through pyte, not Ghostty.")
-
-4. [ ] **Test changes with `feed run`, read errors with `feed logs`.** `margin feed run services` runs it once in the foreground and prints `tour rev N` or `tour unchanged`. stderr and rejections go to the log:
+3. [ ] **Emit the event, and check.** `margin emit tour.refresh` appends it (and prints its seq); the daemon runs the script and the pane grows the section. `margin handler ls` shows:
 
    ```text
-   $ margin feed logs services
-   2026-11-10T19:34:12Z start: ./services-feed (watch services.json)
+   services-refresh live      on tour.refresh          tour/svc         waiting 0   ran 1s ago · ok
    ```
 
-5. [ ] **Pause, resume or remove it.** `margin feed pause services`, `resume`, `rm`. After `rm` the last output stays in the board and the health line says "removed"; the daemon exits when no feed is left.
+4. [ ] **Let something else say when.** The data is a file another program rewrites, so emit on its change; for anything you would poll, emit from cron or a systemd timer ([`margin help integrate`](../skill/topics/integrate.md) has each in full):
+
+   ```sh
+   watchexec -w services.json -- margin emit tour.refresh --project tmp-margin-tour
+   # crontab -e:   */5 * * * *  /path/to/margin emit tour.refresh --project tmp-margin-tour
+   ```
+
+5. [ ] **Read what a run did with `handler logs`; try a change with `handler run --dry-run`.** The log has a line per run, the script's stderr and any rejected line:
+
+   ```text
+   $ margin handler logs services-refresh
+   2026-11-11T01:46:10Z start: ./services-fetch (on tour.refresh)
+   2026-11-11T01:46:11Z run: ok (1 event to seq 1, 1 line, wrote)
+   ```
+
+   `margin handler run services-refresh --events sample.jsonl --dry-run` runs it once in the foreground on events from a file and prints what it would commit, writing nothing.
+
+6. [ ] **Pause, resume or remove it.** `margin handler pause services-refresh`, `resume`, `rm`. After `rm` what it wrote stays in the board, unowned; the daemon exits when nothing is registered.
 
 ### Line formats (fold)
 
 Each stdout line is one of three things:
 
-- **A whole component** (`{"type":…,"id":…}`): replaces the component with that id, or appends it. The usual feed write: print your whole section every run.
+- **A whole component** (`{"type":…,"id":…}`): replaces the component with that id, or appends it. The usual write: print your whole section every run.
 - **One op** (`{"op":"set",…}`): for a small change.
-- **An array of ops**: all or none. If one op fails (say an `rm` of an id that isn't there yet), none apply and the log says why.
+- **An array of ops**: all or none.
 
-Blank lines and lines starting with `#` are skipped. A line that writes outside the prefix is rejected and logged; the feed's other lines still land:
-
-```text
-rejected: feed clk may only write ids starting "clk"; "t1" is outside its prefix
-```
-
-Lines from one interval or watch run land as one revision. A stream's lines land as they come, at most one write per `--min-gap` (default 1 s).
+Blank lines and lines starting with `#` are skipped. A line that writes outside the handler's prefix is rejected and logged. A handler can also print `{"emit": "name", "value": {…}}` (append an event) and `{"toast": "text", "level": "ok"}`; [`margin help handlers`](../skill/topics/handlers.md) has the whole contract, with exit codes and retries.
 
 ### Why `since` beats an age string (fold)
 
-Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The renderer turns `since` into a live age that ticks on its own. Your output then stays byte-identical until something real changes, and the store skips the write: `feed run` says `tour unchanged` and no revision is made. An age string changes every run, so each run costs a revision, a redraw and a change bar for nothing. The `jj` and `agents` feeds both work this way.[^feeds]
+Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The renderer turns `since` into a live age that ticks on its own. Your output then stays byte-identical until something real changes, and the store skips the write: the run's log line reads `run: ok (…, 1 line)` without `wrote`, and no revision is made. An age string changes every run, so each run costs a revision, a redraw and a change bar for nothing.
 
-### Triggers (fold)
+### Three ways to keep a board current (fold)
 
-| trigger | runs | use it for |
+| what changes | use | margin runs |
 |---|---|---|
-| `--every 30s` | the command each interval | anything you'd poll |
-| `--watch <path>…` | once at start, then on each change (250 ms debounce) | files another program writes |
-| `--stream` | one long-running process | a loop that prints only on change |
+| rows fetched by a script | a **handler** on a refresh event that cron, a timer or a file watcher emits | the script, once per event |
+| rows a program of your own already computes | an **owner**: `margin owner add`, then `margin apply <board> --as <owner>` whenever it likes | nothing |
+| numbers that change often (a rate, a latency) | a **dataset**: `margin data add`, `margin data append`; a plot or table reads it by name | nothing |
 
-`--timeout 60s` kills a run that hangs. A crash restarts after 1, 2, 4 … 60 s, and 30 s of health resets the backoff. `--replace` re-registers a feed under the same name. `feeds/jj` (watch) and `feeds/agents` (stream) in this repo are the worked examples; their header comments explain each choice.
+`--timeout 60s` stops a handler run that hangs; a failed run is retried after 1, 2, 4 … s (`--retries 3`), then passed over with a `handler.failed` event. The scripts in `feeds/` are worked examples; their header comments give the registration and the cron line.
 
 ## Walkthrough 3: with Claude
 
@@ -262,7 +268,7 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
    margin: the user acted in the margin pane since your last look (2 events).
    Their decisions are binding; `margin show <board>` for context.
    - the user marked tour.t3 “Tick a todo from the pane” done: they did it themselves, so don't redo it
-   - the user picked services for tour.Q1 “Which feed do you write first?”
+   - the user picked services for tour.Q1 “Which script do you write first?”
    ```
 
    It shows at most 8 lines, and each session gets each event once. When nothing happened it prints nothing.
@@ -273,24 +279,24 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 - **Never block on a reversible fork.** It posts `margin ask … --default X --applies "<when>"`, carries on with the default, and checks events at that point. To block on an answer from a script, follow the log: `margin events --follow --name pick --board plan --json` (see `margin help integrate`).
 - **A struck claim gets an answer:** re-check, then `margin set <board> <id> ack "…"`.
 - **Address by id, base on a rev** (`--base-rev`), and treat `margin:` lines as your input.
-- **Feed-owned ids are read-only,** and anything you want kept current becomes a feed, not a poll each turn.
+- **Owned ids are read-only,** and anything you want kept current becomes a handler on a refresh event, not a poll each turn.
 
-## Walkthrough 4: a feed and Claude in one board
+## Walkthrough 4: a handler and Claude in one board
 
-Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The prefix is the whole contract.
+Walkthrough 2 already did this: `tour` holds your steps and the handler's `svc` rows. The prefix is the whole contract.
 
-1. [ ] **Give the feed a prefix nothing else uses.** `--owns svc` gives it every id starting `svc`, including its health line `svc-feed`. Leave out `--owns` and the prefix is the feed's name; `--owns '*'` takes the whole board.
-2. [ ] **Keep Claude's ids outside it.** `margin show tour` starts with `(feed services owns the ids svc and svc-…: read-only for you)`, and a write inside fails with the way out:
+1. [ ] **Give the handler a prefix nothing else uses.** `--owns svc` gives it the ids `svc` and `svc-…`. One prefix has one owner: a second registration that overlaps it is refused.
+2. [ ] **Keep Claude's ids outside it.** `margin show tour` starts with `(handler services-refresh owns the ids svc and svc-…: read-only for you)`, and a write inside fails with the way out:
 
    ```text
    $ margin set tour svc-web text hello
-   margin set: "svc-web" belongs to feed `services`, which owns the ids
-   svc and svc-… here and rewrites it on its own; write outside that
-   prefix, or stop the feed first (`margin feed pause services` /
-   `margin feed rm services`)
+   margin set: "svc-web" belongs to handler `services-refresh`, which owns
+   the ids svc and svc-… here and writes it when its events arrive; write
+   outside that prefix, or remove the handler first (`margin handler rm
+   services-refresh`)
    ```
 
-3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the feed's section; a whole-document `apply` must carry the feed's components through unchanged. Registering a feed over ids Claude already wrote hands them over, with a note (`note: feed clk now owns 3 existing ids (…)`).
+3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the handler's section; a whole-document `apply` must carry the handler's components through unchanged.
 
 ## Cheat sheet
 
@@ -304,7 +310,7 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
 | `margin add A PARENT\|- TYPE ID [text…] [k=v…]` | create a component (an id that exists is refused); every bare word is text; `--before X`/`--after X` |
 | `margin set A ID FIELD VALUE` or `A ID k=v…` | change a component's fields (a missing id is refused), typed by the schema (text stays text) |
 | `margin rm A ID` | remove (decisions on it show as orphaned) |
-| `margin rm A [--yes]` | remove a whole board: a preview without `--yes`; with it, its feeds are unregistered and it moves to `.archive/` |
+| `margin rm A [--yes]` | remove a whole board: a preview without `--yes`; with it, it moves to `.archive/` |
 | `margin move A ID --before X\|--after X\|--parent P` | reorder |
 | `margin title A "T"` | rename |
 | `margin ask A ID "Q" opt… --default D` | a question; `--why` `--applies` `--parent` |
@@ -330,16 +336,21 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 | `margin session [NAME]` | a wired Zellij session |
 | `margin demo [live]` | a sample plan, then a live turn |
 
-### Feeds (fold)
+### Handlers, owners, datasets (fold)
 
 | command | does |
 |---|---|
-| `margin feed add N --every 10s\|--watch P…\|--stream -- CMD…` | register; `--board` (it must exist: a feed never creates one) `--owns` `--min-gap` `--timeout` `--replace` |
-| `margin feed ls` | state, trigger, restarts, last run and its outcome |
-| `margin feed run N` | once, in the foreground; leaves the daemon's status alone |
-| `margin feed logs N [--follow] [--lines N]` | stderr and the daemon's notes |
-| `margin feed pause\|resume\|rm N` | stop or start it; `rm` keeps its last output |
-| `margin daemon` | the supervisor; the CLI starts it for you |
+| `margin handler add N --on GLOB… [--board B --owns P] -- CMD…` | register a command for events; `--timeout` `--retries`; the board must exist |
+| `margin emit NAME [JSON]` | append an event (what cron, a timer or a file watcher runs) |
+| `margin handler ls` | state, events waiting, last run and its outcome |
+| `margin handler run N [--events FILE] [--dry-run]` | once, in the foreground |
+| `margin handler logs N [--follow] [--lines N]` | a line per run, stderr, rejected lines |
+| `margin handler pause\|resume\|rm N` | stop or start it; `rm` keeps what it wrote |
+| `margin owner add N --board B --owns P [--expect-every 10m]` | rows an outside program writes with `margin apply B --as N` |
+| `margin data add N` / `margin data append N VALUE` | a dataset a plot or table reads by name |
+| `margin daemon [status]` | the dispatcher; the CLI starts it for you |
+
+`margin feed`, the older runner with its own timer, is legacy: `margin help feeds` says what replaces each of its triggers.
 
 ### Keys in the pane (fold)
 
@@ -400,7 +411,7 @@ Claude stops at that step and waits for your pick; **release** lets the default 
 goes away by itself. It's a full-width box with a border in its level's colour, at the bottom of
 the pane over the content; two show at once, the oldest lowest and the newer one above. Its bottom
 edge drains as time runs out; the time starts once the pane has been on screen; an error waits for
-a click; a click dismisses any. `--at` names the row it's about (shown on its right). Feeds send
+a click; a click dismisses any. `--at` names the row it's about (shown on its right). A handler sends
 one with a line `{"toast": "…", "level": "ok", "at": "<id>"}`. Stored in the project's `toasts/`,
 not in the doc.
 
@@ -450,7 +461,7 @@ Environment: `MARGIN_DIFFT` names difftastic outright; `MARGIN_HOST`, `MARGIN_MO
 ```text
 ~/.local/state/margin/<project>/
   events.jsonl (+ events.1.jsonl, events.seq)  .lock  cursors/<name>  delivered/<session>
-  feeds.json  feeds/<name>.log  daemon.lock
+  handlers.json  handlers/<name>.log  owners.json  daemon.lock
   <board>/doc.json  state.json
             view/<pane>.json
   select.log   (at the top: every selection)
@@ -474,9 +485,9 @@ Everything lives in `crates/margin/src`. A type is a row in `doc.rs` `SCHEMA` (i
 
 `host.rs` holds the `Host` trait: `open`, `find`, `close`, `is_visible` (for "seen"), `selection` (copy-command or in-pane) and `session`. `ZellijHost` and `PlainHost` are the two impls. A tmux host is one more impl plus an arm in `host::pick` and a config value; nothing in vellum or the store changes.
 
-### Feeds in any language (fold)
+### Handlers in any language (fold)
 
-The daemon runs argv with no shell, in the directory you added it from, and reads stdout lines. Deno, Python and Rust all work: print one JSON object per line and flush. A stream feed should flush per line and print only on change. Keep feeds read-only towards the world. A feed that writes to what it watches retriggers itself forever; that's why `feeds/jj` reads with `--ignore-working-copy`.
+The daemon runs argv with no shell, in the directory you registered it from, with the pending events on stdin, and reads stdout lines. Deno, Python and Rust all work: print one JSON value per line and exit 0. Keep a fetcher read-only towards the world, and safe to run twice on one event. A script that writes to what a file watcher watches retriggers itself forever; that's why `feeds/jj` reads with `--ignore-working-copy`.
 
 ## Limits today
 
@@ -485,10 +496,9 @@ The daemon runs argv with no shell, in the directory you added it from, and read
 - **Double-click tokens need `margin session`.** In a plain Zellij session the selection is only copied. In the plain host, keys and mouse clicks in the pane work.
 - **`margin diff` needs difftastic.** The nix build wraps it in; a dev build looks in `$MARGIN_DIFFT`, then PATH, then config `difft`, then the nix profile dirs, and names those fixes when it finds none.
 - **Nothing is checked in Ghostty yet.** Every render here went through pyte, a fake terminal: kitty images, colours and the feel of double-click need your eyes.
-- **The agents feed can't see permission prompts.** A tool call pending over a minute shows "running or waiting on permission"; a Notification hook would make it exact.[^agents]
+- **The agents script (`feeds/agents`) can't see permission prompts.** A tool call pending over a minute shows "running or waiting on permission"; a Notification hook would make it exact.[^agents]
 - **The design doc runs ahead of the build.** `margin propose`, `p` to pin, and `n`/`N` across diff hunks are designed but not built; design.md marks them so.
 - **A todo `status` write doesn't bump `rev`.** It lands in `state.json`, so `--base-rev` doesn't guard it (api-review.md §3).
 
-[^hook]: [research.md](research.md) §7 (PostToolUse `additionalContext` reaches the model on its next call) and design.md §7b: with a feed writing 20 revisions a second, `margin hook prompt` took a median 2.2 ms, max 8.9 ms.
-[^feeds]: [design.md](design.md) §7b, and `store.rs` `feed_write`: a feed write that leaves the blocks and title equal makes no revision.
+[^hook]: [research.md](research.md) §7 (PostToolUse `additionalContext` reaches the model on its next call) and design.md §7b: with a script writing 20 revisions a second, `margin hook prompt` took a median 2.2 ms, max 8.9 ms.
 [^agents]: [design.md](design.md) §7 and the header of `feeds/agents`: "the transcript can't tell those apart".

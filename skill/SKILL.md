@@ -1,6 +1,6 @@
 ---
 name: margin
-description: Keep the state of the work in a margin pane beside the chat (Zellij, or any terminal): a plan ticked as you go, questions {{user}} answers with a click, assumptions they can strike, long-form to review, a diff to approve; and feeds, scripts that keep a panel current without you. Invoke when {{user}} asks for margin or for something tracked or kept live beside the chat ("start a margin", "track this", "keep a plan up", "watch the agents"), and whenever a hook line starting `margin:` says a pane is linked to this session or reports what they did in it. On a long task you may offer it once in one line; never start a pane or register a feed unasked.
+description: Keep the state of the work in a margin pane beside the chat (Zellij, or any terminal): a plan ticked as you go, questions {{user}} answers with a click, assumptions they can strike, long-form to review, and standing boards that scripts keep current without you. Invoke when {{user}} asks for margin or for something tracked or kept live beside the chat ("start a margin", "track this", "keep a plan up", "watch the agents"), and whenever a hook line starting `margin:` says a pane is linked to this session or reports what they did in it. On a long task you may offer it once in one line; never start a pane or register a handler unasked.
 ---
 
 # margin: the state beside the chat
@@ -125,7 +125,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
   work, write one short sentence saying what you're about to do (not which tool)." Give an
   implementation or review subagent its own section: `margin add <board> - section ag-<name>
   title="…"`, steps as todos with ids under `ag-<name>-`, ticked as it goes.
-- **Owned ids are read-only**: a write into rows a handler, a feed or an outside owner keeps fails
+- **Owned ids are read-only**: a write into rows a handler or an outside owner keeps fails
   with "belongs to …"; ask before removing the owner. **Don't poll what an event could refresh.**
 - **A standing dashboard is not a plan pane.** For a board that stays up and shows outside state
   (reviews, services, a tracker), read `margin help dashboards` and start from `margin example`.
@@ -138,10 +138,10 @@ margin show plan                           # the pane as text, with {{user}}'s d
 Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 
 - `dashboards`: standing boards: tables, run strips, tabs, badges, plots fed by `margin data`; step by step.
-- `handlers`: commands margin runs for an event (a key on a row, a refresh): the contract, the daemon.
+- `handlers`: commands margin runs for an event (a key, a refresh): the contract, the line grammar.
 - `integrate`: other programs: cron and systemd recipes, following events, owning rows, JSON queries.
 - `lifecycle`: what survives a session end, a closed pane, a reboot; `margin doctor`, `daemon status`.
-- `feeds`: the older script runner (jj ledger, agent monitor, queue, turns), and the line grammar.
+- `feeds`: legacy, the older runner: what replaces each of its triggers.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
 - `diffs`: `margin diff`, a structural diff {{user}} approves or rejects.
 - `images`: `margin image`, a PNG in the pane.

@@ -18,7 +18,7 @@ systemd timer) appends that event. margin itself has no timer.
 - **The script rewrites its blocks; the pane reconciles by id.** It prints whole blocks; a
   row whose id persists changes in place and keeps the focus, and an unchanged run writes nothing.
 - **Whoever keeps rows current owns an id prefix** (`--owns pr`: the ids `pr` and `pr-…`): a
-  handler, an outside program registered with `margin owner add`, or a feed. Inside it only that
+  handler, or an outside program registered with `margin owner add`. Inside it only that
   owner writes; every other id in the same board is yours. Lay the board out so that the
   machine-kept parts sit under one prefix.
 - **The pane runs nothing.** A key on a row appends an event (`<board>.<action>`; enter on a row
@@ -95,15 +95,15 @@ margin show reviews                               # the tree: type, id, text
 
 **(c) Write the script that fetches the rows**: a program that prints `margin apply` input and
 exits 0. For a table that is one line: the table block with all its `tr` children.
-`margin help feeds` has the line grammar and a complete script; test it by hand with
-`./script | margin apply reviews`.
+`margin help handlers` has the line grammar and `margin example reviews --script` is a complete
+script; test it by hand with `./script | margin apply reviews`.
 
 **(d) Register it as a handler, and schedule the event outside margin** (register from the
 directory the script's relative paths start at). The board must exist by now: a handler
 updates its board and never creates it.
 
 ```sh
-margin handler add reviews-refresh --on reviews.refresh --board reviews --owns pr -- ./reviews-feed.sh
+margin handler add reviews-refresh --on reviews.refresh --board reviews --owns pr -- ./reviews.fetch.sh
 margin emit reviews.refresh       # run it now; `margin handler ls` shows `ran 1s ago · ok`
 margin handler add open --on '*.open' -- margin handle open     # enter on a row opens its target
 crontab -e                        # the schedule: */2 * * * *  /path/to/margin emit reviews.refresh --project <project>
@@ -114,9 +114,8 @@ crontab -e                        # the schedule: */2 * * * *  /path/to/margin e
 - A program that already runs on its own can skip the handler and write its rows itself:
   `margin owner add fetcher --board reviews --owns pr --expect-every 10m`, then `./fetch |
   margin apply reviews --as fetcher`. The rows show as stale when it stops writing.
-- Optional convenience, the older runner: `margin feed add reviews --every 2m --board reviews
-  --owns pr -- ./reviews-feed.sh` schedules the script inside margin's daemon
-  (`margin help feeds`). One prefix has one owner: use it instead of the handler, not beside it.
+- Values that change more often than the layout (a rate, a queue length) go in a dataset, with
+  no script at all: "Numbers that change often" below.
 
 From now on the ids `pr` and `pr-…` are read-only for you, and a whole-document `margin apply`
 must carry them through unchanged, so change your own parts by id instead: `margin set reviews
@@ -146,9 +145,9 @@ margin view reviews services tracker          # the renderer itself, for a plain
   opens the detail panel (the focused row's `detail` and every field); `]c` / `[c` walk what changed; `zh` folds the
   pinned head; `za` folds a section; `?` lists the rest.
 
-- To take a board down: `margin rm <board>` prints what would go (title, rev, its feeds, the panes
-  showing it) and removes nothing; `margin rm <board> --yes` unregisters its feeds and moves it to
-  the project's `.archive/` directory (nothing is deleted). Ask {{user}} first.
+- To take a board down: `margin rm <board>` prints what would go (title, rev, the panes showing
+  it) and removes nothing; `margin rm <board> --yes` moves it to the project's `.archive/`
+  directory (nothing is deleted). Ask {{user}} first.
 
 **(f) Keys on rows: `actions`.** A table (for each of its rows), a `tr`, a `row`, a `status`, a
 `link` or the document itself declares what {{user}} can do there:
@@ -256,7 +255,7 @@ on the right an aside and a live age. `detail` wraps under the row (three lines 
 ```
 
 - `glyph`: the `state` names above. `since`: RFC 3339 or unix seconds, drawn as an age (write the
-  time, never "2h ago": the pane ticks it, and the feed writes only when something changed).
+  time, never "2h ago": the pane ticks it, and the script's run writes only when something changed).
 - `tag_tone`, `aside_tone`, `text_tone`, `tone` take a tone; `bold: true`; `meta` is dim text at
   the far right. A row's `text` takes inline markup like a text cell, and is cut at the edge
   (shown in full when the row has the focus).

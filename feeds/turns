@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# margin feed: a ledger of the current Claude Code session's turns, one folded section per turn.
+# A ledger of the current Claude Code session's turns, one folded section per turn: a script
+# margin runs as a handler.
 #
+# Run it as the handler of a refresh event (TURNS_ONCE=1: print once and exit), and let whatever
+# owns the schedule emit that event (margin help handlers, margin help integrate):
+#   margin new live
+#   margin handler add turns-refresh --on live.refresh --board live --owns tn -- env TURNS_ONCE=1 /path/to/margin/feeds/turns [SESSION]
+#   crontab -e:   * * * * *  /path/to/margin emit live.refresh --project <project>
+#   (for a board that follows within seconds: `while sleep 2; do margin emit live.refresh; done`)
+#
+# Legacy, the frozen `margin feed` runner (margin help feeds), where it loops as a stream:
 #   margin feed add turns --stream --board live --owns tn -- /path/to/margin/feeds/turns [SESSION]
 #
 # A turn starts at a prompt (typed, a slash command, or a delivered notification) and ends at the
@@ -10,14 +19,14 @@
 #
 # jj: when the session's directory is a jj repo, `@kxyz` is the working-copy change at the turn's
 # end: the newest jj operation at or before that moment, read with `--at-op` (cached per operation,
-# never snapshots, so the feed records no operations of its own).
+# never snapshots, so the script records no operations of its own).
 #
 # Privacy: the prompt shows as its first line cut to TURNS_CHARS (default 18); tool inputs never
 # show beyond file paths.
 #
 # SESSION: a session id or transcript path; default the newest transcript for this directory
 # (feeds/lib/session.sh). Env: TURNS_EVERY (s, default 2), TURNS_MAX (turns, default 12),
-# TURNS_PREFIX (default tn), TURNS_ONCE=1 prints once and exits (tests).
+# TURNS_PREFIX (default tn), TURNS_ONCE=1 prints once and exits (a handler's run, tests).
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/lib/session.sh"

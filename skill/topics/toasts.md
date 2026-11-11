@@ -12,5 +12,5 @@ stays until clicked.
   about, or a subagent's finding as it lands.
 - Not for anything needed later (that's a row) or anything that needs an answer (that's a
   question).
-- A feed sends one as a line: `{"toast": "…", "level": "ok", "at": "<id>"}`.
+- A handler sends one as a line on its stdout: `{"toast": "…", "level": "ok", "at": "<id>"}`.
 - Toasts live beside the doc: no revision, no conflicts.

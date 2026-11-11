@@ -184,8 +184,9 @@ margin owner ls                                                       # last wri
 ```
 
 - The owner's ids (`run` and `run-…`) are written only by `--as queue`; any other write there is
-  refused, as with a handler's or a feed's rows, and `--as` with an unregistered name is refused.
-- `--as` takes components and ops (the feed line grammar, `margin help feeds`), all or nothing.
+  refused, as with a handler's rows, and `--as` with an unregistered name is refused.
+- `--as` takes components and ops (the line grammar a handler prints, `margin help handlers`),
+  all or nothing.
   A write that changes nothing makes no revision and still counts as a write.
 - `--expect-every 10m`: once the last write is older than that, the owner's rows show `◷ stale ·
   last updated 3h ago, expected every 10m`, the board's tab gets the failure mark, and `owner ls`

@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# margin feed: your queued messages in the current Claude Code session, as a board.
+# Your queued messages in the current Claude Code session, as a board: a script margin runs as
+# a handler.
 #
+# Run it as the handler of a refresh event (QUEUE_ONCE=1: print once and exit), and let whatever
+# owns the schedule emit that event (margin help handlers, margin help integrate):
+#   margin new live
+#   margin handler add queue-refresh --on live.refresh --board live --owns q -- env QUEUE_ONCE=1 /path/to/margin/feeds/queue [SESSION]
+#   crontab -e:   * * * * *  /path/to/margin emit live.refresh --project <project>
+#   (for a board that follows within seconds: `while sleep 2; do margin emit live.refresh; done`)
+#
+# Legacy, the frozen `margin feed` runner (margin help feeds), where it loops as a stream:
 #   margin feed add queue --stream --board live --owns q -- /path/to/margin/feeds/queue [SESSION]
 #
 # A message typed while Claude works waits in Claude Code's queue. The transcript records each step
@@ -20,7 +29,7 @@
 #
 # SESSION: a session id or a transcript path; default the newest transcript for this directory
 # (feeds/lib/session.sh). Env: QUEUE_EVERY (s, default 1), QUEUE_MAX (rows, default 8),
-# QUEUE_PREFIX (default q), QUEUE_ONCE=1 prints once and exits (tests).
+# QUEUE_PREFIX (default q), QUEUE_ONCE=1 prints once and exits (a handler's run, tests).
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/lib/session.sh"

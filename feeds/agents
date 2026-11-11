@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# margin feed: a monitor of the Claude Code sessions on this machine. Read-only.
+# A monitor of the Claude Code sessions on this machine. Read-only.
 #
-#   margin feed add agents --stream --board agents -- /path/to/margin/feeds/agents
+# It is a loop of its own, so run it as an outside owner of its rows: margin runs nothing, and
+# the rows show as stale when the loop stops (margin help integrate, "Own rows on a board"):
+#   margin new agents && margin owner add agents --board agents --owns ag --expect-every 5m
+#   /path/to/margin/feeds/agents | while read -r line; do margin apply agents --as agents <<<"$line"; done
 #
-# A stream feed: it loops every AGENTS_EVERY seconds (default 2) and prints the whole `ag` section
+# Legacy, the frozen `margin feed` runner (margin help feeds):
+#   margin feed add agents --stream --board agents --owns ag -- /path/to/margin/feeds/agents
+#
+# It loops every AGENTS_EVERY seconds (default 2) and prints the whole `ag` section
 # only when something changed, so margin writes a revision only on real change; the rows' ages
 # tick in the renderer, not here.
 #

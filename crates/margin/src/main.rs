@@ -89,12 +89,6 @@ datasets (values a board displays, outside the document; the pane reads them whe
   margin data add <name> [--cap N] [--file PATH] [--owner OWNER] [--expect-every 10s]   register one (--file: an external JSONL or CSV file, read in place)
   margin data set <name> ... | append <name> <VALUE|JSON|-> | put <name> < records | show <name> [--last N] | ls [--json] | rm <name>
 
-feeds (the older runner: scripts on a timer, a file watch or as a stream; margin help feeds):
-  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--board B] [--owns PREFIX]
-                  [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
-  margin feed ls | rm <name> | pause <name> | resume <name> | logs <name> [--follow] [--lines N]
-  margin feed run <name>        once, in the foreground (stream: until it exits or ctrl-c)
-
 panes and screen (host: zellij or plain; config key host):
   margin open <board> [--float|--split|--stacked] [--tab-id N] [--session S]   anchored to Claude's tab, no focus change
                                 --stacked: onto the tab's margin pane (focus returns where it was)
@@ -111,8 +105,11 @@ panes and screen (host: zellij or plain; config key host):
 setup and reference:
   margin init [--user-name NAME] [--claude-dir DIR] [--dry-run]   name, skill and hooks: one command per machine
   margin skill                  the skill Claude loads, rendered for this machine
-  margin example [<name> [--feed|--data]]   complete dashboards to copy from: board, feed script, sample data
+  margin example [<name> [--script|--data]]   complete dashboards to copy from: board, fetch script, sample data
   margin help [<command>|<topic>]
+
+legacy (frozen; a handler, an owner or a dataset replaces it: margin help feeds):
+  margin feed add|ls|rm|pause|resume|logs|run   the older runner: scripts on margin's own timer, file watch or stream
 
 global, before or after the command: --home DIR  --project NAME  --by you|claude|NAME
 margin <command> --help for each
@@ -143,12 +140,12 @@ global flags (before or after the command):
 ";
 
 const CMDS: &[Cmd] = &[
-    Cmd { name: "apply", help: "margin apply <board> [--base-rev N] [--json] < input\n  state from a script: update a board that exists. stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a feed prints \"this is the state now\"); the\n  board itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n  --as OWNER   write as a registered owner (margin owner add): only inside its id prefix, ops and\n               components only, and its last-write time moves even when nothing changed\n", flags: &["--base-rev", "--json", "--title", "--kind", "--as"], max_pos: Some(1) },
+    Cmd { name: "apply", help: "margin apply <board> [--base-rev N] [--json] < input\n  state from a script: update a board that exists. stdin is the line grammar a handler prints (margin help handlers), applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a script prints \"this is the state now\"); the\n  board itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n  --as OWNER   write as a registered owner (margin owner add): only inside its id prefix, ops and\n               components only, and its last-write time moves even when nothing changed\n", flags: &["--base-rev", "--json", "--title", "--kind", "--as"], max_pos: Some(1) },
     Cmd { name: "new", help: "margin new <board> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes a board. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal or\n  an empty stdin it starts empty, titled <board> unless --title says otherwise. A board that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <board> --yes. Every\n  other writing command refuses a board that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
     Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "add", help: "margin add <board> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the board must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
     Cmd { name: "set", help: "margin set <board> <id> <field> <value> [--base-rev N]\nmargin set <board> <id> <field>=<value>... [--base-rev N]\n  change: set fields of a component that exists (a missing id is refused; create it with margin add); text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
-    Cmd { name: "rm", help: "margin rm <board> <id> [--base-rev N] [--json]\n  change: remove a component that exists, and its children\nmargin rm <board> [--yes]\n  remove a whole board. Without --yes it prints what would go (title, rev, the feeds\n  registered on it, the panes showing it) and removes nothing. With --yes the board moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and its feeds are unregistered. Panes are left\n  open: margin close <board>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
+    Cmd { name: "rm", help: "margin rm <board> <id> [--base-rev N] [--json]\n  change: remove a component that exists, and its children\nmargin rm <board> [--yes]\n  remove a whole board. Without --yes it prints what would go (title, rev, the panes\n  showing it, any legacy feed registered on it) and removes nothing. With --yes the board moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and a legacy feed on it is unregistered. Panes are left\n  open: margin close <board>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
     Cmd { name: "move", help: "margin move <board> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n  change: move a component that exists\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
     Cmd { name: "title", help: "margin title <board> <title> [--base-rev N]\n  change: rename a board that exists (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
     Cmd { name: "hints", help: "margin hints <board> [text...] [--json]\n  change: the reminders of a board that exists, a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
@@ -162,7 +159,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "gc", help: "margin gc [--days N]\n  archive boards untouched for N days (default: config archive_days), and remove the cursors of\n  Claude sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
     Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--board", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
     Cmd { name: "emit", help: "margin emit <name> [JSON | -] [--board B] [--id ID]\n  append a named event to the project's log and print its seq. Anything can call it: cron, CI,\n  a script, a job. <name> is letters, digits and . _ - : (deploy.finished, ci.red); the value is one\n  JSON value (- reads it from stdin; text that is not JSON is an error; none: null)\n  --board B   the board it is about (must exist); --id ID a block in it\n  The event is logged as by you (or --by NAME), via emit. margin events --name 'deploy.*' reads\n  them, and a job registered with --on 'deploy.*' is run for them (margin help jobs)\n  The project comes from the working directory: from cron or another directory pass --project NAME\n    margin emit deploy.finished '{\"sha\":\"abc123\",\"ok\":true}' --project boards\n    jq -c .summary report.json | margin emit ci.report - --board ci\n", flags: &["--board", "--id"], max_pos: Some(2) },
-    Cmd { name: "act", help: "margin act <board> <id> <action> [VALUE]\n  what an action's key does in the pane, from the command line: append the event\n  <board>.<action> with id <id> and a snapshot of that block (a table row's cells, target and\n  detail; any other block's fields), and print its seq. <id> - is the board itself. VALUE (JSON,\n  or text) rides along as value.arg. A job registered with --on '<board>.<action>' handles it\n  (margin help jobs). Works on feed-owned rows: it changes no content\n  refused, with exit 1 and the reason: a missing board or id, an action the block does not offer\n    margin act reviews pr-4812 open\n", flags: &["--json"], max_pos: Some(4) },
+    Cmd { name: "act", help: "margin act <board> <id> <action> [VALUE]\n  what an action's key does in the pane, from the command line: append the event\n  <board>.<action> with id <id> and a snapshot of that block (a table row's cells, target and\n  detail; any other block's fields), and print its seq. <id> - is the board itself. VALUE (JSON,\n  or text) rides along as value.arg. A handler registered with --on '<board>.<action>' handles it\n  (margin help handlers). Works on rows someone else owns: it changes no content\n  refused, with exit 1 and the reason: a missing board or id, an action the block does not offer\n    margin act reviews pr-4812 open\n", flags: &["--json"], max_pos: Some(4) },
     Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify|end\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "doc", help: "margin doc <board> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
     Cmd { name: "toast", help: "margin toast <board> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
@@ -186,7 +183,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo board `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
     Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
     Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
-    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data", "--tool"], max_pos: Some(1) },
+    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--script | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --script: the script that fetches its rows (a handler runs it); --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--script", "--feed", "--data", "--tool"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
 
@@ -225,7 +222,7 @@ margin events --unread [--session S]
 
 const DAEMON_HELP: &str = "margin daemon [--stay]
   the supervisor for this project, in the foreground: it dispatches appended events to the
-  registered handlers and runs the registered feeds. You rarely start it: registering a handler,
+  registered handlers (and runs any legacy feed). You rarely start it: registering a handler,
   or appending an event while one is registered, starts it in the background. With nothing
   registered it exits (--stay keeps it up). SIGTERM stops it cleanly: running handlers are
   stopped (not failed), their events stay pending, and the next daemon gives them again
@@ -305,7 +302,7 @@ const OWNER_HELP: &str = "owners: programs margin does not run, registered as th
   margin owner add <name> --board B --owns PREFIX [--expect-every 10m]
       create: <name> owns the ids PREFIX and PREFIX-... on B (* = the whole board). The board must
       exist; a name that exists is refused. From then on only `margin apply B --as <name>` writes
-      those ids, and anyone else's write there is refused, as with a feed's or a handler's rows
+      those ids, and anyone else's write there is refused, as with a handler's rows
   margin owner set <name> [--board B] [--owns PREFIX] [--expect-every 10m|none]
       change: only what you pass changes; a missing name is refused
   margin owner ls [--json]
@@ -371,7 +368,7 @@ const RENDER_HELP: &str = "margin render <board> [<board>...] [--width W] [--hei
   --pane P       draw with pane P's saved view: folds, focus, scroll (default tty)
 ";
 
-const FEED_HELP: &str = "feeds: scripts that keep a board current without Claude
+const FEED_HELP: &str = "feeds (legacy: frozen, and to be removed; margin help feeds says what replaces each trigger)\n  scripts the daemon runs on its own timer, file watch or as a stream, to keep a board current
   margin feed add <name> [--every 10s | --watch <path>... | --stream] [--board B] [--owns PREFIX]
                   [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
   margin feed ls
@@ -380,7 +377,7 @@ const FEED_HELP: &str = "feeds: scripts that keep a board current without Claude
   margin feed logs <name> [--follow] [--lines N]
   margin feed run <name>            once, in the foreground (stream: until it exits or ctrl-c);
                                     leaves the daemon's status alone
-  margin feed <subcommand> --help for each; margin help feeds has the script contract and an example
+  margin feed <subcommand> --help for each; margin help feeds: what to use instead
 ";
 
 /// `margin feed <sub> --help`: that subcommand's own usage.
@@ -402,36 +399,36 @@ fn feed_sub_help(sub: &str) -> Option<&'static str> {
   --timeout 60s      a run of --every / --watch is stopped after this long
   --replace          change a registered feed's command or trigger in place
   -- <cmd...>        the command, run with no shell in the directory you are in now
-  margin help feeds has the script contract and a complete example
+  legacy: margin help feeds says what replaces each trigger
 ",
         "ls" => "margin feed ls
   each feed: its state (live, restarting, paused), trigger, board/prefix, restarts, and its
   last run: `ran 2s ago · unchanged`, `ran 2s ago · wrote`, or `failed 5s ago: <last stderr line>`
   (unchanged: it ran and printed what is already there, so nothing was written)
-  margin help feeds has the rest
+  legacy: margin help feeds says what to use instead
 ",
         "rm" => "margin feed rm <name>
   unregister a feed. Its last output stays in the board, unowned (the health line says
   removed); the daemon exits when no unpaused feed is left
-  margin help feeds has the rest
+  legacy: margin help feeds says what to use instead
 ",
         "pause" | "resume" => "margin feed pause <name>
 margin feed resume <name>
   stop running a feed without unregistering it (it still owns its ids), or start it again;
   pausing the last running feed stops the daemon, resume starts it
-  margin help feeds has the rest
+  legacy: margin help feeds says what to use instead
 ",
         "logs" => "margin feed logs <name> [--follow] [--lines N]
   the feed's log: a line per run (`run: wrote`, `run: unchanged`, `run: failed: …`), its
   stderr, rejected lines, restarts
   --lines N   the last N lines (default 40)
   --follow    keep printing as lines arrive
-  margin help feeds has the rest
+  legacy: margin help feeds says what to use instead
 ",
         "run" => "margin feed run <name>
   run a registered feed once, in the foreground, as the feed (a stream: until it exits or
   ctrl-c); prints `<board> rev N` or `<board> unchanged`, and leaves the daemon's status alone
-  margin help feeds has the rest
+  legacy: margin help feeds says what to use instead
 ",
         _ => return None,
     })
@@ -1493,14 +1490,16 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "skill" => print!("{}", help::render(help::SKILL, &help::Ctx::here())),
         "example" => {
-            // `--feed`/`--data` are switches; written before the name they swallow it as a value
-            let name = a.pos.first().map(String::as_str).or(a.get("--feed")).or(a.get("--data")).or(a.get("--tool"));
+            // `--script`/`--data` are switches; written before the name they swallow it as a value
+            // (`--feed` is the older spelling of `--script`)
+            let script = a.has("--script") || a.has("--feed");
+            let name = a.pos.first().map(String::as_str).or(a.get("--script")).or(a.get("--feed")).or(a.get("--data")).or(a.get("--tool"));
             let Some(name) = name else {
                 print!("{}", example::list());
                 return Ok(());
             };
             if name == example::RUNS.name {
-                match (a.has("--tool"), a.has("--feed") || a.has("--data")) {
+                match (a.has("--tool"), script || a.has("--data")) {
                     (_, true) => return Err("the runs example is an outside tool: margin example runs --tool".into()),
                     (true, _) => print!("{}", example::RUNS.tool),
                     _ => {
@@ -1515,8 +1514,8 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             }
             let names = || example::EXAMPLES.iter().map(|e| e.name).chain([example::RUNS.name]).collect::<Vec<_>>().join(", ");
             let e = example::get(name).ok_or_else(|| format!("no example {name:?}; examples: {}", names()))?;
-            match (a.has("--feed"), a.has("--data")) {
-                (true, true) => return Err("--feed or --data, one at a time".into()),
+            match (script, a.has("--data")) {
+                (true, true) => return Err("--script or --data, one at a time".into()),
                 (true, _) => print!("{}", e.feed),
                 (_, true) => print!("{}", e.data),
                 _ => {
@@ -2489,7 +2488,7 @@ fn show_text(d: &Doc, s: &store::State, claims: &[store::Claim], delivered: u64)
         out += &format!("purpose: {}\n", d.purpose);
     }
     for c in claims {
-        out += &format!("  (feed {} owns the ids {} and {}-…: read-only for you)\n", c.feed, c.owns, c.owns);
+        out += &format!("  ({} {} owns the ids {} and {}-…: read-only for you)\n", c.kind, c.feed, c.owns, c.owns);
     }
     doc::walk(&d.blocks, &mut |b, _, depth| {
         let pad = "  ".repeat(depth + 1);
@@ -2892,13 +2891,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&st.home);
     }
 
+    /// `margin --help` keeps the feed runner out of the main path: one line, under a heading that
+    /// says legacy, at the bottom; and the feed command's own help opens by saying so.
+    #[test]
+    fn help_lists_feed_last_under_a_legacy_heading() {
+        let lines: Vec<&str> = HELP.lines().collect();
+        let at = lines.iter().position(|l| l.starts_with("legacy (")).expect("a legacy heading");
+        let feed: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.contains("feed")).map(|(i, _)| i).collect();
+        assert_eq!(feed, [at, at + 1], "feed is named under the legacy heading and nowhere else");
+        assert!(lines[at].contains("margin help feeds") && lines[at + 1].starts_with("  margin feed "), "{}", lines[at + 1]);
+        assert!(lines[at + 2].is_empty() && lines[at + 3].starts_with("global, before or after"), "the legacy block is the last one");
+        assert!(FEED_HELP.starts_with("feeds (legacy: frozen"), "{FEED_HELP}");
+        assert!(doc::kind("feed").unwrap().about.starts_with("legacy: "));
+    }
+
     /// Each feed subcommand has its own help, the trigger flags a line each, all pointing at the
     /// topic; the ownership note is a count and the first few ids.
     #[test]
     fn feed_subcommands_have_their_own_help_and_the_note_is_capped() {
         for sub in ["add", "ls", "rm", "pause", "resume", "logs", "run"] {
             let h = feed_sub_help(sub).unwrap_or_else(|| panic!("feed {sub} has no help"));
-            assert!(h.starts_with("margin feed ") && h.contains(&format!("margin feed {sub}")) && h.contains("margin help feeds"), "{sub}: {h}");
+            assert!(h.starts_with("margin feed ") && h.contains(&format!("margin feed {sub}")) && h.contains("legacy: margin help feeds"), "{sub}: {h}");
             let (flags, _) = feed_spec(sub).unwrap();
             // --artifact is the older spelling of --board: taken, never printed
             for f in flags.iter().filter(|f| **f != "--artifact") {

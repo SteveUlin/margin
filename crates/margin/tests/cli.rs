@@ -329,8 +329,8 @@ fn a_feed_run_against_a_missing_artifact_fails_without_creating_it() {
 }
 
 /// Each bundled example, by the steps `margin example <name>` prints: piped into `margin new`
-/// it creates the board, its feed's stored output applies as an update that changes nothing,
-/// the feed registers on it, and a second pipe into `new` is refused.
+/// it creates the board, its script's stored output applies as an update that changes nothing,
+/// the script registers on it as a handler, and a second pipe into `new` is refused.
 #[test]
 fn the_examples_run_end_to_end_through_new() {
     let decoy = temp("ex-decoy");
@@ -344,7 +344,7 @@ fn the_examples_run_end_to_end_through_new() {
         let (json, steps) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
         assert!(steps.contains(&format!("margin example {name} | margin new {name}")) && !steps.contains("| margin apply {name}\n#        margin render"), "{steps}");
         // step 3 before step 1: an update of a board that was never created is refused
-        let feed_out = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../skill/examples/{name}.feed.out"))).unwrap();
+        let feed_out = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../skill/examples/{name}.fetch.out"))).unwrap();
         let (ok, out) = run(&["apply", name], &feed_out);
         assert!(!ok && out.contains(&format!("create it with margin new {name}")), "{out}");
         let (ok, out) = run(&["new", name], &json);
@@ -374,12 +374,17 @@ fn the_examples_run_end_to_end_through_new() {
         assert!(ok && out.trim() == format!("{name} rev 1"), "{name}: the feed's output changes nothing: {out}");
         let (ok, out) = run(&["new", name], &json);
         assert!(!ok && out.contains(&format!("{name} already exists (rev 1)")), "{name}: {out}");
-        // the feed line of step 4, as written in the steps (paused at once: nothing needs to run)
-        let line = steps.lines().find(|l| l.contains("margin feed add")).unwrap().trim_start_matches(['#', ' ']).to_string();
+        // the handler line of step 4, as written in the steps (removed at once: nothing needs to
+        // run); the steps name the legacy runner nowhere
+        assert!(!steps.contains("margin feed"), "{steps}");
+        let line = steps.lines().find(|l| l.contains(&format!("margin handler add {name}-refresh"))).unwrap().trim_start_matches(['#', ' ']).to_string();
         let words: Vec<&str> = line.split_whitespace().skip(1).collect();
         let (ok, out) = run(&words, "");
-        assert!(ok && out.contains(&format!("→ {name}")), "{name}: {line}: {out}");
-        assert!(run(&["feed", "rm", name], "").0);
+        assert!(ok && out.contains(&format!("(writes {name}, owns ")), "{name}: {line}: {out}");
+        assert!(run(&["handler", "rm", &format!("{name}-refresh")], "").0);
+        // --script prints the script; --feed, the older spelling, prints the same
+        let (ok, script) = run(&["example", name, "--script"], "");
+        assert!(ok && script.starts_with("#!/usr/bin/env bash") && script == run(&["example", name, "--feed"], "").1, "{name}");
     }
     assert_eq!(artifacts(&home), ["reviews", "services", "tracker"]);
     let t = Instant::now();
@@ -677,7 +682,8 @@ fn act_and_select_exit_nonzero_when_they_refuse() {
 /// Run one to its end and give its exit code: (code, stdout, stderr).
 fn coded(decoy: &Path, home: &Path, argv: &[&str], stdin: &str) -> (i32, String, String) {
     let mut ch = bare(decoy, home, argv).spawn().unwrap();
-    ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    // a command that refuses before it reads its stdin closes the pipe: that is not the test's failure
+    let _ = ch.stdin.take().unwrap().write_all(stdin.as_bytes());
     let o = ch.wait_with_output().unwrap();
     (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
 }
@@ -1019,12 +1025,12 @@ fn a_row_is_opened_by_the_registered_handler_through_the_daemon() {
     // the example's own steps: the board, the script and its data, the two handlers
     let (_, board, steps) = run(&["example", "reviews"], "");
     assert_eq!(ok(&["new", "reviews"], &board).trim(), "reviews rev 1");
-    std::fs::write(decoy.join("reviews.feed.sh"), ok(&["example", "reviews", "--feed"], "")).unwrap();
+    std::fs::write(decoy.join("reviews.fetch.sh"), ok(&["example", "reviews", "--script"], "")).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(decoy.join("reviews.feed.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(decoy.join("reviews.fetch.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let data = ok(&["example", "reviews", "--data"], "");
     std::fs::write(decoy.join("reviews.data.json"), &data).unwrap();
-    for needle in ["margin handler add reviews-refresh --on reviews.refresh --board reviews --owns pr -- ./reviews.feed.sh reviews.data.json", "margin handler add open --on '*.open' -- margin handle open"] {
+    for needle in ["margin handler add reviews-refresh --on reviews.refresh --board reviews --owns pr -- ./reviews.fetch.sh reviews.data.json", "margin handler add open --on '*.open' -- margin handle open"] {
         let line = steps.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("the steps don't print: {needle}\n{steps}"));
         let words: Vec<String> = line.trim_start_matches(['#', ' ']).split_whitespace().skip(1).map(|w| w.trim_matches('\'').to_string()).collect();
         ok(&words.iter().map(String::as_str).collect::<Vec<_>>(), "");

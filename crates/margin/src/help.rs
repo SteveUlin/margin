@@ -16,13 +16,13 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("handlers", include_str!("../../../skill/topics/handlers.md")),
     ("integrate", include_str!("../../../skill/topics/integrate.md")),
     ("lifecycle", include_str!("../../../skill/topics/lifecycle.md")),
-    ("feeds", include_str!("../../../skill/topics/feeds.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
     ("diffs", include_str!("../../../skill/topics/diffs.md")),
     ("images", include_str!("../../../skill/topics/images.md")),
     ("graphs", include_str!("../../../skill/topics/graphs.md")),
     ("proposals", include_str!("../../../skill/topics/proposals.md")),
     ("subagents", include_str!("../../../skill/topics/subagents.md")),
+    ("feeds", include_str!("../../../skill/topics/feeds.md")),
 ];
 
 /// What the templates' placeholders stand for on this machine.
@@ -171,7 +171,7 @@ mod tests {
             assert!(text.starts_with(&format!("# {name}: ")), "{name}'s heading");
         }
         assert_eq!(topic_list(&ctx("")).lines().count(), TOPICS.len() + 1);
-        assert!(topic("feeds").is_some() && topic("nope").is_none());
+        assert!(topic("handlers").is_some() && topic("nope").is_none());
     }
 
     /// `margin help` lists every topic file in `skill/topics/`, under its own name, on one line.
@@ -209,13 +209,36 @@ mod tests {
         for key in ["zebra", "zebra_color", "rule_glyph", "rule_color", "emphasis", "who.glyphs", "who.colors", "who.names", "runs.gap"] {
             assert!(d.contains(key), "dashboards doesn't name the theme key {key}");
         }
-        for cmd in ["margin new", "margin apply", "margin handler add", "margin emit", "margin feed add", "margin open", "margin tab", "margin view", "margin purpose", "margin hints", "margin render", "margin example", "margin help feeds", "--project"] {
+        for cmd in ["margin new", "margin apply", "margin handler add", "margin emit", "margin owner add", "margin data add", "margin open", "margin tab", "margin view", "margin purpose", "margin hints", "margin render", "margin example", "margin help handlers", "margin help integrate", "--project"] {
             assert!(d.contains(cmd), "dashboards doesn't show {cmd}");
         }
-        let f = topic("feeds").unwrap();
-        for must in ["--every", "--watch", "--stream", "--owns", "Exit 0", "margin feed run", "margin feed logs", "jq -c", "margin help dashboards", "margin example"] {
-            assert!(f.contains(must), "feeds doesn't cover {must:?}");
+        // the script contract and the line grammar live with handlers
+        let h = topic("handlers").unwrap();
+        for must in ["--owns", "Exit 0", "jq -c", "\"op\": \"set\"", "\"op\": \"rm\"", "\"op\": \"move\"", "\"op\": \"add\"", "\"parent\"", "an array of ops", "\"toast\"", "\"emit\"", "Print the whole thing every run", "Write times, not ages", "margin handler run", "margin handler logs", "margin help integrate"] {
+            assert!(h.contains(must), "handlers doesn't cover {must:?}");
         }
+    }
+
+    /// The feed runner is legacy and off the main path: its topic is a short page that says so
+    /// and names what replaces each trigger, and nothing else teaches it. The skill and every
+    /// other topic keep a board current with a handler, an owner or a dataset.
+    #[test]
+    fn feeds_are_legacy_and_off_the_main_path() {
+        let f = topic("feeds").unwrap();
+        assert!(f.starts_with("# feeds: legacy: ") && f.lines().count() <= 25, "a short page titled as legacy ({} lines)", f.lines().count());
+        for must in ["frozen", "will be removed", "`--every 30s`", "`--watch <path>`", "`--stream`", "a cron line or a systemd timer", "`watchexec`, `entr` or a systemd path unit", "follows the event stream", "margin emit <board>.refresh", "margin handler add", "margin owner add", "margin data append", "margin help handlers", "margin help integrate", "margin feed rm"] {
+            assert!(f.contains(must), "feeds doesn't say {must:?}");
+        }
+        for gone in ["margin feed add", "margin feed run", "margin feed logs", "--min-gap", "health line is"] {
+            assert!(!f.contains(gone), "feeds still teaches {gone:?}");
+        }
+        for (name, text) in TOPICS.iter().filter(|(n, _)| *n != "feeds") {
+            let lines: Vec<&str> = text.lines().filter(|l| l.to_lowercase().contains("feed")).collect();
+            let pointers = lines.iter().filter(|l| l.contains("legacy") && l.contains("margin help feeds")).count();
+            assert!(lines.len() == pointers && pointers <= 1, "{name} still talks about feeds: {lines:?}");
+        }
+        let lines: Vec<&str> = SKILL.lines().filter(|l| l.to_lowercase().contains("feed")).collect();
+        assert!(lines.len() == 1 && lines[0].starts_with("- `feeds`: legacy"), "the skill names feeds once, as legacy: {lines:?}");
     }
 
     /// Datasets are documented where the binary sends a reader: the command's help names the

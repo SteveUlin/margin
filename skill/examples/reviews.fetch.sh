@@ -1,28 +1,30 @@
 #!/usr/bin/env bash
-# margin feed for the `reviews` example: a JSON file of pull requests -> the table `pr`.
+# The script that fetches the rows of the `reviews` example: a JSON file of pull requests -> the
+# table `pr`. margin runs it as a handler, when the event `reviews.refresh` is appended.
 #
-#   margin example reviews | margin new reviews                  # the board it updates (a feed never creates one)
-#   ./reviews.feed.sh reviews.data.json                          # look at the line it prints
-#   ./reviews.feed.sh reviews.data.json | margin apply reviews   # apply it by hand (before registering)
-#   margin feed add reviews --watch reviews.data.json --board reviews --owns pr \
-#       -- ./reviews.feed.sh reviews.data.json
+#   margin example reviews | margin new reviews                   # the board it updates (a handler never creates one)
+#   ./reviews.fetch.sh reviews.data.json                          # look at the line it prints
+#   ./reviews.fetch.sh reviews.data.json | margin apply reviews   # apply it by hand (before registering)
+#   margin handler add reviews-refresh --on reviews.refresh --board reviews --owns pr \
+#       -- ./reviews.fetch.sh reviews.data.json
+#   margin emit reviews.refresh                                   # run it now; cron or a timer runs this line on a schedule
 #
-# The contract (margin help feeds): print `margin apply` input on stdout, one JSON value per line,
+# The contract (margin help handlers): print `margin apply` input on stdout, one JSON value per line,
 # and exit 0. This script prints ONE line: the whole table, id `pr`, with a `tr` child per pull
 # request, id `pr-<number>`. margin replaces the table with that id and reconciles the rows by
 # id: a known id updates in place, a new id appears, a missing id leaves. So the script never
 # deletes anything and keeps no memory between runs.
 #
-# Every id it writes sits under the prefix the feed owns (`--owns pr`: `pr` and `pr-...`).
+# Every id it writes sits under the prefix the handler owns (`--owns pr`: `pr` and `pr-...`).
 # A non-zero exit drops the whole run: the board keeps its last rows and shows the last stderr
 # line, so let errors be errors (`set -e`) and say what went wrong on stderr.
 #
 # For real data, replace the file with a command, for example:
 #   gh pr list --search 'review-requested:@me' --json number,title,author,url,createdAt
-# and run on a timer instead of a watch: `--every 2m`.
+# and emit the event from cron: `*/2 * * * *  margin emit reviews.refresh --project <project>`.
 set -euo pipefail
 data=${1:-reviews.data.json}
-[ -r "$data" ] || { echo "reviews feed: cannot read $data" >&2; exit 1; }
+[ -r "$data" ] || { echo "reviews fetch: cannot read $data" >&2; exit 1; }
 
 jq -c '
   # how the source names a CI run -> the four words a run strip takes (null: no run in that slot)

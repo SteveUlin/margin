@@ -1,9 +1,10 @@
 //! `margin example`: complete dashboards to copy from, embedded in the binary.
 //!
-//! Each example is four plain files in `skill/examples/`: the artifact (`<name>.json`, a whole
-//! document for `margin new`), the feed script that keeps it current (`<name>.feed.sh`), a
-//! sample of the data the script reads (`<name>.data.json`), and what the script prints for that
-//! sample (`<name>.feed.out`, which the tests hold the script to). They are the worked half of
+//! Each example is four plain files in `skill/examples/`: the board (`<name>.json`, a whole
+//! document for `margin new`), the script that fetches its rows (`<name>.fetch.sh`, registered as
+//! a handler for a refresh event), a sample of the data the script reads (`<name>.data.json`),
+//! and what the script prints for that sample (`<name>.fetch.out`, which the tests hold the
+//! script to). They are the worked half of
 //! `margin help dashboards`: an AI that has never seen this repository reads one, pipes it into a
 //! store, and changes it into the board it was asked for.
 
@@ -14,39 +15,36 @@ pub struct Example {
     pub artifact: &'static str,
     pub feed: &'static str,
     pub data: &'static str,
-    /// The script's output for `data`: the feed's parts of `artifact`, line for line.
+    /// The script's output for `data`: the handler's parts of `artifact`, line for line.
     pub out: &'static str,
-    /// The id prefix the feed owns.
+    /// The id prefix the handler owns.
     pub owns: &'static str,
-    /// The trigger its `margin feed add` line uses.
-    pub trigger: &'static str,
     /// More steps, for the parts of the board that no script writes (a plot fed by a dataset).
     pub more: &'static str,
 }
 
 macro_rules! example {
-    ($name:literal, $owns:literal, $trigger:literal, $about:literal) => {
-        example!($name, $owns, $trigger, $about, "")
+    ($name:literal, $owns:literal, $about:literal) => {
+        example!($name, $owns, $about, "")
     };
-    ($name:literal, $owns:literal, $trigger:literal, $about:literal, $more:expr) => {
+    ($name:literal, $owns:literal, $about:literal, $more:expr) => {
         Example {
             name: $name,
             about: $about,
             artifact: include_str!(concat!("../../../skill/examples/", $name, ".json")),
-            feed: include_str!(concat!("../../../skill/examples/", $name, ".feed.sh")),
+            feed: include_str!(concat!("../../../skill/examples/", $name, ".fetch.sh")),
             data: include_str!(concat!("../../../skill/examples/", $name, ".data.json")),
-            out: include_str!(concat!("../../../skill/examples/", $name, ".feed.out")),
+            out: include_str!(concat!("../../../skill/examples/", $name, ".fetch.out")),
             owns: $owns,
-            trigger: $trigger,
             more: $more,
         }
     };
 }
 
 pub const EXAMPLES: &[Example] = &[
-    example!("reviews", "pr", "--watch reviews.data.json", "pull requests to review: a table (id, author badge, title, CI run strip, age), rules, hints"),
-    example!("services", "svc", "--every 30s", "background services: a latency plot fed by a dataset; tabs Failing / All; rows with the error, run strips with a failure count, a table with state glyphs", SERVICES_DATA),
-    example!("tracker", "wk", "--watch tracker.data.json", "a work tracker: sections Now / Next / Waiting (todos, rows, owner badges) kept by a feed, beside a Decided section that is yours"),
+    example!("reviews", "pr", "pull requests to review: a table (id, author badge, title, CI run strip, age), rules, hints"),
+    example!("services", "svc", "background services: a latency plot fed by a dataset; tabs Failing / All; rows with the error, run strips with a failure count, a table with state glyphs", SERVICES_DATA),
+    example!("tracker", "wk", "a work tracker: sections Now / Next / Waiting (todos, rows, owner badges) kept by a handler, beside a Decided section that is yours"),
 ];
 
 /// The services example's plot reads the dataset `latency`, which no script of the example
@@ -121,16 +119,16 @@ pub fn list() -> String {
     }
     s += &format!("  {:<9} {}\n", RUNS.name, RUNS.about);
     s += "\n  margin example <name>          the board: a whole document, ready for `margin new <board>`\n";
-    s += "  margin example <name> --feed   the script that keeps it current (bash + jq)\n";
+    s += "  margin example <name> --script the script that fetches its rows (bash + jq), run as a handler\n";
     s += "  margin example <name> --data   a sample of the data that script reads\n";
-    s += "  margin example runs --tool     the outside tool of the runs example (it has no --feed or --data)\n";
+    s += "  margin example runs --tool     the outside tool of the runs example (it has no --script or --data)\n";
     s += "\n  margin example reviews | margin new reviews && margin render reviews --width 100\n";
     s
 }
 
 impl Example {
-    /// What goes to stderr beside the artifact: the steps from this JSON to a live, feed-kept
-    /// board. On stderr so that `margin example <name> | margin new <art>` pipes clean JSON.
+    /// What goes to stderr beside the board: the steps from this JSON to a live board kept by
+    /// a handler. On stderr so that `margin example <name> | margin new <art>` pipes clean JSON.
     pub fn notes(&self) -> String {
         let n = self.name;
         format!(
@@ -140,13 +138,13 @@ impl Example {
 #        margin example {n} | margin new {n}
 #        margin render {n} --width 100 --height 40
 #   2. take the script that fetches its rows, and the sample data it reads
-#        margin example {n} --feed > {n}.feed.sh && chmod +x {n}.feed.sh
+#        margin example {n} --script > {n}.fetch.sh && chmod +x {n}.fetch.sh
 #        margin example {n} --data > {n}.data.json
 #   3. run the script by hand: its stdout is `margin apply` input, an update (here it changes nothing, so no new rev)
-#        ./{n}.feed.sh {n}.data.json | margin apply {n}
+#        ./{n}.fetch.sh {n}.data.json | margin apply {n}
 #   4. register it as the handler of a refresh event: whenever `{n}.refresh` is appended, margin's daemon
 #      runs it and applies what it prints, with no AI involved
-#        margin handler add {n}-refresh --on {n}.refresh --board {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
+#        margin handler add {n}-refresh --on {n}.refresh --board {n} --owns {owns} -- ./{n}.fetch.sh {n}.data.json
 #        margin emit {n}.refresh                      # try it: `margin handler ls` shows the run
 #   5. make a row's link open: enter (or a click) on a row with a target appends `{n}.open`, and the pane
 #      runs nothing itself. This ready-made handler opens it; register it once per project
@@ -161,14 +159,9 @@ impl Example {
 #        margin open {n}        |        margin tab <that pane's board> add {n}
 # The handler owns the ids `{owns}` and `{owns}-...`: once it is registered they are read-only for you (test a
 # changed script with `margin handler run {n}-refresh --dry-run`). Every other id in the board is yours to write.
-#
-# Optional convenience, instead of steps 4 and 6: the older feed runner schedules the script itself ({trigger_words})
-#        margin feed add {n} {trigger} --board {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
 {more}",
             more = self.more,
-            trigger_words = if self.trigger.starts_with("--watch") { "here: whenever the data file changes" } else { "here: on an interval" },
             about = self.about,
-            trigger = self.trigger,
             owns = self.owns
         )
     }
@@ -206,6 +199,10 @@ mod tests {
             assert!(l.contains(&format!("  {} ", e.name)) && l.contains(e.about), "{}", e.name);
             assert!(e.notes().contains(&format!("margin example {0} | margin new {0}", e.name)));
             assert!(e.notes().contains(&format!("--owns {} ", e.owns)));
+            // the steps teach the handler and the outside schedule, and nothing of the legacy runner
+            let notes = e.notes();
+            assert!(notes.contains(&format!("margin handler add {0}-refresh --on {0}.refresh --board {0}", e.name)) && notes.contains(&format!("margin emit {}.refresh --project <project>", e.name)), "{notes}");
+            assert!(!notes.contains("margin feed") && !e.feed.contains("margin feed") && e.feed.contains(&format!("margin handler add {}-refresh", e.name)), "{}", e.name);
         }
         assert!(get("nope").is_none());
     }
@@ -240,7 +237,7 @@ mod tests {
             st.put(doc(e), None).unwrap();
             let (rev, errs) = st.feed_write(e.name, &g, &w, &[]);
             assert!(errs.is_empty(), "{}: {errs:?}", e.name);
-            assert_eq!(rev, None, "{}.json and {}.feed.out disagree: regenerate the board from the feed", e.name, e.name);
+            assert_eq!(rev, None, "{}.json and {}.fetch.out disagree: regenerate the board from the script's output", e.name, e.name);
             let _ = std::fs::remove_dir_all(&st.home);
         }
     }
@@ -258,13 +255,13 @@ mod tests {
         for e in EXAMPLES {
             let dir = std::env::temp_dir().join(format!("margin-example-{}-{}", std::process::id(), e.name));
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("feed.sh"), e.feed).unwrap();
+            std::fs::write(dir.join("fetch.sh"), e.feed).unwrap();
             std::fs::write(dir.join("data.json"), e.data).unwrap();
-            let o = std::process::Command::new("bash").arg(dir.join("feed.sh")).arg(dir.join("data.json")).output().unwrap();
+            let o = std::process::Command::new("bash").arg(dir.join("fetch.sh")).arg(dir.join("data.json")).output().unwrap();
             assert!(o.status.success(), "{}: {}", e.name, String::from_utf8_lossy(&o.stderr));
-            assert_eq!(String::from_utf8_lossy(&o.stdout), e.out, "{}.feed.sh no longer prints {}.feed.out", e.name, e.name);
+            assert_eq!(String::from_utf8_lossy(&o.stdout), e.out, "{}.fetch.sh no longer prints {}.fetch.out", e.name, e.name);
             // a missing data file is an error on stderr and a non-zero exit, never an empty board
-            let o = std::process::Command::new("bash").arg(dir.join("feed.sh")).arg(dir.join("absent.json")).output().unwrap();
+            let o = std::process::Command::new("bash").arg(dir.join("fetch.sh")).arg(dir.join("absent.json")).output().unwrap();
             assert!(!o.status.success() && o.stdout.is_empty() && !o.stderr.is_empty(), "{}", e.name);
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -316,7 +313,7 @@ mod tests {
     #[test]
     fn examples_name_no_one() {
         for e in EXAMPLES {
-            for (what, s) in [("json", e.artifact), ("feed", e.feed), ("data", e.data), ("notes", &e.notes()[..])] {
+            for (what, s) in [("json", e.artifact), ("script", e.feed), ("data", e.data), ("notes", &e.notes()[..])] {
                 let low = s.to_lowercase();
                 assert!(!low.contains("sulin") && !low.contains("/home/"), "{}.{what}", e.name);
             }

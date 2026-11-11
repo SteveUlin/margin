@@ -85,7 +85,7 @@ you clicked.
 
 - `margin init --dry-run` shows what a run would change; "up to date" twice and "nothing to
   change" means the machine is set.
-- `margin help` lists the commands and the reference topics (`margin help feeds`, …).
+- `margin help` lists the commands and the reference topics (`margin help handlers`, …).
 - To undo: delete `~/.claude/skills/margin/`, and remove the `margin hook …` entries from
   `~/.claude/settings.json` (or restore `settings.json.bak`).
 - `margin diff` and `margin demo` need difftastic (`difft`) on PATH, in `$MARGIN_DIFFT`, or under

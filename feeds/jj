@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# margin feed: the current jj repo's recent changes as a ledger.
+# The current jj repo's recent changes as a ledger: a script margin runs as a handler.
 #
+# Run it as the handler of a refresh event, registered from the repo's root, and let whatever
+# owns the schedule emit that event (margin help handlers, margin help integrate):
+#   margin new changes
+#   margin handler add jj-refresh --on changes.refresh --board changes --owns jj -- /path/to/margin/feeds/jj
+#   crontab -e:   * * * * *  /path/to/margin emit changes.refresh --project <project>
+#   or on every jj operation:  watchexec -w .jj/repo/op_heads/heads -- margin emit changes.refresh
+#
+# Legacy, the frozen `margin feed` runner (margin help feeds):
 #   margin feed add jj --watch .jj/repo/op_heads/heads --board changes -- /path/to/margin/feeds/jj
 #
 # Prints one line: the whole `jj` section (rows `jj-c-<change>`, plus a `jj-wc` section listing the
-# working copy's files), which margin applies as a replace of the component with id "jj". The
-# daemon reruns it whenever jj records an operation (op_heads changes).
+# working copy's files), which margin applies as a replace of the component with id "jj".
 #
-# Reads with --ignore-working-copy, so the feed itself never snapshots the working copy and never
-# records an operation: a feed that wrote ops would retrigger its own watch forever. The cost is
+# Reads with --ignore-working-copy, so the script itself never snapshots the working copy and never
+# records an operation: a script that wrote ops would retrigger a watch on op_heads forever. The cost is
 # that unsnapshotted edits show up at the next jj command anyone runs, which the section note says.
 #
 # Env: JJ_FEED_REVS (revset, default: the last 8 ancestors of @, without the root), JJ_FEED_PREFIX (default "jj").
