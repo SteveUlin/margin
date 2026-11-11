@@ -177,7 +177,7 @@ mod tests {
         }
         assert_eq!(looks.get(), 1);
         // nothing needed at all: no look, no wake
-        assert!(quiet(&a.plan(&[act("running", "")], 4000.0, true, 120.0, || seen(false))));
+        assert!(quiet(&a.plan(&[act("running", "")], 4000.0, || seen(false))));
         assert_eq!(looks.get(), 1);
     }
 
@@ -186,8 +186,8 @@ mod tests {
     #[test]
     fn a_new_need_inside_the_rate_limit_gets_one_wake() {
         let mut a = Attention::default();
-        assert!(quiet(&a.plan(&[act("idle", "")], 10.0, false, 0.0, || Some(true))));
-        assert!(quiet(&a.plan(&[act("running", "")], 10.2, false, 0.0, || Some(true))));
+        assert!(quiet(&a.plan(&[act("idle", "")], 10.0, || Some(true))));
+        assert!(quiet(&a.plan(&[act("running", "")], 10.2, || Some(true))));
         let w = [act("waiting", "")];
         assert_eq!(a.plan(&w, 10.4, || Some(false)), Step { act: Act::Keep, wake: Some(11.0) });
         assert_eq!(a.plan(&w, 11.0, || Some(false)), Step { act: Act::Mark, wake: None });
@@ -205,7 +205,7 @@ mod tests {
         assert!(quiet(&a.plan(&idle, 10.3, || panic!("inside the rate limit"))));
         assert!(quiet(&a.plan(&idle, 20.0, || Some(false))), "still out of view");
         assert_eq!(a.plan(&idle, 30.0, || Some(true)), Step { act: Act::Unmark, wake: None });
-        assert_eq!(a.plan(&[act("running", "")], 30.1, false, 0.0, || panic!("no look")), Step { act: Act::Unmark, wake: None });
+        assert_eq!(a.plan(&[act("running", "")], 30.1, || panic!("no look")), Step { act: Act::Unmark, wake: None });
         a.marked = None; // nothing real to rename back on drop
     }
 }
