@@ -1,0 +1,10 @@
+{
+  "title": "Runs",
+  "purpose": "Long runs, one at a time: what is running, what waits, what finished",
+  "hints": ["X  cancel the running one", "D  drop a waiting one", "d  a finished run's last lines", "submit: margin emit sim.requested '{\"label\":…,\"cmd\":[…]}'"],
+  "blocks": [
+    {"type": "section", "id": "run-now", "title": "Running", "children": []},
+    {"type": "section", "id": "run-wait", "title": "Waiting", "children": []},
+    {"type": "section", "id": "run-done", "title": "Finished", "children": []}
+  ]
+}

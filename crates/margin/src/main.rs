@@ -180,7 +180,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo artifact `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
     Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
     Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
-    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data]\n  print one: the artifact (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data"], max_pos: Some(1) },
+    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data | --tool]\n  print one: the artifact (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data", "--tool"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
 
@@ -447,7 +447,7 @@ struct Args {
 }
 
 const BOOL_FLAGS: &[&str] = &[
-    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit", "--stay", "--fix",
+    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit", "--stay", "--fix", "--tool",
 ];
 
 impl Args {
@@ -1446,12 +1446,26 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "skill" => print!("{}", help::render(help::SKILL, &help::Ctx::here())),
         "example" => {
             // `--feed`/`--data` are switches; written before the name they swallow it as a value
-            let name = a.pos.first().map(String::as_str).or(a.get("--feed")).or(a.get("--data"));
+            let name = a.pos.first().map(String::as_str).or(a.get("--feed")).or(a.get("--data")).or(a.get("--tool"));
             let Some(name) = name else {
                 print!("{}", example::list());
                 return Ok(());
             };
-            let names = || example::EXAMPLES.iter().map(|e| e.name).collect::<Vec<_>>().join(", ");
+            if name == example::RUNS.name {
+                match (a.has("--tool"), a.has("--feed") || a.has("--data")) {
+                    (_, true) => return Err("the runs example is an outside tool: margin example runs --tool".into()),
+                    (true, _) => print!("{}", example::RUNS.tool),
+                    _ => {
+                        eprint!("{}", example::RUNS.notes());
+                        print!("{}", example::RUNS.artifact);
+                    }
+                }
+                return Ok(());
+            }
+            if a.has("--tool") {
+                return Err("--tool is the runs example's: margin example runs --tool".into());
+            }
+            let names = || example::EXAMPLES.iter().map(|e| e.name).chain([example::RUNS.name]).collect::<Vec<_>>().join(", ");
             let e = example::get(name).ok_or_else(|| format!("no example {name:?}; examples: {}", names()))?;
             match (a.has("--feed"), a.has("--data")) {
                 (true, true) => return Err("--feed or --data, one at a time".into()),

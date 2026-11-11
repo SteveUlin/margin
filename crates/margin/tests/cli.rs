@@ -1043,3 +1043,140 @@ fn a_session_end_cleans_up_and_the_next_session_finds_the_board() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }
+
+/// The `runs` example: a separate tool on margin's queries and hooks, with no margin daemon and
+/// no handler. Three submissions run strictly one after another and each row moves Waiting →
+/// Running → Finished; a cancel stops the running one and the next starts; a drop removes a
+/// waiting one; the tool killed and started again loses nothing and repeats nothing.
+#[test]
+fn the_runs_example_is_an_outside_tool_that_runs_submissions_one_at_a_time() {
+    let has = |c: &str, arg: &str| Command::new(c).arg(arg).output().map(|o| o.status.success()).unwrap_or(false);
+    if !has("bash", "--version") || !has("jq", "--version") || !has("setsid", "--version") || !has("flock", "--version") {
+        eprintln!("skipped: bash, jq, setsid or flock is not on PATH");
+        return;
+    }
+    let (decoy, home) = (temp("runs-decoy"), temp("runs-home"));
+    let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
+    let ok = |argv: &[&str], stdin: &str| {
+        let (code, out, err) = run(argv, stdin);
+        assert_eq!(code, 0, "margin {argv:?}: {out}{err}");
+        out
+    };
+    let (_, board, steps) = run(&["example", "runs"], "");
+    assert!(steps.contains("margin example runs --tool") && steps.contains("no margin daemon or handler is involved"), "{steps}");
+    assert_eq!(ok(&["new", "runs"], &board).trim(), "runs rev 1");
+    let script = decoy.join("runs.tool.sh");
+    std::fs::write(&script, ok(&["example", "runs", "--tool"], "")).unwrap();
+    let tool_log = decoy.join("tool.log");
+    let start_tool = || {
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(&tool_log).unwrap();
+        Command::new("bash")
+            .arg(&script)
+            .current_dir(&decoy)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &decoy)
+            .env("MARGIN_HOME", &home)
+            .env("MARGIN_PROJECT", "p")
+            .env("MARGIN_BIN", BIN)
+            .env("RUNS_DIR", decoy.join("state"))
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap()
+    };
+    let said = || std::fs::read_to_string(&tool_log).unwrap_or_default();
+    // where each run's row is now: (running, waiting, finished), by block id
+    let sections = || -> [Vec<serde_json::Value>; 3] {
+        let v: serde_json::Value = serde_json::from_str(&run(&["show", "runs", "--json"], "").1).unwrap_or_default();
+        let kids = |i: usize| v["doc"]["blocks"][i]["children"].as_array().cloned().unwrap_or_default();
+        [kids(0), kids(1), kids(2)]
+    };
+    let place = |id: &str| -> &'static str {
+        let s = sections();
+        ["now", "wait", "done"].into_iter().zip(s.iter()).find(|(_, rows)| rows.iter().any(|r| r["id"] == id)).map(|(n, _)| n).unwrap_or("-")
+    };
+    let finished = |id: &str| sections()[2].iter().find(|r| r["id"] == id).cloned();
+    let times = decoy.join("times");
+    let submit = |label: &str, secs: &str| -> String {
+        let cmd = format!("echo \"start {label} $(date +%s%N)\" >> {t}; echo out-of-{label}; sleep {secs}; echo \"end {label} $(date +%s%N)\" >> {t}", t = times.display());
+        let v = serde_json::json!({"label": label, "cmd": ["sh", "-c", cmd]});
+        format!("run-{}", ok(&["emit", "sim.requested", &v.to_string()], "").trim())
+    };
+
+    let mut tool = start_tool();
+    wait_for("the tool to register and take its cursor", 15, || home.join("p/owners.json").exists() && home.join("p/cursors/runs-tool").exists());
+    assert!(ok(&["owner", "ls"], "").contains("runs-tool") && ok(&["owner", "ls"], "").contains("runs/run"));
+
+    // three short runs, submitted back to back
+    let ids = [submit("a", "0.3"), submit("b", "0.3"), submit("c", "0.3")];
+    let mut seen: Vec<Vec<&str>> = vec![Vec::new(); 3];
+    let t = Instant::now();
+    while sections()[2].len() < 3 {
+        assert!(t.elapsed() < Duration::from_secs(30), "the three runs did not finish: {:?}\n{}", sections(), said());
+        for (i, id) in ids.iter().enumerate() {
+            let p = place(id);
+            if p != "-" && seen[i].last() != Some(&p) {
+                seen[i].push(p);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    for (i, id) in ids.iter().enumerate() {
+        seen[i].push(place(id));
+        seen[i].dedup();
+    }
+    assert!(seen[0] == ["now", "done"] || seen[0] == ["wait", "now", "done"], "{seen:?}");
+    assert_eq!(seen[1], ["wait", "now", "done"], "{seen:?}");
+    assert_eq!(seen[2], ["wait", "now", "done"], "{seen:?}");
+    // strictly one at a time: start a, end a, start b, end b, start c, end c, by the clock
+    let lines: Vec<(String, String, u128)> = std::fs::read_to_string(&times).unwrap().lines().map(|l| { let w: Vec<&str> = l.split(' ').collect(); (w[0].to_string(), w[1].to_string(), w[2].parse().unwrap()) }).collect();
+    assert_eq!(lines.iter().map(|l| format!("{} {}", l.0, l.1)).collect::<Vec<_>>(), ["start a", "end a", "start b", "end b", "start c", "end c"]);
+    assert!(lines.windows(2).all(|w| w[0].2 <= w[1].2), "{lines:?}");
+    let row = finished(&ids[0]).unwrap();
+    assert!(row["aside"].as_str().unwrap().starts_with("ok · 0.") && row["glyph"] == "done" && row["detail"].as_str().unwrap().contains("out-of-a"), "{row}");
+    assert!(std::fs::read_to_string(home.join("p/runs/doc.json")).unwrap().contains("\"by\": \"owner:runs-tool\""), "the rows are written as the owner");
+
+    // cancel the running one, drop a waiting one
+    let (long1, long2, never) = (submit("long1", "30"), submit("long2", "30"), submit("never", "0.1"));
+    wait_for("long1 to run with two waiting", 15, || place(&long1) == "now" && place(&long2) == "wait" && place(&never) == "wait");
+    let (code, _, err) = run(&["act", "runs", &never, "cancel"], "");
+    assert!(code == 1 && err.contains("offers no action \"cancel\"; its actions: drop"), "a waiting row is dropped, not cancelled: {err}");
+    ok(&["act", "runs", &never, "drop"], "");
+    wait_for("the dropped run to leave the queue", 15, || place(&never) == "-");
+    ok(&["act", "runs", &long1, "cancel"], "");
+    wait_for("the cancelled run to finish and the next to start", 15, || place(&long1) == "done" && place(&long2) == "now");
+    let row = finished(&long1).unwrap();
+    assert!(row["aside"].as_str().unwrap().starts_with("cancelled · ") && row["glyph"] == "fail", "{row}");
+    ok(&["act", "runs", &long2, "cancel"], "");
+    wait_for("the second cancel", 15, || place(&long2) == "done" && sections()[0].is_empty());
+    let log = std::fs::read_to_string(&times).unwrap();
+    assert!(log.contains("start long1") && !log.contains("end long1") && !log.contains("never"), "cancelled runs never reached their end, the dropped one never ran: {log}");
+
+    // the tool dies; submissions made while it is down wait in the log, and its cursor is its memory
+    tool.kill().unwrap();
+    tool.wait().unwrap();
+    let before = sections()[2].len();
+    let (d, e) = (submit("d", "0.2"), submit("e", "0.2"));
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!((place(&d), place(&e)), ("-", "-"), "nobody is there to take them");
+    let mut tool = start_tool();
+    wait_for("the restarted tool to run what was submitted while it was down", 30, || place(&d) == "done" && place(&e) == "done");
+    let done = sections()[2].clone();
+    assert_eq!(done.len(), before + 2, "nothing lost, nothing run twice: {done:?}");
+    let mut done_ids: Vec<String> = done.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect();
+    done_ids.sort();
+    done_ids.dedup();
+    assert_eq!(done_ids.len(), before + 2);
+    let log = std::fs::read_to_string(&times).unwrap();
+    assert_eq!((log.matches("start d ").count(), log.matches("start e ").count(), log.matches("start a ").count()), (1, 1, 1), "{log}");
+    assert!(log.find("end d").unwrap() < log.find("start e").unwrap(), "still one at a time");
+    // margin ran nothing for any of it
+    assert!(!home.join("p/daemon.pid").exists() && !home.join("p/handlers.json").exists() && !home.join("p/feeds.json").exists());
+    assert!(!said().contains("margin "), "the tool hit no margin error: {}", said());
+    tool.kill().unwrap();
+    tool.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}

@@ -43,6 +43,52 @@ pub const EXAMPLES: &[Example] = &[
     example!("tracker", "wk", "--watch tracker.data.json", "a work tracker: sections Now / Next / Waiting (todos, rows, owner badges) kept by a feed, beside a Decided section that is yours"),
 ];
 
+/// The fourth example is not a board with a fetcher: it is an outside tool. A run queue that
+/// takes submissions as events, runs them one at a time and owns its rows, as a program of its
+/// own that margin neither starts nor schedules (`margin help integrate`).
+pub struct ToolExample {
+    pub name: &'static str,
+    pub about: &'static str,
+    pub artifact: &'static str,
+    /// The tool: one self-contained script.
+    pub tool: &'static str,
+}
+
+pub const RUNS: ToolExample = ToolExample {
+    name: "runs",
+    about: "a run queue kept by an outside tool: sections Running / Waiting / Finished, actions cancel and drop; margin runs nothing",
+    artifact: include_str!("../../../skill/examples/runs.json"),
+    tool: include_str!("../../../skill/examples/runs.tool.sh"),
+};
+
+impl ToolExample {
+    /// The steps beside the artifact, on stderr.
+    pub fn notes(&self) -> String {
+        let n = self.name;
+        format!(
+            "# {n}: {about}
+# stdout is the artifact, a whole document. This example shows a SEPARATE TOOL working with a board:
+# it follows the event log, makes every decision itself, and writes the rows it owns. margin runs
+# nothing for it, and no margin daemon or handler is involved.
+#   1. create the board
+#        margin example {n} | margin new {n}
+#   2. take the tool (bash + jq) and start it; it registers itself as the owner of the ids run and run-...
+#        margin example {n} --tool > {n}.tool.sh && chmod +x {n}.tool.sh
+#        ./{n}.tool.sh &                 # its state (queue, logs) goes to ./runs-state, or $RUNS_DIR
+#   3. submit work from anywhere (another directory or cron: add --project <project>)
+#        margin emit sim.requested '{{\"label\": \"sim A\", \"cmd\": [\"sleep\", \"30\"]}}'
+#   4. act on it: X on the running row cancels it, D on a waiting row drops it; from a script
+#        margin act {n} run-<seq> cancel        |        margin act {n} run-<seq> drop
+#   5. show it
+#        margin open {n}
+# The tool is yours to replace: order, one-at-a-time, cancel and restart behavior are all in that file.
+# What it uses of margin: owner add, events --follow --cursor ... --no-commit / --commit, apply --as.
+",
+            about = self.about
+        )
+    }
+}
+
 pub fn get(name: &str) -> Option<&'static Example> {
     EXAMPLES.iter().find(|e| e.name == name)
 }
@@ -53,9 +99,11 @@ pub fn list() -> String {
     for e in EXAMPLES {
         s += &format!("  {:<9} {}\n", e.name, e.about);
     }
+    s += &format!("  {:<9} {}\n", RUNS.name, RUNS.about);
     s += "\n  margin example <name>          the artifact: a whole document, ready for `margin new <art>`\n";
     s += "  margin example <name> --feed   the script that keeps it current (bash + jq)\n";
     s += "  margin example <name> --data   a sample of the data that script reads\n";
+    s += "  margin example runs --tool     the outside tool of the runs example (it has no --feed or --data)\n";
     s += "\n  margin example reviews | margin new reviews && margin render reviews --width 100\n";
     s
 }
