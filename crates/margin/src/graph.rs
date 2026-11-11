@@ -15,6 +15,12 @@ pub const TL: char = '\u{F5D6}'; // ╭
 pub const TR: char = '\u{F5D7}'; // ╮
 pub const BL: char = '\u{F5D8}'; // ╰
 pub const BR: char = '\u{F5D9}'; // ╯
+// junctions on a horizontal run that carries on past them: a branch going down, a merge coming
+// from above, each curving toward the node's side (the font has one glyph per side)
+pub const DOWN_FROM_LEFT: char = '\u{F5E0}'; // ┬, the run arrives from the left
+pub const DOWN_FROM_RIGHT: char = '\u{F5E1}'; // ┬, the run arrives from the right
+pub const UP_TO_LEFT: char = '\u{F5E3}'; // ┴, the lane from above turns left
+pub const UP_TO_RIGHT: char = '\u{F5E4}'; // ┴, the lane from above turns right
 /// Where the node goes in `cells`.
 pub const NODE: char = '\0';
 
@@ -69,6 +75,8 @@ pub fn glyph(c: char, flog: bool) -> char {
         0xF5D7 => '╮',
         0xF5D8 => '╰',
         0xF5D9 => '╯',
+        0xF5E0 | 0xF5E1 => '┬',
+        0xF5E3 | 0xF5E4 => '┴',
         n @ 0xF5EE..=0xF60D => if n % 2 == 0 { '●' } else { '○' },
         _ => c,
     }
@@ -157,9 +165,21 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
             cells[l * 2] = if l == k {
                 NODE
             } else if merges.contains(&l) {
-                if l > k { BR } else { BL }
+                // the farthest end is a corner; one the run passes on its way there is a junction,
+                // or the line would stop at it and the ends beyond would hang unconnected
+                match (l > k, l == hi || l == lo) {
+                    (true, true) => BR,
+                    (true, false) => UP_TO_LEFT,
+                    (false, true) => BL,
+                    (false, false) => UP_TO_RIGHT,
+                }
             } else if branches.contains(&l) {
-                if l > k { TR } else { TL }
+                match (l > k, l == hi || l == lo) {
+                    (true, true) => TR,
+                    (true, false) => DOWN_FROM_LEFT,
+                    (false, true) => TL,
+                    (false, false) => DOWN_FROM_RIGHT,
+                }
             } else if was && lanes.get(l).map(|x| x.is_some()).unwrap_or(false) {
                 V
             } else if lo < l && l < hi {
@@ -177,7 +197,7 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
             if l != k {
                 edges[l * 2] = match cells[l * 2] {
                     V => was_edge.get(l).cloned().flatten(),
-                    BR | BL | TR | TL => end_edge(l),
+                    BR | BL | TR | TL | DOWN_FROM_LEFT | DOWN_FROM_RIGHT | UP_TO_LEFT | UP_TO_RIGHT => end_edge(l),
                     H => ends.iter().filter(|&&e| if e > k { e > l } else { e < l }).min_by_key(|&&e| e.abs_diff(l)).and_then(|&e| end_edge(e)),
                     _ => None,
                 };
@@ -265,6 +285,22 @@ mod tests {
         // every row the same width, so the text lines up
         let w = rows["g1"].cells.len();
         assert!(rows.values().all(|r| r.cells.len() == w));
+    }
+
+    #[test]
+    fn a_run_past_a_branch_or_merge_joins_it() {
+        // a fans out to b, c and d; e waits on all three
+        let nodes: Vec<(String, Vec<String>)> = [("a", vec![]), ("b", vec!["a"]), ("c", vec!["a"]), ("d", vec!["a"]), ("e", vec!["b", "c", "d"])]
+            .into_iter()
+            .map(|(id, after)| (id.to_string(), after.into_iter().map(String::from).collect()))
+            .collect();
+        let rows = layout(&nodes);
+        let text = |id: &str| rows[id].cells.iter().map(|&c| if c == NODE { '●' } else { glyph(c, false) }).collect::<String>();
+        // the middle branch is a junction the run passes through; only the farthest is a corner
+        assert_eq!(text("a").trim_end(), "●─┬─╮");
+        assert_eq!(text("e").trim_end(), "●─┴─╯");
+        assert_eq!(rows["a"].cells[2], DOWN_FROM_LEFT);
+        assert_eq!(rows["e"].cells[2], UP_TO_LEFT);
     }
 
     #[test]
