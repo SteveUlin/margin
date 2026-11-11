@@ -47,8 +47,6 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 | `claim` | `text` `ack` | strike (x) |
 | `decided` | `text` `by`: claude or you, `at` | — |
 | `link` | `text` `target`: a URL or an `mg:` token | open (⏎) |
-| `image` | `path` (PNG) `alt` `rows` | — |
-| `diff` | made by `margin diff` | approve (a), reject (r) |
 | `row` | `text` `glyph` `tag` `aside` `since` or `meta` `detail`, tones | — |
 | `feed` | legacy: the health line of the older feed runner, written by the daemon | — |
 
@@ -93,7 +91,6 @@ A token is `mg:<verb>/[<board>.]<id>[=<value>]`. The pane prints the short form 
 | `mg:todo/t3` (or `tick`) | toggles done; `=doing` sets a status |
 | `mg:pick/Q1=jj` | picks an option, by text or 1-based number |
 | `mg:strike/A1=it-is-hourly` | strikes a claim; dashes in the reason become spaces; again unstrikes |
-| `mg:approve/d1` `mg:reject/d1` `mg:ask/d1` | a verdict on a diff |
 | `mg:pin/x` | toggles a pin |
 | `mg:open/L1` | opens a link's URL or runs its token; a board name opens its pane |
 
@@ -314,9 +311,6 @@ Walkthrough 2 already did this: `tour` holds your steps and the handler's `svc` 
 | `margin move A ID --before X\|--after X\|--parent P` | reorder |
 | `margin title A "T"` | rename |
 | `margin ask A ID "Q" opt… --default D` | a question; `--why` `--applies` `--parent` |
-| `margin diff A ID --old F --new F [--path L]` | a difftastic diff block |
-| `margin diff A ID --rev R [--to R2] FILE` | the same from jj revisions |
-| `margin image A ID x.png [--alt] [--rows N]` | a PNG |
 | `margin show A [--json]` | content + your decisions |
 | `margin ls` / `margin gc [--days N]` | list; archive untouched ones (30 days) |
 
@@ -334,7 +328,7 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 | `margin render A --width W --height H [--ansi]` | one frame to stdout, no terminal |
 | `margin select [TEXT]` | apply a token, open a URL, or copy |
 | `margin session [NAME]` | a wired Zellij session |
-| `margin demo [live]` | a sample plan, then a live turn |
+| `margin demo` | a sample plan |
 
 ### Handlers, owners, datasets (fold)
 
@@ -366,7 +360,6 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 | `⏎` or space | the focused row's action: fold a section, open a link, cycle a todo |
 | `1`–`9` | pick a question's option |
 | `x` | strike or unstrike a claim |
-| `a` `r` | approve or reject a diff |
 | `c` | review mode: drag picks a quote, a click picks a row; then `+` more, `-` less, `=` keep, `!` disagree, `?` why (or click a pill); the same reaction again takes it back; Esc leaves |
 | `o` | take the focused step as yours, or hand it back (your steps: the circle goes open → done → open) |
 | `i` | show every row's id (todos, questions and claims always show short ones) |
@@ -375,14 +368,6 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 | `q` | quit |
 
 A half-typed count or sequence shows in yellow at the help row's right and drops after a second, like vim's `showcmd` and `timeoutlen`.
-
-### Dependencies (fold)
-
-Give a todo `after: ["t1", "t2"]`, the steps in its section it waits on, and the section draws
-its todos as a graph in Flog symbols (rbong/flog-symbols, U+F5D0–U+F60D; your terminal's font needs
-them): a node per step, filled when done and hollow when open, lines down to the steps that wait
-on it, branches and merges. The node is the step's button: a click cycles it. `graph.rs` lays it
-out; an edge can only run down the list.
 
 ### Steps that rest on a claim (fold)
 
@@ -494,7 +479,7 @@ The daemon runs argv with no shell, in the directory you registered it from, wit
 - **A dev build of `margin` is on PATH only inside the repo** (through direnv) until you install it. `margin init` writes absolute paths into the hooks and the skill, so nothing depends on PATH; `margin open` under the plain host prints the absolute path when `margin` isn't on PATH.
 - **Hooks need `margin init`.** It installs them for every project ([install.md](install.md)). A session without them writes boards fine, but your clicks reach it only through `margin events`.
 - **Double-click tokens need `margin session`.** In a plain Zellij session the selection is only copied. In the plain host, keys and mouse clicks in the pane work.
-- **`margin diff` needs difftastic.** The nix build wraps it in; a dev build looks in `$MARGIN_DIFFT`, then PATH, then config `difft`, then the nix profile dirs, and names those fixes when it finds none.
+- **`margin demo` needs difftastic.** The nix build wraps it in; a dev build looks in `$MARGIN_DIFFT`, then PATH, then config `difft`, then the nix profile dirs, and names those fixes when it finds none.
 - **Nothing is checked in Ghostty yet.** Every render here went through pyte, a fake terminal: kitty images, colours and the feel of double-click need your eyes.
 - **The agents script (`feeds/agents`) can't see permission prompts.** A tool call pending over a minute shows "running or waiting on permission"; a Notification hook would make it exact.[^agents]
 - **The design doc runs ahead of the build.** `margin propose`, `p` to pin, and `n`/`N` across diff hunks are designed but not built; design.md marks them so.

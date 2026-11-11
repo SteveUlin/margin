@@ -63,9 +63,6 @@ content (Claude): creating and changing are different commands, for a board and 
   margin purpose <board> [\"text\"]                        the pane's one line of orientation (none: clear)
   margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W]
   margin propose <board> <id> <verb> [value] [--why W]   offer a change to one of the person's decisions
-  margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]
-  margin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions
-  margin image <board> <id> <png> [--alt A] [--parent P] [--rows N]
   margin doc <board> <id> [--title T] < notes.md         long-form markdown as a section
   margin toast <board> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
   margin show <board> [<id>] [--json]    margin ls [--json]    margin gc    margin doctor [--fix]
@@ -100,13 +97,18 @@ panes and screen (host: zellij or plain; config key host):
   margin render <board> [--width W] [--height H] [--section ID] [--focus ID] [--ansi]   one frame, no pane
   margin select [TEXT]          Zellij copy_command target (stdin if no TEXT)
   margin session [NAME]         start a Zellij session wired for margin (copy_command)
-  margin demo [live [--speed X]]
+  margin demo                   write a sample plan board named plan
 
 setup and reference:
   margin init [--user-name NAME] [--claude-dir DIR] [--dry-run]   name, skill and hooks: one command per machine
   margin skill                  the skill Claude loads, rendered for this machine
   margin example [<name> [--script|--data]]   complete dashboards to copy from: board, fetch script, sample data
   margin help [<command>|<topic>]
+
+parked (not part of the documented set; may be removed):
+  margin diff <board> <id> --old A --new B | --rev R [--to R2] <file>   a structural diff to approve or reject
+  margin image <board> <id> <png> [--alt A] [--rows N]                  a PNG in the pane
+  margin demo live [--speed X]                                          plays a turn into the demo board
 
 legacy (frozen; a handler, an owner or a dataset replaces it: margin help feeds):
   margin feed add|ls|rm|pause|resume|logs|run   the older runner: scripts on margin's own timer, file watch or stream
@@ -152,8 +154,8 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "purpose", help: "margin purpose <board> [\"text\"] [--json]\n  change: what the pane of a board that exists is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ask", help: "margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  create: a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  An id that exists is refused (change it with margin set); the board must exist (margin new)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
     Cmd { name: "propose", help: "margin propose <board> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
-    Cmd { name: "diff", help: "margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
-    Cmd { name: "image", help: "margin image <board> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
+    Cmd { name: "diff", help: "margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n  not part of the documented set; may be removed\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
+    Cmd { name: "image", help: "margin image <board> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n  a PNG in the pane (kitty graphics, else half-blocks); the document stores the file's path\n  not part of the documented set; may be removed\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "show", help: "margin show <board> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <board> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such board,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ls", help: "margin ls [--json]\n  this project's boards (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
     Cmd { name: "gc", help: "margin gc [--days N]\n  archive boards untouched for N days (default: config archive_days), and remove the cursors of\n  Claude sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
@@ -180,7 +182,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "handle", help: "margin handle open\n  a ready-made handler command: reads events on stdin (one JSON object per line) and opens each\n  event's value.target: a URL with the configured opener (config key opener; default xdg-open, or\n  `opener` over ssh), an mg: token by applying it, mg:open/<board> by showing that board.\n  With $MARGIN_DRY_OPEN=FILE it appends each target to FILE and opens nothing. A target that fails\n  to open is reported on stderr and the run still exits 0 (a retry would open the others twice)\n  The pane never opens anything itself: enter or a click on a row with a target appends the event\n  <board>.open, and this is the handler for it. Register it once per project:\n    margin handler add open --on '*.open' -- margin handle open\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "data", help: DATA_HELP, flags: &["--cap", "--file", "--owner", "--expect-every", "--as", "--last", "--json"], max_pos: Some(3) },
     Cmd { name: "owner", help: OWNER_HELP, flags: &["--board", "--owns", "--expect-every", "--json"], max_pos: Some(2) },
-    Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo board `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
+    Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo board `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused)\nmargin demo live [--speed X]\n  plays a turn into the demo board: steps tick, a card resolves\n  live: not part of the documented set; may be removed\n", flags: &["--speed"], max_pos: Some(1) },
     Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
     Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
     Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--script | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --script: the script that fetches its rows (a handler runs it); --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--script", "--feed", "--data", "--tool"], max_pos: Some(1) },
@@ -1484,7 +1486,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 _ => {
                     let rev = demo::setup(&st)?;
                     println!("plan rev {rev} in project {} (the demo's own board: run again, it resets it)", st.project);
-                    println!("next: margin open plan    (in Zellij a split; elsewhere it prints the view command), then: margin demo live");
+                    println!("next: margin open plan    (in Zellij a split; elsewhere it prints the view command)");
                 }
             }
         }
@@ -2903,6 +2905,23 @@ mod tests {
         assert!(lines[at + 2].is_empty() && lines[at + 3].starts_with("global, before or after"), "the legacy block is the last one");
         assert!(FEED_HELP.starts_with("feeds (legacy: frozen"), "{FEED_HELP}");
         assert!(doc::kind("feed").unwrap().about.starts_with("legacy: "));
+    }
+
+    /// The parked commands keep an accurate help, each marked, and `margin --help` lists them
+    /// apart from the documented set.
+    #[test]
+    fn parked_commands_are_marked_in_their_help() {
+        let mark = "not part of the documented set; may be removed";
+        for name in ["diff", "image", "demo"] {
+            let c = CMDS.iter().find(|c| c.name == name).unwrap();
+            assert!(c.help.contains(mark), "margin {name} --help");
+        }
+        let lines: Vec<&str> = HELP.lines().collect();
+        let at = lines.iter().position(|l| *l == format!("parked ({mark}):")).expect("a parked heading");
+        for (i, cmd) in ["margin diff ", "margin image ", "margin demo live "].iter().enumerate() {
+            assert!(lines[at + 1 + i].trim_start().starts_with(cmd), "{}", lines[at + 1 + i]);
+            assert_eq!(lines.iter().filter(|l| l.contains(cmd.trim_end())).count(), 1, "{cmd} is listed once, under parked");
+        }
     }
 
     /// Each feed subcommand has its own help, the trigger flags a line each, all pointing at the

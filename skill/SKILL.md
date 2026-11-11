@@ -18,7 +18,7 @@ One shape for every plan pane, top to bottom. Orientation is one `purpose` line 
 plan "…"`) pinned above the content; long reasoning goes in its own board (a tab).
 
 1. **Now** (`section now`): the current thread, at most about seven todos, exactly one `doing`.
-2. **Needs you** (`section ask`): only open questions, claims and diffs. Leave it out when empty.
+2. **Needs you** (`section ask`): only open questions and claims. Leave it out when empty.
 3. **Next** (`section next`): the backlog, one todo per item.
 4. **Done** (`section done`): one todo per finished *thread*, not every step. It folds itself.
 5. **Decided** (`section decided`, `folded: true`): resolved questions and `decided` rows.
@@ -143,8 +143,6 @@ Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 - `lifecycle`: what survives a session end, a closed pane, a reboot; `margin doctor`, `daemon status`.
 - `feeds`: legacy, the older runner: what replaces each of its triggers.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
-- `diffs`: `margin diff`, a structural diff {{user}} approves or rejects.
-- `images`: `margin image`, a PNG in the pane.
-- `graphs`: `after` (a dependency graph), `owner` ({{user}}'s steps), `rests_on` (steps tied to claims).
+- `graphs`: `owner` ({{user}}'s steps), `rests_on` (steps tied to claims), lanes.
 - `proposals`: `margin propose`, offering a change to one of their decisions.
 - `subagents`: the Agents section the pane builds from your subagents, and the recap row.

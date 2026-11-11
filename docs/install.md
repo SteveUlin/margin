@@ -1,7 +1,7 @@
 # Install margin on a machine
 
 Ten minutes, no source edits. You need Rust (or nix), Claude Code, and a terminal. Zellij and
-difftastic are optional: without them the pane runs in any terminal and `margin diff` is off.
+difftastic are optional: without them the pane runs in any terminal and `margin demo` is off.
 
 ## 1. Build
 
@@ -65,7 +65,6 @@ Restart any running Claude Code session first: hooks and skills load at session 
 ```sh
 margin demo            # writes a sample plan board for the current directory's project
 margin open plan       # inside Zellij: a split beside the chat, focus stays where it was
-margin demo live       # plays a turn against it: steps tick, a card resolves
 ```
 
 - **Zellij, wired for double-click tokens:** `margin session` starts a Zellij session with the
@@ -88,5 +87,5 @@ you clicked.
 - `margin help` lists the commands and the reference topics (`margin help handlers`, …).
 - To undo: delete `~/.claude/skills/margin/`, and remove the `margin hook …` entries from
   `~/.claude/settings.json` (or restore `settings.json.bak`).
-- `margin diff` and `margin demo` need difftastic (`difft`) on PATH, in `$MARGIN_DIFFT`, or under
+- `margin demo` needs difftastic (`difft`) on PATH, in `$MARGIN_DIFFT`, or under
   the config key `difft`; the nix build wraps it in.

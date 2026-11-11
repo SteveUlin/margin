@@ -17,8 +17,6 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("integrate", include_str!("../../../skill/topics/integrate.md")),
     ("lifecycle", include_str!("../../../skill/topics/lifecycle.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
-    ("diffs", include_str!("../../../skill/topics/diffs.md")),
-    ("images", include_str!("../../../skill/topics/images.md")),
     ("graphs", include_str!("../../../skill/topics/graphs.md")),
     ("proposals", include_str!("../../../skill/topics/proposals.md")),
     ("subagents", include_str!("../../../skill/topics/subagents.md")),
@@ -217,6 +215,26 @@ mod tests {
         for must in ["--owns", "Exit 0", "jq -c", "\"op\": \"set\"", "\"op\": \"rm\"", "\"op\": \"move\"", "\"op\": \"add\"", "\"parent\"", "an array of ops", "\"toast\"", "\"emit\"", "Print the whole thing every run", "Write times, not ages", "margin handler run", "margin handler logs", "margin help integrate"] {
             assert!(h.contains(must), "handlers doesn't cover {must:?}");
         }
+    }
+
+    /// The parked components (diff, image, dependency lanes, `demo live`) are not taught: the
+    /// skill and the topics leave them out, but for the one line on lanes the graphs topic keeps.
+    /// Their schema entries stay, each marked.
+    #[test]
+    fn parked_components_are_not_taught() {
+        assert!(topic("diffs").is_none() && topic("images").is_none());
+        for (name, text) in std::iter::once(&("skill", SKILL)).chain(TOPICS) {
+            for gone in ["margin diff", "margin image", "demo live", "a diff", "a PNG"] {
+                assert!(!text.contains(gone), "{name} still teaches {gone:?}");
+            }
+            let lanes = text.lines().filter(|l| l.contains("\"after\": [") || l.contains("`after`")).count();
+            assert_eq!(lanes, usize::from(*name == "graphs"), "{name}: lanes are documented in one line of the graphs topic only");
+        }
+        let mark = "not part of the documented set; may be removed";
+        for kind in ["diff", "image"] {
+            assert!(crate::doc::kind(kind).unwrap().about.ends_with(mark), "{kind}");
+        }
+        assert!(crate::doc::kind("todo").unwrap().fields.iter().any(|f| f.0 == "after" && f.2.ends_with(mark)));
     }
 
     /// The feed runner is legacy and off the main path: its topic is a short page that says so

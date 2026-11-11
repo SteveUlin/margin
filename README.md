@@ -37,8 +37,7 @@ Claude Code hooks as one line of context.
 - **Shipped scripts** (`feeds/`): a jj change ledger, a monitor of Claude Code sessions, a board
   of queued messages, a turn ledger. Each one's header gives the handler (or owner) registration
   and the cron line that run it.
-- Also: structural diffs to approve or reject (through difftastic), PNG images (kitty graphics),
-  toasts.
+- Also: long-form notes beside the chat (`margin doc`), and toasts.
 
 ![A dashboard tab: a table of pull requests with author badges, CI run strips and ages](docs/img/readme/dashboard.png)
 
@@ -89,9 +88,8 @@ lists every command and reference topic.
 - **Zellij 0.45 or newer is optional.** Inside Zellij, `margin open` places the pane beside the
   chat without moving focus, and `margin session` makes a double-click on a token act. Without
   Zellij, run `margin view <board>` in any terminal; keys and mouse clicks work there.
-- **A Nerd Font is recommended** for the state glyphs; a terminal with the kitty graphics
-  protocol (Ghostty, kitty) for images.
-- Optional tools: `difft` (difftastic) for `margin diff` and the demo; `bash`, `jq` and `jj` for
+- **A Nerd Font is recommended** for the state glyphs.
+- Optional tools: `difft` (difftastic) for the demo; `bash`, `jq` and `jj` for
   the shipped scripts.
 
 ## Documentation
