@@ -372,6 +372,13 @@ fn fl(cx: &Ctx, id: &str) -> f32 {
     cx.flash.get(id).copied().unwrap_or(0.0)
 }
 
+/// Where a block at `depth` starts: two cells further in per level, so everything inside a
+/// section sits under its title, not under its chevron (a header's title starts two cells
+/// after its chevron). Capped so deep nesting keeps room for text.
+pub fn indent(depth: usize) -> u16 {
+    1 + 2 * depth.min(6) as u16
+}
+
 fn new_grid(w: u16, h: u16, ground: Rgb) -> Grid {
     let mut g = Grid::new(w, h);
     let a = g.area();
@@ -533,7 +540,7 @@ fn proposal_strip(cx: &Ctx, id: &str, pr: &serde_json::Value, g: &Grid, w: u16, 
 
 fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
     let g0 = cx.p.bg0;
-    let ind: u16 = if depth > 0 { 3 } else { 1 };
+    let ind: u16 = indent(depth);
     let p = cx.p;
     match b.kind.as_str() {
         "section" => {
@@ -543,7 +550,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             let top = if first || (depth > 0 && !open) { 0 } else { 1 };
             let mut g = new_grid(w, 1 + top, g0);
             let y = top;
-            let x0 = if depth > 0 { 3 } else { 1 };
+            let x0 = indent(depth);
             let (ch, chc) = if open { (icon::DOWN, p.purple) } else { (icon::RIGHT, p.grey1) };
             put(&mut g, x0, y, ch, Style::fg(chc).on(g0).bold());
             // headers carry colour so the eye finds them: green at the top level, blue nested
@@ -1601,7 +1608,7 @@ fn cell_pieces(cx: &Ctx, th: &Theme, kind: ColKind, v: Option<&serde_json::Value
 /// let vellum place the columns.
 fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
     LAYOUTS.with(|n| n.set(n.get() + 1));
-    let ind: u16 = if depth > 0 { 3 } else { 1 };
+    let ind: u16 = indent(depth);
     let specs = t.f.get("columns").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let (mut keys, mut kinds, mut cols, mut sum_w) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for c in &specs {
