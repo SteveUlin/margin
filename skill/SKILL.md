@@ -144,6 +144,7 @@ Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 - `lifecycle`: what survives a session end, a closed pane, a reboot; `margin doctor`, `daemon status`.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
 - `graphs`: `owner` ({{user}}'s steps), `rests_on` (steps tied to claims), lanes.
+- `diagrams`: the house style for a diagram typed by hand: boxes, edges, arrowheads, 64 cells.
 - `proposals`: `margin propose`, offering a change to one of their decisions.
 - `subagents`: the Agents section the pane builds from your subagents, and the recap row.
 - `feeds`: legacy, the older runner: what replaces each of its triggers.

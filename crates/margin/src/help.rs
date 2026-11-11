@@ -18,6 +18,7 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("lifecycle", include_str!("../../../skill/topics/lifecycle.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
     ("graphs", include_str!("../../../skill/topics/graphs.md")),
+    ("diagrams", include_str!("../../../skill/topics/diagrams.md")),
     ("proposals", include_str!("../../../skill/topics/proposals.md")),
     ("subagents", include_str!("../../../skill/topics/subagents.md")),
     ("feeds", include_str!("../../../skill/topics/feeds.md")),
@@ -254,6 +255,69 @@ mod tests {
             assert!(example.contains(must), "the worked example doesn't show {must:?}");
         }
         assert!(!example.contains("…\"") && !example.to_lowercase().contains("done\"") && !example.contains("tone"), "no cut text, no Done section, no decoration");
+    }
+
+    /// The diagrams topic records the house style, and its two examples obey it: every line of
+    /// an example is the same display width (vellum's `width`), at most 64 cells, with no tab;
+    /// boxes have rounded corners and one space inside each side; an edge leaves through a joint
+    /// and its head touches the target's border; a vertical edge's label sits one space to its
+    /// right. The same holds with the fallback arrowheads in place of the Nerd Font carets.
+    #[test]
+    fn the_diagram_examples_obey_the_house_style() {
+        use vellum::text::width;
+        let d = topic("diagrams").unwrap();
+        for must in ["At most 64 cells wide", "rounded light corners", "one space\n  inside each side", "through a joint", "touches the target's border", "above a horizontal edge, or breaking it", "one space to the right of a\n  vertical edge", "U+F0DA right, U+F0D9 left, U+F0D8 up, U+F0D7 down", "`► ◄ ▲ ▼`", "Pad every line to the same width", "No tabs, no emoji", "Prefer a tree, a numbered flow or a table"] {
+            assert!(d.contains(must), "diagrams doesn't say {must:?}");
+        }
+        let examples: Vec<&str> = d.split("```text\n").skip(1).map(|c| c.split("\n```").next().unwrap()).collect();
+        assert_eq!(examples.len(), 2, "a pipeline and a vertical stack");
+        let (right, down) = ('\u{F0DA}', '\u{F0D7}');
+        for (ex, head) in examples.iter().zip([right, down]) {
+            let fallback = ex.replace('\u{F0DA}', "►").replace('\u{F0D9}', "◄").replace('\u{F0D8}', "▲").replace('\u{F0D7}', "▼");
+            for text in [ex.to_string(), fallback] {
+                let lines: Vec<&str> = text.lines().collect();
+                let w = width(lines[0]);
+                assert!(w <= 64 && lines.len() >= 4, "{w} cells wide:\n{text}");
+                for l in &lines {
+                    assert_eq!(width(l), w, "every line is {w} cells: {l:?}\n{text}");
+                    assert!(!l.contains('\t') && l.chars().all(|c| width(&c.to_string()) == 1), "no tab, no wide character: {l:?}");
+                }
+            }
+            // the rules, cell by cell (one character is one cell here, checked above)
+            let g: Vec<Vec<char>> = ex.lines().map(|l| l.chars().collect()).collect();
+            let at = |y: usize, x: usize| g.get(y).and_then(|r| r.get(x)).copied().unwrap_or(' ');
+            let (mut heads, mut boxes) = (0, 0);
+            for (y, row) in g.iter().enumerate() {
+                for (x, &c) in row.iter().enumerate() {
+                    match c {
+                        '╭' => {
+                            boxes += 1;
+                            // the row under a top-left corner is the box's text: `│ text │` or `│ text ├`
+                            let end = (x + 1..row.len()).find(|&i| g[y][i] == '╮').expect("a top-right corner");
+                            let inner: String = g[y + 1][x + 1..end].iter().collect();
+                            assert!(at(y + 1, x) == '│' && matches!(at(y + 1, end), '│' | '├'), "the box's sides: {inner:?}");
+                            assert!(inner.starts_with(' ') && inner.ends_with(' ') && inner.trim().len() == inner.len() - 2, "one space inside each side: {inner:?}");
+                            assert!(at(y + 2, x) == '╰' && at(y + 2, end) == '╯', "rounded corners all round");
+                        }
+                        '├' => assert_eq!(at(y, x + 1), '─', "an edge leaves the side joint"),
+                        '┬' => assert_eq!(at(y + 1, x), '│', "an edge leaves the bottom joint"),
+                        c if c == right => {
+                            heads += 1;
+                            assert!(at(y, x - 1) == '─' && at(y, x + 1) == '│', "the head touches the target's left border");
+                        }
+                        c if c == down => {
+                            heads += 1;
+                            assert!(at(y - 1, x) == '│' && at(y + 1, x) == '─', "the head touches the target's top border");
+                            assert!(at(y - 1, x + 1) == ' ' && at(y - 1, x + 2).is_alphabetic(), "the label is one space right of the vertical edge");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(boxes == 3 && heads == 2 && ex.contains(head), "three boxes, two edges:\n{ex}");
+        }
+        assert!(examples[0].contains("emit") && examples[0].contains("── rows ──"), "one label above its edge, one breaking it");
+        assert!(SKILL.contains("- `diagrams`:"));
     }
 
     /// The parked components (diff, image, dependency lanes, `demo live`) are not taught: the
