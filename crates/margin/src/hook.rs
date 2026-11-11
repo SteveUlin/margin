@@ -88,7 +88,7 @@ pub fn describe(st: &Store, e: &Event) -> String {
             }
         }
         // a named event (`margin emit`, an action, a job's emit): its name, what it is about, who
-        k if e.via == "emit" || e.via == "job" || k.contains('.') => {
+        k if e.via == "emit" || e.via == "handler" || k.contains('.') => {
             let about = match (e.artifact.is_empty(), e.id.is_empty()) {
                 (true, _) => String::new(),
                 (false, true) => format!(" {}", e.artifact),

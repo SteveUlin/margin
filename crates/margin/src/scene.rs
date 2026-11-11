@@ -321,6 +321,12 @@ pub struct Scene {
     pub review: bool,
     /// `i`: every row shows its id, dim at its right edge, so any row can be named.
     pub show_ids: bool,
+    /// Overdue writers of this board (owner.rs): (the id prefix they own, why). Their rows get a
+    /// quiet mark at the right edge, the first one with the reason.
+    pub stale: Vec<(String, String)>,
+    /// What an action on a row came to, by block id: (the note, whether it is a warning). The
+    /// app sets it after an action's key and clears it (app.rs `Sent`).
+    pub sent: HashMap<String, (String, bool)>,
     /// Claude Code's latest recap for this pane's sessions: (text, local time it was written).
     pub recap: Option<(String, String)>,
     /// The stop flag is up (sulin pressed stop; Claude's tool calls are refused).
@@ -411,6 +417,8 @@ impl Scene {
             pending_keys: String::new(),
             review: false,
             show_ids: false,
+            stale: Vec::new(),
+            sent: HashMap::new(),
             recap: None,
             stopped: false,
             agents: Vec::new(),
@@ -1248,6 +1256,7 @@ impl Scene {
         // composite
         let focus_on = inp.focused_pane;
         let mut images = Vec::new();
+        let mut stale_said: HashSet<String> = HashSet::new();
         for (it, d, iy, rows) in &drawn {
             let Some(src) = &d.grid else { continue };
             let off = self.retained.get(&it.id).map(|n| n.offset.value(now, m)).unwrap_or(0.0).round() as i32;
@@ -1282,6 +1291,24 @@ impl Scene {
                             g.put(gx, yy as u16, "▎", Style::fg(col).on(p.bg0));
                         }
                     }
+                }
+            }
+            // a note at the row's right edge, over whatever sits there: what the person's action
+            // on it came to, else that its writer is overdue
+            if sy >= vtop as i32 && sy < vbot as i32 && !it.id.starts_with('~') {
+                let note = match self.sent.get(&it.id) {
+                    Some((t, warn)) => Some((t.clone(), if *warn { p.yellow } else { p.aqua })),
+                    None => self.stale.iter().find(|(pre, _)| crate::store::owns(pre, &it.id)).map(|(pre, why)| {
+                        let first = !stale_said.contains(pre);
+                        stale_said.insert(pre.clone());
+                        (if first { format!("◷ stale · {why}") } else { "◷ stale".to_string() }, p.grey1)
+                    }),
+                };
+                if let Some((t, col)) = note {
+                    let t = truncate(&t, iw.saturating_sub(4) as usize).into_owned();
+                    let x = (ix + iw).saturating_sub(width(&t) as u16 + 1);
+                    g.put(x.saturating_sub(1), sy as u16, " ", Style::default().on(p.bg0));
+                    g.put(x, sy as u16, &t, Style::fg(col).on(p.bg0).italic());
                 }
             }
             // `i`: the row's id at its right edge, over whatever sits there

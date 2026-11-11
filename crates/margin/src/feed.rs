@@ -161,7 +161,7 @@ impl Registry {
         self.feeds
             .iter()
             .filter(|f| f.artifact == art)
-            .map(|f| crate::store::Claim { feed: f.name.clone(), owns: f.owns.clone() })
+            .map(|f| crate::store::Claim { feed: f.name.clone(), owns: f.owns.clone(), kind: "feed" })
             .collect()
     }
     pub fn add(&mut self, f: Feed, replace: bool) -> Result<(), String> {
@@ -1395,7 +1395,7 @@ mod tests {
         // sulin's decisions can't land on a feed component
         assert!(st.decide("plan", "jj", "pin", json!(true), "key", None).unwrap_err().contains("read-only"));
         // a feed never sets the title unless it owns the whole artifact
-        let c = [Claim { feed: "jj".into(), owns: "jj".into() }];
+        let c = [Claim { feed: "jj".into(), owns: "jj".into(), kind: "feed" }];
         assert!(check_owner(&Op::Title { value: "x".into() }, &st.load("plan").unwrap(), &w, &c).is_err());
         std::fs::remove_dir_all(&st.home).ok();
     }

@@ -15,12 +15,14 @@ mod doc;
 mod example;
 mod feed;
 mod graph;
+mod handler;
 mod help;
 mod hook;
 mod host;
 mod init;
 mod link;
 mod mdoc;
+mod owner;
 mod recap;
 mod rewake;
 mod scene;
@@ -73,12 +75,19 @@ return channel:
   margin hook start|prompt|pre-tool|post-tool|stop|permission|notify              Claude Code hook (stdin JSON)
   margin hook rewake [--timeout 58m]                              the Stop hook that waits: exit 2 wakes an idle Claude
 
-feeds (scripts that keep an artifact current without Claude):
+handlers and outside writers (margin runs a command only for an event; scheduling stays outside):
+  margin handler add <name> --on <glob>... [--board B --owns PREFIX] [--timeout 60s] [--retries 3] -- <cmd...>
+  margin handler set <name> ... | ls [--json] | rm | pause | resume | logs <name> [--follow] | run <name> [--events F] [--dry-run]
+  margin handle open            the built-in handler that opens a row's target: margin handler add open --on '*.open' -- margin handle open
+  margin owner add <name> --board B --owns PREFIX [--expect-every 10m]   rows an outside program writes: margin apply B --as <name>
+  margin owner set <name> ... | ls [--json] | rm <name>
+  margin daemon [status | install | uninstall] [--unit-dir D]   the dispatcher (started on demand); status, and a systemd user unit
+
+feeds (the older runner: scripts on a timer, a file watch or as a stream; margin help feeds):
   margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
                   [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
   margin feed ls | rm <name> | pause <name> | resume <name> | logs <name> [--follow] [--lines N]
   margin feed run <name>        once, in the foreground (stream: until it exits or ctrl-c)
-  margin daemon                 the supervisor (the CLI starts it on demand; units/ has a systemd unit)
 
 panes and screen (host: zellij or plain; config key host):
   margin open <art> [--float|--split|--stacked] [--tab-id N] [--session S]   anchored to Claude's tab, no focus change
@@ -128,7 +137,7 @@ global flags (before or after the command):
 ";
 
 const CMDS: &[Cmd] = &[
-    Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  state from a script: update an artifact that exists. stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a feed prints \"this is the state now\"); the\n  artifact itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n", flags: &["--base-rev", "--json", "--title", "--kind"], max_pos: Some(1) },
+    Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  state from a script: update an artifact that exists. stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a feed prints \"this is the state now\"); the\n  artifact itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n  --as OWNER   write as a registered owner (margin owner add): only inside its id prefix, ops and\n               components only, and its last-write time moves even when nothing changed\n", flags: &["--base-rev", "--json", "--title", "--kind", "--as"], max_pos: Some(1) },
     Cmd { name: "new", help: "margin new <art> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes an artifact. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal or\n  an empty stdin it starts empty, titled <art> unless --title says otherwise. An artifact that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <art> --yes. Every\n  other writing command refuses an artifact that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
     Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the artifact must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
@@ -142,7 +151,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "propose", help: "margin propose <art> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
     Cmd { name: "diff", help: "margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <art> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "image", help: "margin image <art> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
-    Cmd { name: "show", help: "margin show <art> [--json]\n  what the person sees: content merged with their decisions\n", flags: &["--json"], max_pos: Some(1) },
+    Cmd { name: "show", help: "margin show <art> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <art> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such artifact,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ls", help: "margin ls [--json]\n  this project's artifacts (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
     Cmd { name: "gc", help: "margin gc [--days N]\n  archive artifacts untouched for N days (default: config archive_days)\n", flags: &["--days"], max_pos: Some(0) },
     Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
@@ -162,7 +171,10 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "render", help: RENDER_HELP, flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus", "--section"], max_pos: None },
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
-    Cmd { name: "daemon", help: "margin daemon\n  the feed supervisor, in the foreground (the CLI starts it on demand; units/ has a systemd unit)\n", flags: &[], max_pos: Some(0) },
+    Cmd { name: "daemon", help: DAEMON_HELP, flags: &["--stay", "--unit-dir", "--json"], max_pos: Some(1) },
+    Cmd { name: "handler", help: HANDLER_HELP, flags: &[], max_pos: None },
+    Cmd { name: "handle", help: "margin handle open\n  a ready-made handler command: reads events on stdin (one JSON object per line) and opens each\n  event's value.target: a URL with the configured opener (config key opener; default xdg-open, or\n  `opener` over ssh), an mg: token by applying it, mg:open/<artifact> by showing that artifact.\n  With $MARGIN_DRY_OPEN=FILE it appends each target to FILE and opens nothing. A target that fails\n  to open is reported on stderr and the run still exits 0 (a retry would open the others twice)\n  The pane never opens anything itself: enter or a click on a row with a target appends the event\n  <board>.open, and this is the handler for it. Register it once per project:\n    margin handler add open --on '*.open' -- margin handle open\n", flags: &[], max_pos: Some(1) },
+    Cmd { name: "owner", help: OWNER_HELP, flags: &["--board", "--owns", "--expect-every", "--json"], max_pos: Some(2) },
     Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo artifact `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
     Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
     Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
@@ -201,6 +213,103 @@ margin events --unread [--session S]
   A registered job does the second for you (margin help jobs). The log rotates past a few MB and
   keeps two older generations; seq goes on counting, so a cursor stays valid across a rotation
   --unread       what a Claude session has not been handed yet (--session S, default this one)
+";
+
+const DAEMON_HELP: &str = "margin daemon [--stay]
+  the supervisor for this project, in the foreground: it dispatches appended events to the
+  registered handlers and runs the registered feeds. You rarely start it: registering a handler,
+  or appending an event while one is registered, starts it in the background. With nothing
+  registered it exits (--stay keeps it up). SIGTERM stops it cleanly: running handlers are
+  stopped (not failed), their events stay pending, and the next daemon gives them again
+margin daemon status [--json]
+  is it running and since when; each handler's state, last run, events still waiting and last
+  error; and how it comes back after a reboot (the unit, or the next command that appends an event)
+margin daemon install [--unit-dir DIR]
+  write a systemd user unit for this project's daemon (restart on failure, started at login) and
+  print the systemctl line that enables it; it runs nothing itself
+  --unit-dir DIR   where the unit goes (default $XDG_CONFIG_HOME/systemd/user)
+margin daemon uninstall [--unit-dir DIR]
+  remove that unit file and print the systemctl line that stops it
+  margin help lifecycle says what survives a reboot with and without the unit
+";
+
+const HANDLER_HELP: &str = "handlers: commands the daemon runs when an event they asked for is appended
+  margin handler add <name> --on <glob> [--on <glob>]... [--board B --owns PREFIX]
+                     [--timeout 60s] [--retries 3] -- <cmd...>
+  margin handler set <name> [the same flags] [-- <cmd...>]
+  margin handler ls [--json]
+  margin handler rm <name>     margin handler pause <name>     margin handler resume <name>
+  margin handler logs <name> [--follow] [--lines N]
+  margin handler run <name> [--events FILE] [--dry-run]
+  margin handler <subcommand> --help for each; margin help handlers has the contract
+";
+
+fn handler_sub_help(sub: &str) -> Option<&'static str> {
+    Some(match sub {
+        "add" | "set" => "margin handler add <name> --on <glob> [--on <glob>]... [--board B --owns PREFIX]
+                   [--timeout 60s] [--retries 3] -- <cmd...>
+  create: register a command for the events whose name matches a glob. A name that exists is
+  refused (change it with margin handler set)
+margin handler set <name> [--on <glob>...] [--board B --owns PREFIX | --board none] [--timeout T] [--retries N] [-- <cmd...>]
+  change: only what you pass changes (--on replaces the whole list); a missing name is refused
+  --on GLOB       an event name or a glob of one, quoted: reviews.open, '*.open', 'ci.*'. Never
+                  matches the handler's own emits; handler.* events only via a glob starting
+                  with handler.; the pane's passive kinds (seen, view, fold) only by exact name
+  --board B --owns PREFIX   the board its stdout writes and the id prefix it owns there (PREFIX
+                  and PREFIX-...; * = all). The board must exist. Without them it writes no board
+  --timeout 60s   a run is stopped after this long, and counts as failed
+  --retries 3     a failed run is retried this many times (1 s, 2 s, 4 s ... apart); then the
+                  events it was given are passed over and a handler.failed event is appended
+                  (0: never retry)
+  -- <cmd...>     the command: run with no shell, in the directory you are in now, with the PATH
+                  you have now. A first word of exactly `margin` runs this binary
+  The command gets the pending matching events on stdin, one JSON object per line, and prints
+  JSON lines; on exit 0 they are applied and its cursor moves. margin help handlers has it all
+",
+        "ls" => "margin handler ls [--json]
+  each handler: its state (live, retrying, paused, stopped), the events it takes, its board,
+  how many events wait for it, and its last run (`ran 2s ago · ok`, `failed 5s ago: <stderr>`)
+  --json  {v, daemon: {running, pid}, handlers: [{name, on, cmd, board, owns, paused, state,
+          cursor, pending, attempts, last_run, last_outcome, last_error}]}
+",
+        "rm" => "margin handler rm <name>
+  unregister a handler and forget its cursor. What it wrote stays on its board, unowned
+",
+        "pause" | "resume" => "margin handler pause <name>
+margin handler resume <name>
+  stop dispatching to a handler without unregistering it (events wait at its cursor), or start again
+",
+        "logs" => "margin handler logs <name> [--follow] [--lines N]
+  a line per run (`run: ok (1 event to seq 12, 1 line, wrote)`, `run: failed: …; retry 1 of 3 in 1s`),
+  its stderr, rejected lines
+",
+        "run" => "margin handler run <name> [--events FILE] [--dry-run]
+  run a handler once, in the foreground, as the handler
+  --events FILE  give it these events (JSON lines, as margin events --json prints them) instead
+                 of the ones waiting at its cursor; its cursor is then left alone
+  --dry-run      print what it would commit (ops, components, emits, the cursor move) and write nothing
+",
+        _ => return None,
+    })
+}
+
+const OWNER_HELP: &str = "owners: programs margin does not run, registered as the writers of rows on a board
+  margin owner add <name> --board B --owns PREFIX [--expect-every 10m]
+      create: <name> owns the ids PREFIX and PREFIX-... on B (* = the whole board). The board must
+      exist; a name that exists is refused. From then on only `margin apply B --as <name>` writes
+      those ids, and anyone else's write there is refused, as with a feed's or a handler's rows
+  margin owner set <name> [--board B] [--owns PREFIX] [--expect-every 10m|none]
+      change: only what you pass changes; a missing name is refused
+  margin owner ls [--json]
+      each owner: its board and prefix, when it last wrote, and whether that is overdue
+  margin owner rm <name>
+      unregister it; its rows stay on the board, unowned
+  --expect-every 10m   how often it means to write. Once its last write is older than that its
+      rows show as stale in the pane (`last updated 3h ago, expected every 10m`), the board's tab
+      gets the failure mark, and owner ls says so. margin runs nothing and restarts nothing: how
+      long ago it wrote is the one thing margin knows about a program it does not run
+  The program writes as often as it likes: `... | margin apply B --as <name>` (ops and components,
+  all or nothing; a write that changes nothing still counts as a write). margin help integrate
 ";
 
 const RENDER_HELP: &str = "margin render <art> [<art>...] [--width W] [--height H] [--section ID]... [--focus ID] [--focused]
@@ -336,7 +445,7 @@ struct Args {
 }
 
 const BOOL_FLAGS: &[&str] = &[
-    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit",
+    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit", "--stay",
 ];
 
 impl Args {
@@ -647,7 +756,12 @@ fn main() {
     };
     if wants_help(mine) {
         // `margin feed add --help`: that subcommand's own usage
-        let sub = if cmd == "feed" { mine.iter().find(|x| !x.starts_with('-')).and_then(|s| feed_sub_help(s)) } else { None };
+        let word = mine.iter().find(|x| !x.starts_with('-'));
+        let sub = match cmd.as_str() {
+            "feed" => word.and_then(|s| feed_sub_help(s)),
+            "handler" => word.and_then(|s| handler_sub_help(s)),
+            _ => None,
+        };
         print!("{}{GLOBAL_HELP}", who::say(sub.unwrap_or(spec.help)));
         return;
     }
@@ -657,12 +771,14 @@ fn main() {
     export_store_flags(&a);
     let r = if cmd == "feed" {
         feed_cmd(&a, rest)
+    } else if cmd == "handler" {
+        handler_cmd(&a, rest)
     } else {
-        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for feed add".into()) }).and_then(|_| run(&cmd, &a))
+        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for handler add/set and feed add".into()) }).and_then(|_| run(&cmd, &a))
     };
     if let Err(e) = r {
         eprintln!("margin {cmd}: {}", who::say(&e));
-        std::process::exit(1);
+        std::process::exit(exit_code(&e));
     }
 }
 
@@ -678,6 +794,21 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 // the schema's notes name the person as every other message does
                 print!("{}", who::say(&doc::schema_text(only)?));
             }
+        }
+        "apply" if a.has("--as") => {
+            let st = store(a);
+            let (art, name) = (a.pos(0, "artifact")?, a.get("--as").ok_or("--as needs an owner's name (margin owner ls)")?);
+            let input = stdin();
+            let whole = matches!(serde_json::from_str::<Value>(input.trim()), Ok(Value::Object(m)) if m.get("op").is_none() && m.get("type").is_none());
+            if whole {
+                return Err(format!("--as writes ops and components inside {name}'s prefix, not a whole document"));
+            }
+            let ops = feed::parse_input(input.trim())?;
+            if ops.is_empty() {
+                return Err("nothing to apply".into());
+            }
+            let rev = st.apply_as(art, name, &ops)?;
+            report(art, rev, a);
         }
         "apply" => {
             let st = store(a);
@@ -904,7 +1035,10 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let art = a.pos(0, "artifact")?;
             let d = st.load(art)?;
             let s = st.state(art);
-            if a.has("--json") {
+            if let Some(id) = a.pos.get(1) {
+                let b = d.find(id).ok_or_else(|| format!("no component {id:?} in {art}; margin show {art}"))?;
+                println!("{}", serde_json::to_string_pretty(&json!({"v": 1, "artifact": art, "rev": d.rev, "block": b, "decision": s.decisions.get(id)})).unwrap());
+            } else if a.has("--json") {
                 println!("{}", serde_json::to_string_pretty(&json!({"doc": d, "state": s})).unwrap());
             } else {
                 print!("{}", crate::who::say(&show_text(&d, &s, &st.claims(art), st.delivered_max())));
@@ -1179,7 +1313,12 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 return Err(format!("reload {}: {err}", exe.display()));
             }
         }
-        "daemon" => daemon::run(store(a))?,
+        "daemon" => daemon_cmd(a)?,
+        "owner" => owner_cmd(a)?,
+        "handle" => match a.pos(0, "open")? {
+            "open" => handle_open(&stdin(), &cfg)?,
+            other => return Err(format!("no built-in handler {other:?}: margin handle open")),
+        },
         "render" => {
             let st = store(a);
             // more artifacts: the tab bar, with --tab (else the first) on screen
@@ -1206,6 +1345,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let mut sc = scene::Scene::new(&cfg);
             sc.restore(&v);
             sc.recap = recap::for_pane(&st, art);
+            sc.stale = owner::stale_on(&st, art, util::epoch_now());
             sc.agents = agents::for_pane(&st, art);
             sc.toasts = toast::load(&st, art).into_iter().map(|t| (t, 1.0)).collect();
             if set.len() > 1 {
@@ -1216,6 +1356,8 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                     .zip(titles)
                     .map(|(d, title)| {
                         let (needs, failed) = tabs::attention(d, &st.state(&d.id));
+                        // an overdue writer is a failure of the board: the same mark
+                        let failed = failed || !owner::stale_on(&st, &d.id, util::epoch_now()).is_empty();
                         tabs::TabInfo { art: d.id.clone(), title, unseen: 0, needs, failed }
                     })
                     .collect();
@@ -1345,8 +1487,18 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
         }
     }
     let cursor = a.get("--cursor");
-    if let Some(c) = cursor.filter(|c| !util::valid_id(c)) {
-        return Err(format!("bad cursor name {c:?}: letters, digits, - and _"));
+    // `handler:<name>` is a handler's own cursor: readable (what waits for it), never moved from here
+    let handlers = cursor.and_then(|c| c.strip_prefix("handler:")).filter(|n| util::valid_id(n));
+    if let Some(c) = cursor.filter(|c| !util::valid_id(c) && handlers.is_none()) {
+        return Err(format!("bad cursor name {c:?}: letters, digits, - and _ (or handler:<name>, with --no-commit)"));
+    }
+    if let Some(n) = handlers {
+        if a.has("--commit") || !a.has("--no-commit") {
+            return Err(format!("handler:{n} is handler {n}'s own cursor: read it with --no-commit (the daemon moves it when a run succeeds)"));
+        }
+        if handler::Registry::load(&st.dir()).get(n).is_none() {
+            return Err(handler::missing(n));
+        }
     }
     let seq = |f: &str| a.get(f).map(|s| s.parse::<u64>().map_err(|_| format!("bad {f} {s:?}: an event seq (a whole number)"))).transpose();
     if let Some(to) = seq("--commit")? {
@@ -1412,6 +1564,441 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
             }
         }
     }
+}
+
+/// The exit code for an error: 3 when the thing named is not there (an artifact, a component, a
+/// handler, an owner, a feed), 1 for everything else (refused, invalid, failed). A script can
+/// tell "not created yet" from "something is wrong" without reading the message.
+fn exit_code(e: &str) -> i32 {
+    if ["no artifact ", "no component ", "no handler ", "no owner ", "no feed "].iter().any(|p| e.starts_with(p)) {
+        3
+    } else {
+        1
+    }
+}
+
+/// How a duration reads in a flag: `60s`, `10m`.
+fn duration_flag(a: &Args, flag: &str) -> Result<Option<f64>, String> {
+    match a.get(flag) {
+        None if a.has(flag) => Err(format!("{flag} needs a value (60s, 10m)")),
+        None => Ok(None),
+        Some(v) => util::parse_duration(v).map(Some).ok_or_else(|| format!("bad {flag} {v:?}: a duration such as 60s, 10m, 1h")),
+    }
+}
+
+/// `margin handler …`: the registry of event handlers, their logs, and a run in the foreground.
+fn handler_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
+    use handler::{edit_registry, Handler, Registry};
+    const SUBS: &str = "add, set, ls, rm, pause, resume, logs, run";
+    let sub = a.pos(0, "add|set|ls|rm|pause|resume|logs|run")?;
+    let (flags, max_pos): (&[&str], usize) = match sub {
+        "add" | "set" => (&["--on", "--board", "--owns", "--timeout", "--retries"], 2),
+        "ls" => (&["--json"], 1),
+        "rm" | "pause" | "resume" => (&[], 2),
+        "logs" => (&["--follow", "--lines"], 2),
+        "run" => (&["--events", "--dry-run"], 2),
+        s => return Err(format!("unknown handler command {s:?}: {SUBS}")),
+    };
+    check_args(&format!("handler {sub}"), a, flags, Some(max_pos))?;
+    author(a)?;
+    if !matches!(sub, "add" | "set") && !cmd.is_empty() {
+        return Err("`--` is only for handler add and set".into());
+    }
+    let st = store(a);
+    let name = || a.pos(1, "name");
+    match sub {
+        "add" | "set" => {
+            let name = name()?.to_string();
+            for f in ["--on", "--board", "--owns", "--retries"] {
+                if a.has(f) && a.all(f).len() != a.flags.iter().filter(|(k, _)| k == f).count() {
+                    return Err(format!("{f} needs a value"));
+                }
+            }
+            let old = Registry::load_strict(&st.dir())?.get(&name).cloned();
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+            let mut h = match (sub, old.clone()) {
+                ("set", Some(h)) => h,
+                ("set", None) => return Err(handler::missing(&name)),
+                _ => Handler { name: name.clone(), cmd: Vec::new(), on: Vec::new(), board: String::new(), owns: String::new(), paused: false, cwd: cwd.clone(), path: String::new(), timeout: 60.0, retries: 3, added: util::now_rfc3339() },
+            };
+            if !a.all("--on").is_empty() {
+                h.on = a.all("--on").into_iter().map(String::from).collect();
+            }
+            match a.get("--board") {
+                Some("none") => (h.board, h.owns) = (String::new(), String::new()),
+                Some(b) => h.board = b.to_string(),
+                None => {}
+            }
+            if let Some(o) = a.get("--owns") {
+                h.owns = o.to_string();
+            }
+            if let Some(t) = duration_flag(a, "--timeout")? {
+                h.timeout = t;
+            }
+            if let Some(r) = a.get("--retries") {
+                h.retries = r.parse().map_err(|_| format!("bad --retries {r:?}: a whole number, 0 for never"))?;
+            }
+            if !cmd.is_empty() {
+                // the command, where it runs and what it finds on PATH belong together
+                h.cmd = cmd;
+                h.cwd = cwd;
+                h.path = std::env::var("PATH").unwrap_or_default();
+            }
+            if !h.board.is_empty() {
+                if !st.exists(&h.board) {
+                    return Err(st.missing(&h.board));
+                }
+                if !h.owns.is_empty() {
+                    st.claim_overlap(&h.board, &h.owns, ("handler", &name))?;
+                }
+            }
+            let line = format!("handler {name}: on {} → {}{}", h.on.join(" "), h.cmd.join(" "), if h.board.is_empty() { String::new() } else { format!(" (writes {}, owns {:?})", h.board, h.owns) });
+            if sub == "add" {
+                edit_registry(&st, |r| r.add(h.clone()))?;
+                // it hears what happens from now on: its cursor starts at the end of the log
+                st.cursor_or_create(&h.cursor());
+            } else {
+                edit_registry(&st, |r| r.set(h.clone()))?;
+            }
+            let started = if h.paused { None } else { daemon::ensure(&st)? };
+            println!("{line}{}", if started.is_some() { "; daemon started" } else { "" });
+        }
+        "rm" => {
+            let n = name()?;
+            let h = edit_registry(&st, |r| r.remove(n))?;
+            let _ = std::fs::remove_file(st.cursor_path(&h.cursor()));
+            let _ = std::fs::remove_file(handler::status_path(&st, n));
+            println!("removed handler {n}{}", if h.board.is_empty() { String::new() } else { format!("; what it wrote stays in {}, unowned", h.board) });
+        }
+        "pause" | "resume" => {
+            let n = name()?;
+            edit_registry(&st, |r| r.set_paused(n, sub == "pause"))?;
+            if sub == "resume" {
+                daemon::ensure(&st)?;
+            }
+            println!("{} handler {n}", if sub == "pause" { "paused" } else { "resumed" });
+        }
+        "ls" => {
+            let r = Registry::load_strict(&st.dir())?;
+            let running = daemon::running(&st);
+            let now = util::epoch_now();
+            let rows: Vec<(&Handler, handler::Status, String, usize)> = r
+                .handlers
+                .iter()
+                .map(|h| {
+                    let s = handler::read_status(&st, &h.name).unwrap_or_default();
+                    let state = if h.paused {
+                        "paused".to_string()
+                    } else if running.is_none() {
+                        "stopped".into()
+                    } else if s.state.is_empty() {
+                        "starting".into()
+                    } else {
+                        s.state.clone()
+                    };
+                    (h, s, state, handler::pending(&st, h).len())
+                })
+                .collect();
+            if a.has("--json") {
+                let hs: Vec<Value> = rows
+                    .iter()
+                    .map(|(h, s, state, pending)| json!({"name": h.name, "on": h.on, "cmd": h.cmd, "board": h.board, "owns": h.owns, "paused": h.paused, "state": state, "cursor": st.cursor(&h.cursor()), "pending": pending, "attempts": s.attempts, "last_run": s.last_run, "last_outcome": s.last_outcome, "last_error": s.last_error}))
+                    .collect();
+                println!("{}", json!({"v": 1, "daemon": {"running": running.is_some(), "pid": running.unwrap_or(0)}, "handlers": hs}));
+                return Ok(());
+            }
+            match running {
+                Some(p) if p > 0 => println!("daemon: running, pid {p}"),
+                Some(_) => println!("daemon: running"),
+                None => println!("daemon: not running{}", if r.handlers.iter().any(|h| !h.paused) { " (the next event appended starts it; or: margin daemon)" } else { "" }),
+            }
+            if r.handlers.is_empty() {
+                println!("no handlers in project {}", st.project);
+            }
+            for (h, s, state, pending) in &rows {
+                let board = if h.board.is_empty() { "-".to_string() } else { format!("{}/{}", h.board, h.owns) };
+                println!("{:<14} {:<9} {:<24} {:<16} waiting {:<3} {}", h.name, state, vellum::text::truncate(&format!("on {}", h.on.join(" ")), 24), board, pending, s.last_run_text(now));
+            }
+        }
+        "logs" => {
+            let n = name()?;
+            if Registry::load(&st.dir()).get(n).is_none() && !handler::log_path(&st, n).exists() {
+                return Err(handler::missing(n));
+            }
+            print_log(&handler::log_path(&st, n), a, &format!("handler {n}"))?;
+        }
+        "run" => {
+            let n = name()?;
+            let h = Registry::load_strict(&st.dir())?.get(n).cloned().ok_or_else(|| handler::missing(n))?;
+            let (events, own) = match a.get("--events") {
+                Some(f) => {
+                    let text = std::fs::read_to_string(f).map_err(|e| format!("--events {f}: {e}"))?;
+                    let evs = text.lines().filter(|l| !l.trim().is_empty()).enumerate().map(|(i, l)| serde_json::from_str::<store::Event>(l).map_err(|e| format!("--events {f}: line {}: {e}", i + 1))).collect::<Result<Vec<_>, _>>()?;
+                    (evs, false)
+                }
+                None if a.has("--events") => return Err("--events needs a file of events (margin events --json > FILE)".into()),
+                None => (handler::pending(&st, &h), true),
+            };
+            if events.is_empty() {
+                println!("no events wait for handler {n}{}", if own { " (give it some: --events FILE)" } else { "" });
+                return Ok(());
+            }
+            // the command may exit without reading its stdin
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+            let mut w = handler::Worker::new(store(a), h, std::sync::Arc::new(feed::Ctl::default()), true);
+            w.exec(&events, a.has("--dry-run"), own)?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+/// The last lines of a log file, and with `--follow` what is appended to it (until ctrl-c).
+fn print_log(p: &std::path::Path, a: &Args, what: &str) -> Result<(), String> {
+    let lines: usize = a.get("--lines").and_then(|l| l.parse().ok()).unwrap_or(40);
+    let text = std::fs::read_to_string(p).map_err(|_| format!("no log yet for {what} ({})", p.display()))?;
+    let all: Vec<&str> = text.lines().collect();
+    for l in &all[all.len().saturating_sub(lines)..] {
+        println!("{l}");
+    }
+    if a.has("--follow") {
+        use std::io::Write;
+        daemon::trap_signals();
+        let mut seen = text.len();
+        while follow_wait(300) {
+            let t = std::fs::read_to_string(p).unwrap_or_default();
+            if t.len() < seen {
+                seen = 0; // rotated
+            }
+            print!("{}", &t[seen..]);
+            let _ = std::io::stdout().flush();
+            seen = t.len();
+        }
+    }
+    Ok(())
+}
+
+/// `margin owner …`: who writes which rows from outside.
+fn owner_cmd(a: &Args) -> Result<(), String> {
+    use owner::{Owner, Registry};
+    let st = store(a);
+    let sub = a.pos(0, "add|set|ls|rm")?;
+    let name = || a.pos(1, "name");
+    for f in ["--board", "--owns", "--expect-every"] {
+        if a.has(f) && a.get(f).is_none() {
+            return Err(format!("{f} needs a value"));
+        }
+    }
+    let expect = |a: &Args| -> Result<Option<Option<f64>>, String> {
+        match a.get("--expect-every") {
+            None => Ok(None),
+            Some("none") => Ok(Some(None)),
+            Some(v) => util::parse_duration(v).map(|d| Some(Some(d))).ok_or_else(|| format!("bad --expect-every {v:?}: a duration such as 10m, 1h, or none")),
+        }
+    };
+    match sub {
+        "add" => {
+            let n = name()?;
+            let o = Owner { name: n.into(), board: a.get("--board").unwrap_or("").into(), owns: a.get("--owns").unwrap_or("").into(), expect_every: expect(a)?.flatten(), added: util::now_rfc3339(), last_write: String::new() };
+            st.add_owner(o.clone())?;
+            println!("owner {n}: owns {:?} in {}; it writes with: margin apply {} --as {n}", o.owns, o.board, o.board);
+        }
+        "set" => {
+            let n = name()?;
+            let mut o = Registry::load_strict(&st.dir())?.get(n).cloned().ok_or_else(|| owner::missing(n))?;
+            if let Some(b) = a.get("--board") {
+                o.board = b.into();
+            }
+            if let Some(p) = a.get("--owns") {
+                o.owns = p.into();
+            }
+            if let Some(e) = expect(a)? {
+                o.expect_every = e;
+            }
+            st.set_owner(o.clone())?;
+            println!("owner {n}: owns {:?} in {}{}", o.owns, o.board, o.expect_every.map(|e| format!(", expected every {}", feed::fmt_secs(e))).unwrap_or_default());
+        }
+        "rm" => {
+            let n = name()?;
+            let o = st.remove_owner(n)?;
+            println!("removed owner {n}; its rows stay in {}, unowned", o.board);
+        }
+        "ls" => {
+            let r = Registry::load_strict(&st.dir())?;
+            let now = util::epoch_now();
+            if a.has("--json") {
+                let v: Vec<Value> = r.owners.iter().map(|o| json!({"name": o.name, "board": o.board, "owns": o.owns, "expect_every": o.expect_every, "added": o.added, "last_write": o.last_write, "stale": o.stale(now).is_some()})).collect();
+                println!("{}", json!({"v": 1, "owners": v}));
+                return Ok(());
+            }
+            if r.owners.is_empty() {
+                println!("no owners in project {}", st.project);
+            }
+            for o in &r.owners {
+                let wrote = util::parse_rfc3339(&o.last_write).map(|t| format!("wrote {}", util::ago(now - t))).unwrap_or_else(|| "never wrote".into());
+                let health = match (o.stale(now), o.expect_every) {
+                    (Some(why), _) => format!("STALE: {why}"),
+                    (None, Some(e)) => format!("{wrote} (expected every {})", feed::fmt_secs(e)),
+                    (None, None) => wrote,
+                };
+                println!("{:<14} {:<20} {health}", o.name, format!("{}/{}", o.board, o.owns));
+            }
+        }
+        s => return Err(format!("unknown owner command {s:?}: add, set, ls, rm")),
+    }
+    Ok(())
+}
+
+/// Where a systemd user unit goes when nobody says: `$XDG_CONFIG_HOME/systemd/user`.
+fn default_unit_dir() -> Result<std::path::PathBuf, String> {
+    let base = match std::env::var("XDG_CONFIG_HOME") {
+        Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => std::path::PathBuf::from(std::env::var("HOME").map_err(|_| "$HOME isn't set: pass --unit-dir".to_string())?).join(".config"),
+    };
+    Ok(base.join("systemd/user"))
+}
+
+fn unit_name(project: &str) -> String {
+    format!("margin-{project}.service")
+}
+
+/// The unit `margin daemon install` writes: this binary, this store, this project, restarted
+/// when it fails, started with the user's session.
+fn unit_text(st: &Store) -> String {
+    let home = std::path::absolute(&st.home).unwrap_or_else(|_| st.home.clone());
+    format!(
+        "# written by `margin daemon install`; remove with `margin daemon uninstall`\n[Unit]\nDescription=margin daemon for project {p}: dispatches events to handlers\n\n[Service]\nExecStart={bin} daemon --stay --project {p} --home {home}\nRestart=on-failure\nRestartSec=5\n# what handlers find their tools on when a registration carries no PATH of its own\nEnvironment=PATH={path}\n\n[Install]\nWantedBy=default.target\n",
+        p = st.project,
+        bin = help::bin_path().display(),
+        home = home.display(),
+        path = std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+fn has_systemd() -> bool {
+    std::path::Path::new("/run/systemd/system").exists() && std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join("systemctl").is_file())).unwrap_or(false)
+}
+
+/// `margin daemon [install|uninstall|status]`.
+fn daemon_cmd(a: &Args) -> Result<(), String> {
+    let st = store(a);
+    let unit_dir = || match a.get("--unit-dir") {
+        Some(d) => std::path::absolute(d).map_err(|e| format!("--unit-dir {d}: {e}")),
+        None if a.has("--unit-dir") => Err("--unit-dir needs a directory".into()),
+        None => default_unit_dir(),
+    };
+    let unit = unit_name(&st.project);
+    match a.pos.first().map(String::as_str) {
+        None => daemon::run(st, a.has("--stay")),
+        Some("install") => {
+            let p = unit_dir()?.join(&unit);
+            store::write_atomic(&p, unit_text(&st).as_bytes()).map_err(|e| format!("{}: {e}", p.display()))?;
+            println!("wrote {}", p.display());
+            if has_systemd() {
+                println!("enable it (margin does not run systemctl for you):\n  systemctl --user daemon-reload && systemctl --user enable --now {unit}");
+                println!("it then starts when you log in and restarts if it fails; to have it running after a reboot before you log in:\n  loginctl enable-linger \"$USER\"");
+            } else {
+                println!("systemd is not running here, so nothing will start that unit. Without it the daemon still comes back:");
+                println!("  - on demand: the next margin command that appends an event (emit, act, a key in the pane) starts it,\n    and handlers resume from their cursors, so nothing appended in between is lost");
+                println!("  - or at boot from cron:  @reboot {} daemon --stay --project {} --home {}", help::bin_path().display(), st.project, std::path::absolute(&st.home).unwrap_or_else(|_| st.home.clone()).display());
+            }
+            Ok(())
+        }
+        Some("uninstall") => {
+            let p = unit_dir()?.join(&unit);
+            match std::fs::remove_file(&p) {
+                Ok(()) => println!("removed {}\nstop it if it is running:\n  systemctl --user disable --now {unit}", p.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no unit at {}: nothing to remove", p.display()),
+                Err(e) => return Err(format!("{}: {e}", p.display())),
+            }
+            Ok(())
+        }
+        Some("status") => {
+            let now = util::epoch_now();
+            let running = daemon::running(&st);
+            let up = daemon::since(&st).filter(|_| running.is_some());
+            let dir = unit_dir()?;
+            let installed = dir.join(&unit).exists();
+            let enabled = dir.join("default.target.wants").join(&unit).exists();
+            let hs = handler::Registry::load_strict(&st.dir())?;
+            let feeds = feed::Registry::load(&st.dir()).feeds.len();
+            let rows: Vec<Value> = hs
+                .handlers
+                .iter()
+                .map(|h| {
+                    let s = handler::read_status(&st, &h.name).unwrap_or_default();
+                    let state = if h.paused { "paused".to_string() } else if running.is_none() { "stopped".into() } else { s.state.clone() };
+                    json!({"name": h.name, "on": h.on, "state": state, "pending": handler::pending(&st, h).len(), "cursor": st.cursor(&h.cursor()), "last": s.last_run_text(now), "last_error": if matches!(s.last_outcome.as_str(), "failed" | "skipped") { s.last_error.clone() } else { String::new() }})
+                })
+                .collect();
+            if a.has("--json") {
+                println!("{}", json!({"v": 1, "project": st.project, "running": running.is_some(), "pid": running.unwrap_or(0), "since": up.map(util::rfc3339), "unit": {"name": unit, "installed": installed, "enabled": enabled}, "handlers": rows, "feeds": feeds}));
+                return Ok(());
+            }
+            match (running, up) {
+                (Some(p), Some(t)) => println!("daemon: running for project {}, pid {p}, up since {} ({})", st.project, util::rfc3339(t), util::ago(now - t)),
+                (Some(p), None) => println!("daemon: running for project {}, pid {p}", st.project),
+                _ => println!("daemon: not running for project {}", st.project),
+            }
+            println!(
+                "after a reboot: {}",
+                match (installed, enabled) {
+                    (true, true) => format!("the unit {unit} is installed and enabled: it starts at login"),
+                    (true, false) => format!("the unit {unit} is installed but not enabled (systemctl --user enable --now {unit}); until then the next event appended starts the daemon"),
+                    _ => "no unit (margin daemon install): the next margin command that appends an event starts it, and handlers resume from their cursors".to_string(),
+                }
+            );
+            if rows.is_empty() {
+                println!("handlers: none (margin handler add …)");
+            }
+            for r in &rows {
+                println!("  {:<14} {:<9} {:<24} waiting {:<3} {}", r["name"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""), vellum::text::truncate(&format!("on {}", r["on"].as_array().map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default()), 24), r["pending"], r["last"].as_str().unwrap_or(""));
+            }
+            if feeds > 0 {
+                println!("feeds: {feeds} registered (margin feed ls)");
+            }
+            Ok(())
+        }
+        Some(s) => Err(format!("unknown daemon command {s:?}: install, uninstall, status (none: run it)")),
+    }
+}
+
+/// `margin handle open`: the built-in handler for `<board>.open` events. The pane's own code
+/// for opening a target lives here now: the pane appends the event and runs nothing.
+fn handle_open(input: &str, cfg: &Config) -> Result<(), String> {
+    let dry = std::env::var("MARGIN_DRY_OPEN").ok().filter(|f| !f.is_empty());
+    for (i, l) in input.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        let e: store::Event = serde_json::from_str(l).map_err(|e| format!("stdin line {}: not an event ({e})", i + 1))?;
+        let Some(target) = e.value["target"].as_str().filter(|t| !t.is_empty()) else {
+            eprintln!("seq {}: {}.{} has no target to open", e.seq, e.artifact, e.id);
+            continue;
+        };
+        if let Some(f) = &dry {
+            use std::io::Write;
+            let mut out = std::fs::OpenOptions::new().create(true).append(true).open(f).map_err(|e| format!("$MARGIN_DRY_OPEN {f}: {e}"))?;
+            writeln!(out, "{target}").map_err(|e| e.to_string())?;
+            continue;
+        }
+        let r = if target.starts_with("http://") || target.starts_with("https://") {
+            select::open_url(target, cfg)
+        } else if let Some(t) = select::parse_token(target) {
+            let st = Store::open_cwd();
+            if t.verb == "open" {
+                // mg:open/<artifact>: show that artifact where the host puts panes
+                let art = t.artifact.clone().unwrap_or_else(|| t.id.clone());
+                if st.exists(&t.id) { host::pick(cfg, None).open(&st, &t.id, &host::OpenOpts::default(), cfg).map(|_| ()) } else { Err(format!("{target}: no artifact {art:?} to show")) }
+            } else {
+                let art = t.artifact.clone().unwrap_or_else(|| e.artifact.clone());
+                select::apply_in(&st, &art, &t, "handler", cfg).map(|_| ())
+            }
+        } else {
+            Err(format!("{target:?} is not a URL or an mg: token"))
+        };
+        if let Err(err) = r {
+            eprintln!("seq {}: {err}", e.seq);
+        }
+    }
+    Ok(())
 }
 
 /// `margin rm <art>`: what would go, and with `yes` the removal. The store never deletes
@@ -1499,6 +2086,8 @@ fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
                 return Err(st.missing(&artifact));
             }
             let desc = f.trigger.describe();
+            // one id has one owner, whoever registered it: a handler's or an outside owner's too
+            st.claim_overlap(&artifact, &owns, ("feed", &name)).or_else(|e| if e.contains(" overlaps feed ") { Ok(()) } else { Err(e) })?;
             edit_registry(&st, |r| r.add(f, a.has("--replace")))?;
             // ids Claude already wrote under the prefix change hands now; say so
             if let Ok(d) = st.load(&artifact) {
@@ -1750,7 +2339,7 @@ mod tests {
     #[test]
     fn unknown_flags_and_surplus_args_are_refused() {
         let spec = |n: &str| CMDS.iter().find(|c| c.name == n).unwrap();
-        for (cmd, v) in [("daemon", &["--foo"][..]), ("session", &["a", "b"]), ("set", &["a", "b", "c", "d", "--nope"]), ("daemon", &["x"])] {
+        for (cmd, v) in [("daemon", &["--foo"][..]), ("session", &["a", "b"]), ("set", &["a", "b", "c", "d", "--nope"]), ("daemon", &["status", "x"])] {
             let s = spec(cmd);
             assert!(check_args(cmd, &args(v), s.flags, s.max_pos).is_err(), "{cmd} {v:?}");
         }

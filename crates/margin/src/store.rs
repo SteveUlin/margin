@@ -109,7 +109,7 @@ pub fn is_passive(kind: &str) -> bool {
 /// hand a Claude session as binding? Not a passive kind, and not a named event someone appended
 /// with `margin emit`: that is for whoever listens for its name, never an instruction to Claude.
 pub fn is_decision(e: &Event) -> bool {
-    crate::who::is_human(&e.by) && !is_passive(&e.kind) && e.via != "emit"
+    crate::who::is_human(&e.by) && !is_passive(&e.kind) && e.via != "emit" && e.via != "handler"
 }
 
 /// The log rotates once events.jsonl is this long: the append and a read of what is new stay
@@ -172,6 +172,9 @@ pub enum Writer {
     /// The prefix travels with the writer, so the daemon can still mark a removed feed's status
     /// line "removed" after the registry has forgotten it.
     Feed { name: String, owns: String },
+    /// Any other registered owner of a prefix: a handler (`by` is `handler:<name>`) or an
+    /// outside program (`owner:<name>`). The same rule as a feed: only inside its prefix.
+    Named { by: String, owns: String },
 }
 
 impl Writer {
@@ -179,15 +182,19 @@ impl Writer {
         match self {
             Writer::Claude => "claude".into(),
             Writer::Feed { name, .. } => format!("feed:{name}"),
+            Writer::Named { by, .. } => by.clone(),
         }
     }
 }
 
-/// A feed's claim on part of an artifact: every id starting with `owns`.
+/// A claim on part of an artifact: every id starting with `owns` belongs to the feed, handler
+/// or owner named `feed` (the field keeps the name it had when only feeds made claims).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Claim {
     pub feed: String,
     pub owns: String,
+    /// `feed`, `handler` or `owner`: for the message a refused write gets.
+    pub kind: &'static str,
 }
 
 /// Does prefix `p` cover `id`? `*` covers everything; the empty prefix covers nothing. A prefix
@@ -212,28 +219,34 @@ pub fn owns(p: &str, id: &str) -> bool {
 /// removing or moving a section can't carry a feed's components away with it.
 pub fn check_owner(op: &Op, doc: &Doc, w: &Writer, claims: &[Claim]) -> Result<(), String> {
     let (ids, parent) = op.touched(doc);
-    match w {
-        Writer::Feed { name, owns: p } => {
+    // a writer with a prefix: who it is, in words, and the prefix
+    let prefixed = match w {
+        Writer::Claude => None,
+        Writer::Feed { name, owns } => Some((format!("feed {name}"), owns)),
+        Writer::Named { by, owns } => Some((by.replacen(':', " ", 1), owns)),
+    };
+    match prefixed {
+        Some((who, p)) => {
             if matches!(op, Op::Title { .. }) && p != "*" {
-                return Err(format!("feed {name} owns the ids {p} and {p}-…, not the artifact title"));
+                return Err(format!("{who} owns the ids {p} and {p}-…, not the artifact title"));
             }
             if let Some(id) = ids.iter().find(|id| !owns(p, id)) {
-                return Err(format!("feed {name} may only write the ids {p} and {p}-…; {id:?} is outside its prefix"));
+                return Err(format!("{who} may only write the ids {p} and {p}-…; {id:?} is outside its prefix"));
             }
             if let Some(par) = parent.filter(|par| !owns(p, par)) {
-                return Err(format!("feed {name} may only insert into its own components or the top level, not into {par:?}"));
+                return Err(format!("{who} may only insert into its own components or the top level, not into {par:?}"));
             }
         }
-        Writer::Claude => {
+        None => {
             let mine = |id: &str| claims.iter().find(|c| owns(&c.owns, id));
             if matches!(op, Op::Title { .. }) {
                 if let Some(c) = claims.iter().find(|c| c.owns == "*") {
-                    return Err(feed_owned_msg("the title", c));
+                    return Err(feed_owned_msg("the title", c, &doc.id));
                 }
             }
             for id in ids.iter().chain(parent.iter()) {
                 if let Some(c) = mine(id) {
-                    return Err(feed_owned_msg(&format!("{id:?}"), c));
+                    return Err(feed_owned_msg(&format!("{id:?}"), c, &doc.id));
                 }
             }
         }
@@ -241,12 +254,14 @@ pub fn check_owner(op: &Op, doc: &Doc, w: &Writer, claims: &[Claim]) -> Result<(
     Ok(())
 }
 
-fn feed_owned_msg(what: &str, c: &Claim) -> String {
+fn feed_owned_msg(what: &str, c: &Claim, board: &str) -> String {
     let span = if c.owns == "*" { "this whole artifact".to_string() } else { format!("the ids {0} and {0}-… here", c.owns) };
-    format!(
-        "{what} belongs to feed `{}`, which owns {span} and rewrites it on its own; write outside that prefix, or stop the feed first (`margin feed pause {}` / `margin feed rm {}`)",
-        c.feed, c.feed, c.feed
-    )
+    let n = &c.feed;
+    match c.kind {
+        "handler" => format!("{what} belongs to handler `{n}`, which owns {span} and writes it when its events arrive; write outside that prefix, or remove the handler first (`margin handler rm {n}`)"),
+        "owner" => format!("{what} belongs to owner `{n}`, which owns {span}: an outside program writes it (`margin apply {board} --as {n}`); write outside that prefix, or `margin owner rm {n}` first"),
+        _ => format!("{what} belongs to feed `{n}`, which owns {span} and rewrites it on its own; write outside that prefix, or stop the feed first (`margin feed pause {n}` / `margin feed rm {n}`)"),
+    }
 }
 
 /// The reactions a row note can carry (r3; sulin picked all five, 2026-11-08).
@@ -375,7 +390,8 @@ fn read_json_strict<T: for<'a> Deserialize<'a> + Default>(p: &Path) -> Result<T,
 /// A session id or cursor name as a file name (the same mapping link.rs, wake.rs and recap.rs
 /// use), with `.` kept for the runner's own cursors (`job.<name>`).
 fn cursor_key(name: &str) -> String {
-    let k: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+    // `handler:open` is the file `handler.open`: no name a person can give a cursor has a dot
+    let k: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else if c == ':' { '.' } else { '_' }).collect();
     // never `.`, `..` or a hidden file
     if k.starts_with('.') || k.is_empty() {
         format!("_{k}")
@@ -588,13 +604,13 @@ impl Store {
             for id in ids {
                 if let Some(c) = claims.iter().find(|c| owns(&c.owns, &id)) {
                     if old.as_ref().and_then(|o| o.find(&id)) != d.find(&id) {
-                        return Err(feed_owned_msg(&format!("{id:?}"), c) + "; `put` must carry feed components through unchanged, so prefer id-addressed ops");
+                        return Err(feed_owned_msg(&format!("{id:?}"), c, &d.id) + "; a whole-document apply must carry owned components through unchanged, so prefer id-addressed ops");
                     }
                 }
             }
             if let (Some(c), Some(o)) = (claims.iter().find(|c| c.owns == "*"), &old) {
                 if o.title != d.title {
-                    return Err(feed_owned_msg("the title", c));
+                    return Err(feed_owned_msg("the title", c, &d.id));
                 }
             }
         }
@@ -602,15 +618,137 @@ impl Store {
         Ok(rev)
     }
 
-    /// The feeds that own part of artifact `a` (from feeds.json; paused feeds still own theirs).
+    /// Who owns part of artifact `a`: one table for every kind of claim. Feeds (feeds.json;
+    /// paused ones still own theirs), handlers with a board (handlers.json) and outside owners
+    /// (owners.json).
     pub fn claims(&self, a: &str) -> Vec<Claim> {
-        crate::feed::Registry::load(&self.dir()).claims(a)
+        let d = self.dir();
+        let mut v = crate::feed::Registry::load(&d).claims(a);
+        v.extend(crate::handler::Registry::load(&d).claims(a));
+        v.extend(crate::owner::Registry::load(&d).claims(a));
+        v
     }
 
-    /// Like `claims`, for Claude's and sulin's writes: a feeds.json that won't parse is an error,
-    /// not "nothing is owned" (a write into a feed's ids would land, and the feed would fight it).
+    /// Like `claims`, for Claude's and sulin's writes: a registry that won't parse is an error,
+    /// not "nothing is owned" (a write into an owned id would land, and its owner would fight it).
     pub fn claims_strict(&self, a: &str) -> Result<Vec<Claim>, String> {
-        Ok(crate::feed::Registry::load_strict(&self.dir())?.claims(a))
+        let d = self.dir();
+        let mut v = crate::feed::Registry::load_strict(&d)?.claims(a);
+        v.extend(crate::handler::Registry::load_strict(&d)?.claims(a));
+        v.extend(crate::owner::Registry::load_strict(&d)?.claims(a));
+        Ok(v)
+    }
+
+    /// One id has one owner: the claim that `owns` on `board` would collide with, if any
+    /// (`except`: the claim being changed, by kind and name).
+    pub fn claim_overlap(&self, board: &str, owns: &str, except: (&str, &str)) -> Result<(), String> {
+        match self.claims_strict(board)?.into_iter().find(|c| (c.kind, c.feed.as_str()) != except && crate::feed::overlaps(&c.owns, owns)) {
+            Some(c) => Err(format!("prefix {owns:?} overlaps {} {} (owns {:?} in {board}); one id has one owner", c.kind, c.feed, c.owns)),
+            None => Ok(()),
+        }
+    }
+
+    /// `margin owner add`: register an outside program as the writer of a prefix on a board
+    /// that exists. Under the lock, so the overlap check and the registration are one step.
+    pub fn add_owner(&self, o: crate::owner::Owner) -> Result<(), String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        let mut r = crate::owner::Registry::load_strict(&self.dir())?;
+        // its own check first: a second `add` says "exists", not "overlaps itself"
+        r.add(o.clone())?;
+        if !self.exists(&o.board) {
+            return Err(self.missing(&o.board));
+        }
+        self.claim_overlap(&o.board, &o.owns, ("owner", ""))?;
+        r.save(&self.dir())
+    }
+
+    /// `margin owner set`: change a registered owner (its last write stays).
+    pub fn set_owner(&self, o: crate::owner::Owner) -> Result<(), String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        let mut r = crate::owner::Registry::load_strict(&self.dir())?;
+        r.set(o.clone())?;
+        if !self.exists(&o.board) {
+            return Err(self.missing(&o.board));
+        }
+        self.claim_overlap(&o.board, &o.owns, ("owner", &o.name))?;
+        r.save(&self.dir())
+    }
+
+    pub fn remove_owner(&self, name: &str) -> Result<crate::owner::Owner, String> {
+        crate::owner::edit_registry(self, |r| r.remove(name))
+    }
+
+    /// `margin apply <board> --as <owner>`: an outside program's write. All of `ops` or none,
+    /// each checked against the owner's prefix; the owner's last-write time moves whether or not
+    /// the content changed. Returns the board's rev afterwards.
+    pub fn apply_as(&self, board: &str, name: &str, ops: &[Op]) -> Result<u64, String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        let mut reg = crate::owner::Registry::load_strict(&self.dir())?;
+        let o = reg.get(name).cloned().ok_or_else(|| crate::owner::missing(name))?;
+        if o.board != board {
+            return Err(format!("owner {name} is registered on {}, not {board}", o.board));
+        }
+        let old = self.load(board)?;
+        let w = Writer::Named { by: o.by(), owns: o.owns.clone() };
+        let mut d = old.clone();
+        for op in ops {
+            check_owner(op, &d, &w, &[])?;
+            d.apply(op)?;
+        }
+        let rev = if d.blocks != old.blocks || d.title != old.title { self.save_doc_locked(&mut d, Some(&old), &w.by())? } else { old.rev };
+        if let Some(x) = reg.owners.iter_mut().find(|x| x.name == name) {
+            x.last_write = now_rfc3339();
+        }
+        reg.save(&self.dir())?;
+        Ok(rev)
+    }
+
+    /// What a handler's run commits on exit 0, under one lock: its ops (each line all or
+    /// nothing, as a feed's), its emitted events (`by` the handler, via `handler`, about its
+    /// board), and its cursor moved to the last event it was given. One step, so a crash never
+    /// leaves the board updated with the cursor behind it, or the reverse. Returns the board's
+    /// new rev, if its content changed, and what was rejected.
+    pub fn handler_commit(&self, a: &str, groups: &[Vec<Op>], w: &Writer, emits: &[(String, Value)], cursor: Option<(&str, u64)>) -> (Option<u64>, Vec<String>) {
+        let _l = match self.lock() {
+            Ok(l) => l,
+            Err(e) => return (None, vec![e.to_string()]),
+        };
+        let (rev, mut errs) = match (groups.is_empty(), a.is_empty()) {
+            (true, _) => (None, Vec::new()),
+            (false, true) => (None, vec![format!("{} line(s) write a board, and this handler has none: register it with --board B --owns PREFIX", groups.len())]),
+            (false, false) => self.feed_write_locked(a, groups, w, &[]),
+        };
+        let at = if a.is_empty() { 0 } else { self.load(a).map(|d| d.rev).unwrap_or(0) };
+        for (name, value) in emits {
+            // `<board>.<name>` is how a board's own actions are named: a handler writing board
+            // A can't raise an event that reads as board B's
+            let other = name.split_once('.').map(|(b, _)| b).filter(|b| *b != a && self.exists(b));
+            let r = match other {
+                Some(b) => Err(format!("emit {name:?}: names starting with {b}. belong to the board {b}")),
+                None => self.append_event_locked(a, "", name, value.clone(), &w.by(), "handler", at).map(|_| ()),
+            };
+            if let Err(e) = r {
+                errs.push(e);
+            }
+        }
+        if let Some((name, seq)) = cursor {
+            if self.cursor(name).map(|c| seq > c).unwrap_or(true) {
+                self.set_cursor(name, seq);
+            }
+        }
+        (rev, errs)
+    }
+
+    /// The runner's own event: a handler gave up on a batch (`handler.failed`, `by` the
+    /// handler). Its cursor moves past the events it gave up on in the same step.
+    pub fn handler_failed(&self, a: &str, by: &str, value: Value, skip: (&str, u64)) {
+        let Ok(_l) = self.lock() else { return };
+        let a = if !a.is_empty() && self.exists(a) { a } else { "" };
+        let rev = if a.is_empty() { 0 } else { self.load(a).map(|d| d.rev).unwrap_or(0) };
+        let _ = self.append_event_locked(a, "", "handler.failed", value, by, "handler", rev);
+        if self.cursor(skip.0).map(|c| skip.1 > c).unwrap_or(true) {
+            self.set_cursor(skip.0, skip.1);
+        }
     }
 
     /// A feed's write: groups of ops (one group per stdout line), each applied all-or-nothing, so
@@ -619,11 +757,14 @@ impl Store {
     /// re-prints the same state costs no revision. A feed updates its artifact and never creates
     /// it: a missing one fails the write with the message that names `margin new`.
     pub fn feed_write(&self, a: &str, groups: &[Vec<Op>], w: &Writer, on_change: &[Op]) -> (Option<u64>, Vec<String>) {
+        match self.lock() {
+            Ok(_l) => self.feed_write_locked(a, groups, w, on_change),
+            Err(e) => (None, vec![e.to_string()]),
+        }
+    }
+
+    fn feed_write_locked(&self, a: &str, groups: &[Vec<Op>], w: &Writer, on_change: &[Op]) -> (Option<u64>, Vec<String>) {
         let mut errs = Vec::new();
-        let _l = match self.lock() {
-            Ok(l) => l,
-            Err(e) => return (None, vec![e.to_string()]),
-        };
         let old = match self.load(a) {
             Ok(d) => d,
             Err(e) => return (None, vec![e]),
@@ -772,7 +913,7 @@ impl Store {
             return Err(format!("no component {id:?} in {a}"));
         }
         if let Some(c) = self.claims_strict(a)?.iter().find(|c| owns(&c.owns, id)) {
-            return Err(format!("{id:?} is kept current by feed `{}`; its components are read-only", c.feed));
+            return Err(format!("{id:?} is kept current by {} `{}`; its components are read-only", c.kind, c.feed));
         }
         let mut st = self.state_rw(a)?;
         let ev = self.append_event_locked(a, id, kind, value.clone(), crate::who::HUMAN, via, d.rev)?;
@@ -967,6 +1108,11 @@ impl Store {
         // after the line: a crash between the two leaves a sidecar that no longer matches the
         // length, which the next append takes as "scan"
         let _ = fs::write(self.seq_path().with_extension("tmp"), format!("{} {}", ev.seq, len + line.len() as u64)).and_then(|_| fs::rename(self.seq_path().with_extension("tmp"), self.seq_path()));
+        // a registered handler may want this: make sure something is there to dispatch it. Not
+        // in unit tests, where the "binary" a daemon would be started from is the test harness
+        if !cfg!(test) {
+            crate::daemon::wake(self);
+        }
         Ok(ev)
     }
 

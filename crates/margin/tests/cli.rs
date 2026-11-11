@@ -126,6 +126,14 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("feed", s(&["ls"]), "", true),
         ("feed", s(&["add", "f", "--every", "1h", "--artifact", "a", "--owns", "fd", "--", "true"]), "", true),
         ("feed", s(&["rm", "f"]), "", true),
+        ("handler", s(&["add", "h", "--on", "walk.*", "--", "true"]), "", true),
+        ("handler", s(&["ls"]), "", true),
+        ("handler", s(&["rm", "h"]), "", true),
+        ("handle", s(&["open"]), "", true),
+        ("owner", s(&["add", "w", "--board", "a", "--owns", "ow"]), "", true),
+        ("owner", s(&["ls"]), "", true),
+        ("owner", s(&["rm", "w"]), "", true),
+        ("daemon", s(&["status"]), "", true),
         ("init", s(&["--dry-run", "--claude-dir", &claude_dir]), "", true),
         ("example", s(&[]), "", true),
         ("skill", s(&[]), "", true),
@@ -632,6 +640,231 @@ fn act_and_select_exit_nonzero_when_they_refuse() {
     let (ok, _, err) = run(&["select", "mg:todo/reviews.t1=next"], "");
     assert!(ok, "{err}");
     assert!(run(&["feed", "rm", "reviews"], "").0);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// Run one to its end and give its exit code: (code, stdout, stderr).
+fn coded(decoy: &Path, home: &Path, argv: &[&str], stdin: &str) -> (i32, String, String) {
+    let mut ch = bare(decoy, home, argv).spawn().unwrap();
+    ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    let o = ch.wait_with_output().unwrap();
+    (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+fn wait_for(what: &str, secs: u64, f: impl Fn() -> bool) {
+    let t = Instant::now();
+    while !f() {
+        assert!(t.elapsed() < Duration::from_secs(secs), "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// The queries an outside tool reads margin through: JSON on stdout, and exit code 3 for
+/// "not there" apart from 1 for "refused".
+#[test]
+fn queries_are_json_and_not_found_is_exit_3() {
+    let (decoy, home) = (temp("query-decoy"), temp("query-home"));
+    let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
+    let json = |out: &str| -> serde_json::Value { serde_json::from_str(out).unwrap_or_else(|e| panic!("{e}: {out}")) };
+    assert_eq!(run(&["new", "plan"], DOC).0, 0);
+    assert_eq!(run(&["select", "mg:pick/plan.q1=y"], "").0, 0);
+    let (code, out, _) = run(&["show", "plan", "--json"], "");
+    let v = json(&out);
+    assert_eq!((code, v["doc"]["id"].as_str(), v["doc"]["rev"].as_u64(), v["state"]["decisions"]["q1"]["value"].as_str()), (0, Some("plan"), Some(1), Some("y")));
+    let (code, out, _) = run(&["show", "plan", "q1", "--json"], "");
+    let v = json(&out);
+    assert_eq!((code, v["artifact"].as_str(), v["block"]["type"].as_str(), v["block"]["options"][1].as_str(), v["decision"]["value"].as_str(), v["decision"]["by"].as_str()), (0, Some("plan"), Some("question"), Some("y"), Some("y"), Some("you")));
+    assert!(json(&run(&["show", "plan", "t1"], "").1)["decision"].is_null());
+    let v = json(&run(&["ls", "--json"], "").1);
+    assert_eq!((v["v"].as_u64(), v["artifacts"][0]["id"].as_str()), (Some(1), Some("plan")));
+    assert_eq!(json(&run(&["handler", "ls", "--json"], "").1), serde_json::json!({"v": 1, "daemon": {"running": false, "pid": 0}, "handlers": []}));
+    assert_eq!(json(&run(&["owner", "ls", "--json"], "").1), serde_json::json!({"v": 1, "owners": []}));
+    assert_eq!(json_lines(&run(&["events", "--json", "--since", "0"], "").1)[0]["kind"], "pick");
+    // not found: 3, with the message on stderr and nothing on stdout
+    for argv in [
+        vec!["show", "nope", "--json"],
+        vec!["show", "plan", "zz", "--json"],
+        vec!["act", "plan", "zz", "open"],
+        vec!["set", "plan", "zz", "text=x"],
+        vec!["apply", "nope"],
+        vec!["handler", "rm", "ghost"],
+        vec!["handler", "set", "ghost", "--on", "x"],
+        vec!["handler", "run", "ghost"],
+        vec!["handler", "logs", "ghost"],
+        vec!["owner", "rm", "ghost"],
+        vec!["owner", "set", "ghost", "--owns", "x"],
+        vec!["apply", "plan", "--as", "ghost"],
+        vec!["events", "--cursor", "handler:ghost", "--no-commit"],
+    ] {
+        let (code, out, err) = run(&argv, r#"{"type":"todo","id":"t9","text":"x"}"#);
+        assert!(code == 3 && out.is_empty() && err.starts_with("margin "), "{argv:?}: {code} {out}{err}");
+    }
+    // refused or invalid: 1
+    for argv in [vec!["new", "plan"], vec!["emit", "bad name"], vec!["select", "mg:pick/plan.t1=x"], vec!["owner", "add", "o", "--board", "plan"], vec!["handler", "add", "h", "--", "true"]] {
+        let (code, _, err) = run(&argv, "");
+        assert!(code == 1 && !err.is_empty(), "{argv:?}: {code} {err}");
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// Owners from the command line: add and set are separate, the owner writes with `apply --as`
+/// and nobody else does, `owner ls` shows the last write and says when it is overdue, and the
+/// person's action on an owned row still reaches the log.
+#[test]
+fn an_outside_owner_registers_writes_and_goes_stale() {
+    let (decoy, home) = (temp("owner-decoy"), temp("owner-home"));
+    let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
+    assert_eq!(run(&["new", "runs"], r#"{"title":"Runs","blocks":[{"type":"section","id":"run","title":"Running"},{"type":"text","id":"note","text":"mine"}]}"#).0, 0);
+    let (code, out, _) = run(&["owner", "add", "queue", "--board", "runs", "--owns", "run"], "");
+    assert!(code == 0 && out.trim() == "owner queue: owns \"run\" in runs; it writes with: margin apply runs --as queue", "{out}");
+    let (code, _, err) = run(&["owner", "add", "queue", "--board", "runs", "--owns", "x"], "");
+    assert!(code == 1 && err.contains("exists: change it with margin owner set queue"), "{err}");
+    assert_eq!(run(&["owner", "add", "typo", "--board", "rnus", "--owns", "x"], "").0, 3, "the board must exist");
+    let (code, _, err) = run(&["owner", "add", "two", "--board", "runs", "--owns", "run-a"], "");
+    assert!(code == 1 && err.contains("overlaps owner queue"), "{err}");
+    // the owner writes; anyone else is refused; outside its prefix it is refused
+    let row = r#"{"type":"row","id":"run-1","text":"sim A","parent":"run"}"#;
+    let (code, out, err) = run(&["apply", "runs", "--as", "queue"], row);
+    assert!(code == 0 && out.trim() == "runs rev 2", "{out}{err}");
+    let (code, _, err) = run(&["set", "runs", "run-1", "text=mine"], "");
+    assert!(code == 1 && err.contains("belongs to owner `queue`") && err.contains("margin apply runs --as queue"), "{err}");
+    let (code, _, err) = run(&["apply", "runs", "--as", "queue"], r#"{"op":"set","id":"note","fields":{"text":"theirs"}}"#);
+    assert!(code == 1 && err.contains("owner queue may only write the ids run and run-…"), "{err}");
+    let (code, _, err) = run(&["apply", "runs", "--as", "queue"], r#"{"title":"x","blocks":[]}"#);
+    assert!(code == 1 && err.contains("not a whole document"), "{err}");
+    assert_eq!(run(&["set", "runs", "note", "text=still mine"], "").0, 0);
+    let v: serde_json::Value = serde_json::from_str(&run(&["show", "runs", "--json"], "").1).unwrap();
+    assert_eq!((v["doc"]["rev"].as_u64(), v["doc"]["blocks"][0]["children"][0]["text"].as_str()), (Some(3), Some("sim A")));
+    // an action on the owned row is an event, snapshot and all
+    let (code, out, _) = run(&["act", "runs", "run-1", "cancel"], "");
+    assert_eq!(code, 0, "{out}");
+    let e = &json_lines(&run(&["events", "--name", "runs.cancel", "--json"], "").1)[0];
+    assert_eq!((e["id"].as_str(), e["value"]["text"].as_str()), (Some("run-1"), Some("sim A")));
+    // staleness: fresh after a write, overdue once the expectation has passed
+    let (_, out, _) = run(&["owner", "ls"], "");
+    assert!(out.contains("queue") && out.contains("runs/run") && out.contains("wrote ") && !out.contains("STALE"), "{out}");
+    let (code, out, _) = run(&["owner", "set", "queue", "--expect-every", "1s"], "");
+    assert!(code == 0 && out.contains("expected every 1s"), "{out}");
+    std::thread::sleep(Duration::from_millis(2100));
+    let (_, out, _) = run(&["owner", "ls"], "");
+    assert!(out.contains("STALE: last updated ") && out.contains("expected every 1s"), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&run(&["owner", "ls", "--json"], "").1).unwrap();
+    assert_eq!((v["owners"][0]["name"].as_str(), v["owners"][0]["stale"].as_bool(), v["owners"][0]["expect_every"].as_f64()), (Some("queue"), Some(true), Some(1.0)));
+    // the board draws it: a mark on the owner's rows and the reason on the first
+    let (_, out, _) = run(&["render", "runs", "--width", "100"], "");
+    assert!(out.contains("stale") && out.contains("expected every 1s"), "{out}");
+    // the same write again changes nothing and still counts as a write
+    let (code, out, _) = run(&["apply", "runs", "--as", "queue"], row);
+    assert!(code == 0 && out.trim() == "runs rev 3", "{out}");
+    assert!(!run(&["owner", "ls"], "").1.contains("STALE"));
+    assert!(!run(&["render", "runs", "--width", "100"], "").1.contains("stale"));
+    let (code, out, _) = run(&["owner", "rm", "queue"], "");
+    assert!(code == 0 && out.contains("its rows stay in runs, unowned"), "{out}");
+    assert_eq!(run(&["set", "runs", "run-1", "text=mine now"], "").0, 0);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// The handler registry from the command line: add creates and refuses a second time, set
+/// changes only what it is given and refuses a missing name, `run --events --dry-run` shows what
+/// a run would commit and writes nothing, and rm forgets the cursor.
+#[test]
+fn handlers_register_change_and_dry_run() {
+    let (decoy, home) = (temp("handler-decoy"), temp("handler-home"));
+    let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
+    assert_eq!(run(&["new", "board"], "").0, 0);
+    let script = decoy.join("h.sh");
+    std::fs::write(&script, "#!/bin/sh\nn=$(wc -l)\necho \"{\\\"type\\\":\\\"text\\\",\\\"id\\\":\\\"h-1\\\",\\\"text\\\":\\\"saw $n\\\"}\"\necho '{\"emit\":\"board.done\",\"value\":1}'\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // registered paused-free; the daemon it starts is stopped at the end of this test by `rm`
+    let (code, out, err) = run(&["handler", "add", "h", "--on", "board.*", "--on", "x", "--board", "board", "--owns", "h", "--retries", "0", "--", "./h.sh"], "");
+    assert!(code == 0 && out.starts_with("handler h: on board.* x → ./h.sh (writes board, owns \"h\")"), "{out}{err}");
+    let (code, _, err) = run(&["handler", "add", "h", "--on", "y", "--", "true"], "");
+    assert!(code == 1 && err.contains("handler \"h\" exists: change it with margin handler set h"), "{err}");
+    for (argv, why) in [
+        (vec!["handler", "add", "n", "--", "true"], "needs the events"),
+        (vec!["handler", "add", "n", "--on", "x"], "no command"),
+        (vec!["handler", "add", "n", "--on", "x", "--board", "board", "--", "true"], "--board needs the id prefix"),
+        (vec!["handler", "add", "n", "--on", "x", "--board", "board", "--owns", "h-x", "--", "true"], "overlaps handler h"),
+        (vec!["handler", "add", "n", "--on", "x", "--timeout", "soon", "--", "true"], "bad --timeout"),
+        (vec!["handler", "frob"], "unknown handler command"),
+    ] {
+        let (code, _, err) = run(&argv, "");
+        assert!(code == 1 && err.contains(why), "{argv:?}: {err}");
+    }
+    assert_eq!(run(&["handler", "add", "n", "--on", "x", "--board", "baord", "--owns", "n", "--", "true"], "").0, 3);
+    // set: only what is passed changes
+    let (code, out, _) = run(&["handler", "set", "h", "--on", "board.go", "--timeout", "5s"], "");
+    assert!(code == 0 && out.starts_with("handler h: on board.go → ./h.sh"), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&run(&["handler", "ls", "--json"], "").1).unwrap();
+    let h = &v["handlers"][0];
+    assert_eq!((h["name"].as_str(), &h["on"], &h["cmd"], h["board"].as_str(), h["owns"].as_str(), h["pending"].as_u64(), h["cursor"].as_u64()), (Some("h"), &serde_json::json!(["board.go"]), &serde_json::json!(["./h.sh"]), Some("board"), Some("h"), Some(0), Some(0)));
+    let (_, out, _) = run(&["handler", "ls"], "");
+    assert!(out.contains("daemon: running") && out.contains("on board.go") && out.contains("board/h") && out.contains("waiting 0"), "{out}");
+    // a dry run on events from a file: prints, writes nothing
+    let evs = decoy.join("evs.jsonl");
+    std::fs::write(&evs, "{\"v\":1,\"seq\":41,\"at\":\"2026-11-10T10:00:00Z\",\"artifact\":\"board\",\"id\":\"\",\"kind\":\"board.go\",\"value\":null,\"by\":\"you\",\"via\":\"emit\"}\n{\"v\":1,\"seq\":42,\"at\":\"2026-11-10T10:00:01Z\",\"artifact\":\"board\",\"id\":\"\",\"kind\":\"board.go\",\"value\":null,\"by\":\"you\",\"via\":\"emit\"}\n").unwrap();
+    let (code, out, err) = run(&["handler", "run", "h", "--events", &evs.display().to_string(), "--dry-run"], "");
+    assert!(code == 0, "{out}{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("given  {") && lines[1].starts_with("given  {"), "{out}");
+    assert_eq!(&lines[2..], [r#"would  {"type":"text","id":"h-1","text":"saw 2"}"#, r#"would  {"emit":"board.done","value":1}"#], "{out}");
+    let (_, out, _) = run(&["show", "board"], "");
+    assert!(out.contains("rev 1") && !out.contains("h-1"), "{out}");
+    assert!(run(&["events", "--name", "board.done", "--json"], "").1.is_empty());
+    // the same run for real: it commits, as the handler, and leaves the cursor (events came from a file)
+    let (code, out, err) = run(&["handler", "run", "h", "--events", &evs.display().to_string()], "");
+    assert!(code == 0 && out.contains("board rev 2") && out.contains("emitted board.done"), "{out}{err}");
+    let e = &json_lines(&run(&["events", "--name", "board.done", "--json"], "").1)[0];
+    assert_eq!((e["by"].as_str(), e["via"].as_str(), e["artifact"].as_str()), (Some("handler:h"), Some("handler"), Some("board")));
+    assert_eq!(std::fs::read_to_string(home.join("p/cursors/handler.h")).unwrap(), "0");
+    // what waits for it is readable through its cursor, and only readable
+    let (code, out, _) = run(&["events", "--cursor", "handler:h", "--no-commit", "--name", "*", "--json"], "");
+    assert!(code == 0 && json_lines(&out).len() == 1, "{out}");
+    let (code, _, err) = run(&["events", "--cursor", "handler:h"], "");
+    assert!(code == 1 && err.contains("read it with --no-commit"), "{err}");
+    // pause, resume, rm
+    assert!(run(&["handler", "pause", "h"], "").1.contains("paused handler h"));
+    assert!(run(&["handler", "ls"], "").1.contains("paused"));
+    assert!(run(&["handler", "resume", "h"], "").1.contains("resumed handler h"));
+    let (code, out, _) = run(&["handler", "rm", "h"], "");
+    assert!(code == 0 && out.contains("removed handler h; what it wrote stays in board, unowned"), "{out}");
+    assert!(!home.join("p/cursors/handler.h").exists());
+    wait_for("the daemon to leave with its last handler", 10, || !home.join("p/daemon.pid").exists());
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// `margin daemon install` writes a per-project systemd user unit where it is told to, prints
+/// the line that enables it, and runs nothing; uninstall removes it; status says how the daemon
+/// comes back after a reboot.
+#[test]
+fn daemon_install_writes_a_unit_and_status_says_how_it_comes_back() {
+    let (decoy, home) = (temp("unit-decoy"), temp("unit-home"));
+    let units = decoy.join("units");
+    let run = |argv: &[&str]| coded(&decoy, &home, argv, "");
+    let (code, out, _) = run(&["daemon", "status", "--unit-dir", &units.display().to_string()]);
+    assert!(code == 0 && out.contains("daemon: not running for project p") && out.contains("after a reboot: no unit (margin daemon install)") && out.contains("handlers: none"), "{out}");
+    let (code, out, err) = run(&["daemon", "install", "--unit-dir", &units.display().to_string()]);
+    assert!(code == 0, "{out}{err}");
+    let unit = std::fs::read_to_string(units.join("margin-p.service")).unwrap();
+    assert!(unit.contains(&format!("ExecStart={BIN} daemon --stay --project p --home {}", home.display())), "{unit}");
+    assert!(unit.contains("Restart=on-failure") && unit.contains("WantedBy=default.target") && unit.contains("Environment=PATH="), "{unit}");
+    assert!(out.contains("wrote ") && (out.contains("systemctl --user daemon-reload && systemctl --user enable --now margin-p.service") || out.contains("systemd is not running here")), "{out}");
+    let (_, out, _) = run(&["daemon", "status", "--unit-dir", &units.display().to_string()]);
+    assert!(out.contains("the unit margin-p.service is installed but not enabled"), "{out}");
+    // enabled is the symlink systemctl makes
+    std::fs::create_dir_all(units.join("default.target.wants")).unwrap();
+    std::fs::write(units.join("default.target.wants/margin-p.service"), "").unwrap();
+    let v: serde_json::Value = serde_json::from_str(&run(&["daemon", "status", "--json", "--unit-dir", &units.display().to_string()]).1).unwrap();
+    assert_eq!(v["unit"], serde_json::json!({"name": "margin-p.service", "installed": true, "enabled": true}));
+    assert_eq!((v["running"].as_bool(), v["project"].as_str()), (Some(false), Some("p")));
+    let (code, out, _) = run(&["daemon", "uninstall", "--unit-dir", &units.display().to_string()]);
+    assert!(code == 0 && out.contains("removed ") && out.contains("systemctl --user disable --now margin-p.service") && !units.join("margin-p.service").exists(), "{out}");
+    assert!(run(&["daemon", "uninstall", "--unit-dir", &units.display().to_string()]).1.contains("nothing to remove"));
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }

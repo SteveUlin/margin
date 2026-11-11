@@ -1,10 +1,13 @@
-//! `margin daemon`: the feed supervisor for one project store.
+//! `margin daemon`: the supervisor for one project store. It dispatches events to the registered
+//! handlers (handler.rs: one worker thread each, fed from the event log through the handler's
+//! cursor) and runs the registered feeds (feed.rs).
 //!
 //! One per project, held by `flock` on `<project>/daemon.lock` (a second one exits at once). It
 //! re-reads feeds.json every 300 ms and reconciles: a new feed gets a worker thread, a removed or
 //! paused one is stopped, a changed one restarts. Workers restart crashed commands with backoff and
-//! rate-limit writes (feed.rs). With no unpaused feed left it exits after a short grace, so nothing
-//! runs when nothing is registered. The CLI starts it on demand (`ensure`), or a systemd user unit
+//! rate-limit writes (feed.rs). With no unpaused feed and no unpaused handler left it exits after a
+//! short grace, so nothing runs when nothing is registered (`--stay`, which the installed unit
+//! passes, keeps it up). The CLI starts it on demand (`ensure`), or a systemd user unit
 //! from units/ runs it.
 //!
 //! Hooks never talk to the daemon: they only read files, so a busy or wedged feed can't slow a turn.
@@ -84,6 +87,29 @@ pub fn ensure(st: &Store) -> Result<Option<u32>, String> {
     Ok(Some(ch.id()))
 }
 
+/// Start the daemon if a handler is registered and none is running: called after an event is
+/// appended, so a key in the pane or a `margin emit` from cron is dispatched without anyone
+/// having started anything. Cheap when there is nothing to do: one small file read.
+pub fn wake(st: &Store) {
+    if !crate::handler::Registry::path(&st.dir()).exists() {
+        return;
+    }
+    if crate::handler::Registry::load(&st.dir()).handlers.iter().any(|h| !h.paused) {
+        let _ = ensure(st);
+    }
+}
+
+/// Since when the running daemon has been up: its pid file's time.
+pub fn since(st: &Store) -> Option<f64> {
+    std::fs::metadata(st.dir().join("daemon.pid")).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+}
+
+struct RunningHandler {
+    h: crate::handler::Handler,
+    ctl: Arc<Ctl>,
+    join: JoinHandle<()>,
+}
+
 struct Running {
     feed: Feed,
     ctl: Arc<Ctl>,
@@ -117,7 +143,9 @@ impl Seen {
     }
 }
 
-pub fn run(st: Store) -> Result<(), String> {
+/// `stay`: keep running with nothing registered (a systemd unit's daemon: exiting when idle
+/// would only make the unit restart it).
+pub fn run(st: Store, stay: bool) -> Result<(), String> {
     let Some(lock) = try_lock(&st) else {
         eprintln!("margin daemon: already running for {}", st.project);
         return Ok(());
@@ -127,6 +155,9 @@ pub fn run(st: Store) -> Result<(), String> {
     trap_signals();
     eprintln!("{} margin daemon {} up for {}", crate::util::now_rfc3339(), std::process::id(), st.project);
     let mut workers: HashMap<String, Running> = HashMap::new();
+    let mut handlers: HashMap<String, RunningHandler> = HashMap::new();
+    // the last handler registry that parsed stays in force, as the feeds' does
+    let (mut hreg, mut herr) = (crate::handler::Registry::default(), String::new());
     let mut idle_since: Option<f64> = None;
     let stop = |w: &Running, why: &str| w.ctl.stop(why);
     let mut seen = Seen::default();
@@ -173,7 +204,55 @@ pub fn run(st: Store) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             workers.insert(f.name.clone(), Running { feed: f.clone(), ctl, join });
         }
-        if workers.is_empty() {
+        // the handlers: the same reconcile, against handlers.json
+        match crate::handler::Registry::load_strict(&st.dir()) {
+            Ok(r) => {
+                hreg = r;
+                herr.clear();
+            }
+            Err(e) if e != herr => {
+                eprintln!("{} margin daemon: {e}; keeping the last good registry ({} handlers)", crate::util::now_rfc3339(), hreg.handlers.len());
+                herr = e;
+            }
+            Err(_) => {}
+        }
+        let mut done = Vec::new();
+        for (name, w) in &handlers {
+            match hreg.get(name) {
+                None => {
+                    w.ctl.stop("removed");
+                    done.push(name.clone());
+                }
+                Some(h) if h.paused => {
+                    w.ctl.stop("paused");
+                    done.push(name.clone());
+                }
+                Some(h) if *h != w.h => {
+                    w.ctl.stop("restart");
+                    done.push(name.clone());
+                }
+                _ if w.join.is_finished() => done.push(name.clone()),
+                _ => {}
+            }
+        }
+        for n in done {
+            if let Some(w) = handlers.remove(&n) {
+                let _ = w.join.join();
+            }
+        }
+        for h in hreg.handlers.iter().filter(|h| !h.paused) {
+            if handlers.contains_key(&h.name) {
+                continue;
+            }
+            let ctl = Arc::new(Ctl::default());
+            let (st2, h2, c2) = (Store::new(st.home.clone(), st.project.clone()), h.clone(), ctl.clone());
+            let join = std::thread::Builder::new()
+                .name(format!("handler-{}", h.name))
+                .spawn(move || crate::handler::Worker::new(st2, h2, c2, false).run())
+                .map_err(|e| e.to_string())?;
+            handlers.insert(h.name.clone(), RunningHandler { h: h.clone(), ctl, join });
+        }
+        if workers.is_empty() && handlers.is_empty() && !stay {
             let now = crate::util::epoch_now();
             // a short grace absorbs `feed rm x` followed at once by `feed add x`
             if now - *idle_since.get_or_insert(now) > 1.5 {
@@ -182,10 +261,11 @@ pub fn run(st: Store) -> Result<(), String> {
                 // starts a new one. Without this, an add landing as we exit would never run.
                 let _l = st.lock().map_err(|e| e.to_string())?;
                 // a registry that won't parse is not "no feeds": stay up until it reads again
-                if Registry::load_strict(&st.dir()).map(|r| r.feeds.iter().all(|f| f.paused)).unwrap_or(false) {
+                let no_handlers = crate::handler::Registry::load_strict(&st.dir()).map(|r| r.handlers.iter().all(|h| h.paused)).unwrap_or(false);
+                if no_handlers && Registry::load_strict(&st.dir()).map(|r| r.feeds.iter().all(|f| f.paused)).unwrap_or(false) {
                     let _ = std::fs::remove_file(&pid_path);
                     drop(lock);
-                    eprintln!("{} margin daemon {} down: no feeds left", crate::util::now_rfc3339(), std::process::id());
+                    eprintln!("{} margin daemon {} down: no feeds or handlers left", crate::util::now_rfc3339(), std::process::id());
                     return Ok(());
                 }
                 idle_since = None;
@@ -195,8 +275,16 @@ pub fn run(st: Store) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
+    // signalled: stop dispatching, stop every running command (its whole process group: TERM,
+    // a grace period, KILL), record each as stopped, not failed
     for w in workers.values() {
         stop(w, "stopped");
+    }
+    for w in handlers.values() {
+        w.ctl.stop("stopped");
+    }
+    for (_, w) in handlers.drain() {
+        let _ = w.join.join();
     }
     for (_, w) in workers.drain() {
         let _ = w.join.join();

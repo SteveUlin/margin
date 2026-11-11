@@ -291,6 +291,7 @@ impl Live {
         self.activity = crate::link::activity_for(&self.st, &self.art);
         self.scene.recap = crate::recap::for_pane(&self.st, &self.art);
         self.scene.stopped = self.st.stopped();
+        self.scene.stale = crate::owner::stale_on(&self.st, &self.art, epoch_now());
         self.scene.agents = crate::agents::for_pane(&self.st, &self.art);
         self.toasts = crate::toast::load(&self.st, &self.art);
         self.delivered = self.st.delivered_max();
@@ -1003,7 +1004,8 @@ impl Pane {
                     title,
                     unseen: if i == self.active { 0 } else { l.scene.unseen_count() },
                     needs: needs || waiting,
-                    failed: failed || l.toasts.iter().any(|t| t.level == "error"),
+                    // an overdue writer of the board is a failure of the board
+                    failed: failed || !l.scene.stale.is_empty() || l.toasts.iter().any(|t| t.level == "error"),
                 }
             })
             .collect()
@@ -1174,6 +1176,10 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         let lv = &mut pn.tabs[active];
         lv.scene.tabs = infos;
         lv.scene.tab = active;
+        // an owner goes stale by the clock alone: looked at on every frame, with a wake-up
+        // (below) for the moment the next one would
+        lv.scene.stale = crate::owner::stale_on(&lv.st, &lv.art, wall);
+        let next_stale = crate::owner::next_stale(&lv.st, &lv.art, wall);
         // toasts: start each one's clock when the pane is first on screen, drop the ones run out
         if !lv.toasts.is_empty() {
             if lv.toasts.iter().any(|x| !lv.toast_seen.contains_key(&x.id)) && t - toast_vis_t >= 1.0 {
@@ -1308,6 +1314,9 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
 
         // seen: an unseen change waits until the pane is actually on screen for 1.5 s
         let mut wake = frame.wake;
+        if let Some(at) = next_stale {
+            wake.at(t + (at - wall).max(0.0) + 0.5);
+        }
         // the tab mark and the phone push: a wake only for a look that is owed (attention.rs);
         // an idle Claude with nothing else pending asks for none. Across every tab's sessions
         let acts = pn.activity();
