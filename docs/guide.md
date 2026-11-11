@@ -461,7 +461,7 @@ Environment: `MARGIN_DIFFT` names difftastic outright; `MARGIN_HOST`, `MARGIN_MO
 
 ```text
 ~/.local/state/margin/<project>/
-  events.jsonl  .lock  delivered/<session>
+  events.jsonl (+ events.1.jsonl, events.seq)  .lock  cursors/<name>  delivered/<session>
   feeds.json  feeds/<name>.log  daemon.lock
   <artifact>/doc.json  state.json  history.jsonl
             view/<pane>.json

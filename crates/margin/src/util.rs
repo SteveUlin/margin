@@ -125,6 +125,30 @@ pub fn slug(path: &str) -> String {
     }
 }
 
+/// Shell-style match of a whole string: `*` is any run of characters, `?` any one. Event names
+/// are matched with it (`--name 'reviews.*'`, a job's `--on`).
+pub fn glob_match(pat: &str, s: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pat.chars().collect(), s.chars().collect());
+    let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);
+    while j < t.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == t[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if let Some(st) = star {
+            i = st + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    p[i..].iter().all(|c| *c == '*')
+}
+
 pub fn fnv64(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in data {
@@ -181,6 +205,9 @@ mod tests {
         assert_eq!(parse_duration("5"), Some(5.0));
         assert_eq!(ago(130.0), "2m ago");
         assert!(valid_id("Q1") && valid_id("pr-412") && !valid_id("a.b") && !valid_id(""));
+        for (p, s, want) in [("reviews.*", "reviews.open", true), ("reviews.*", "reviews", false), ("*", "", true), ("*.open", "reviews.open", true), ("job.*", "jobs.x", false), ("a?c", "abc", true), ("a?c", "ac", false), ("reviews.open", "reviews.open", true), ("*o*n", "reviews.open", true), ("", "x", false)] {
+            assert_eq!(glob_match(p, s), want, "{p} {s}");
+        }
     }
 }
 

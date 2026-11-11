@@ -71,7 +71,9 @@ content (Claude): creating and changing are different commands, for an artifact 
   margin show <art> [--json]    margin ls [--json]    margin gc
 
 return channel:
-  margin events [--unread --session S] [--artifact A] [--since N] [--kind K] [--all] [--json]
+  margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--follow] [--json]   the event log
+  margin emit <name> [JSON|-] [--board B] [--id ID]                 append a named event (prints its seq)
+  margin act <board> <id> <action> [VALUE]                          what an action's key does, from the CLI
   margin wait <art>.<id> [--timeout 10m]                          block until sulin decides (exit 2 on timeout)
   margin hook start|prompt|pre-tool|post-tool|stop|permission|notify              Claude Code hook (stdin JSON)
   margin hook rewake [--timeout 58m]                              the Stop hook that waits: exit 2 wakes an idle Claude
@@ -150,7 +152,9 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "show", help: "margin show <art> [--json]\n  what the person sees: content merged with their decisions\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "ls", help: "margin ls [--json]\n  this project's artifacts (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
     Cmd { name: "gc", help: "margin gc [--days N]\n  archive artifacts untouched for N days (default: config archive_days)\n", flags: &["--days"], max_pos: Some(0) },
-    Cmd { name: "events", help: "margin events [--unread [--session S]] [--artifact A] [--since N] [--kind K] [--all] [--json]\n  sulin's decisions, in local time (with the date when not today); --all adds everyone's\n  events and the passive kinds (view, seen, fold...), --kind K lists one kind\n", flags: &["--unread", "--session", "--artifact", "--since", "--kind", "--all", "--json"], max_pos: Some(0) },
+    Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
+    Cmd { name: "emit", help: "margin emit <name> [JSON | -] [--board B] [--id ID]\n  append a named event to the project's log and print its seq. Anything can call it: cron, CI,\n  a script, a job. <name> is letters, digits and . _ - : (deploy.finished, ci.red); the value is one\n  JSON value (- reads it from stdin; text that is not JSON is an error; none: null)\n  --board B   the board it is about (must exist); --id ID a block in it\n  The event is logged as by you (or --by NAME), via emit. margin events --name 'deploy.*' reads\n  them, and a job registered with --on 'deploy.*' is run for them (margin help jobs)\n  The project comes from the working directory: from cron or another directory pass --project NAME\n    margin emit deploy.finished '{\"sha\":\"abc123\",\"ok\":true}' --project boards\n    jq -c .summary report.json | margin emit ci.report - --board ci\n", flags: &["--board", "--id"], max_pos: Some(2) },
+    Cmd { name: "act", help: "margin act <board> <id> <action> [VALUE]\n  what an action's key does in the pane, from the command line: append the event\n  <board>.<action> with id <id> and a snapshot of that block (a table row's cells, target and\n  detail; any other block's fields), and print its seq. <id> - is the board itself. VALUE (JSON,\n  or text) rides along as value.arg. A job registered with --on '<board>.<action>' handles it\n  (margin help jobs). Works on feed-owned rows: it changes no content\n  refused, with exit 1 and the reason: a missing board or id, an action the block does not offer\n    margin act reviews pr-4812 open\n", flags: &["--json"], max_pos: Some(4) },
     Cmd { name: "wait", help: "margin wait <art>.<id> [--timeout 10m]\n  block until sulin decides and print the decision; exit 2 on timeout\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "doc", help: "margin doc <art> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
@@ -174,6 +178,39 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data]\n  print one: the artifact (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
+
+const EVENTS_HELP: &str = "margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--kind K] [--artifact A]
+              [--follow] [--all] [--json]
+margin events --cursor NAME --commit SEQ
+margin events --unread [--session S]
+  the project's event log. Without a filter: sulin's decisions and actions, in local time (with
+  the date when not today)
+  --name GLOB    events whose kind matches (quote it: 'reviews.*'), whoever made them
+  --kind K       one kind, exactly
+  --all          everyone's events and the passive kinds too (view, seen, fold...)
+  --artifact A   one board's
+  --json         one JSON object per line: {v, seq, at, artifact, id, kind, value, by, via, rev}
+  --since N      the events after seq N (--since 0: everything still kept)
+  --follow       keep running and print each new event as it arrives; ctrl-c or a closed
+                 stdout ends it with exit 0
+  --cursor NAME  a named position in the log (letters, digits, - and _). Start after it, and
+                 move it past each event as that event is printed. A cursor used for the first
+                 time starts at the END of the log: it hears what happens from now on. With
+                 --since N the read starts after N instead (--since 0 replays), and the cursor
+                 then moves as usual
+  --no-commit    read from the cursor without moving it
+  --commit SEQ   move the cursor to SEQ and print nothing else
+  Delivery: a cursor that moves as events are printed is at-most-once in a pipeline (the event
+  counts as taken once it is written to the pipe; if the reader dies before acting on it, it is
+  not printed again). For at-least-once, read with --no-commit and commit each event after
+  handling it; the handler must then be safe to run twice on one event (dedupe on seq):
+    margin events --follow --cursor mine --json | while read -r e; do handle \"$e\"; done
+    margin events --follow --cursor mine --no-commit --json | while read -r e; do
+      handle \"$e\" && margin events --cursor mine --commit \"$(jq .seq <<<\"$e\")\"; done
+  A registered job does the second for you (margin help jobs). The log rotates past a few MB and
+  keeps two older generations; seq goes on counting, so a cursor stays valid across a rotation
+  --unread       what a Claude session has not been handed yet (--session S, default this one)
+";
 
 const RENDER_HELP: &str = "margin render <art> [<art>...] [--width W] [--height H] [--section ID]... [--focus ID] [--focused]
               [--detail] [--tab ART] [--ansi] [--at SECS] [--motion on|off] [--pane P]
@@ -308,7 +345,7 @@ struct Args {
 }
 
 const BOOL_FLAGS: &[&str] = &[
-    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes",
+    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit",
 ];
 
 impl Args {
@@ -563,7 +600,7 @@ fn export_store_flags(a: &Args) {
 /// pane must restore the terminal on its way out, `select` falls back when a clipboard tool
 /// exits early, and the daemon outlives whoever started it.
 fn quiet_on_closed_stdout(cmd: &str) {
-    if !matches!(cmd, "view" | "select" | "daemon") {
+    if !matches!(cmd, "view" | "select" | "daemon" | "events") {
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }
 }
@@ -926,35 +963,37 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 println!("archived {m}");
             }
         }
-        "events" => {
+        "events" => events_cmd(&store(a), a)?,
+        "emit" => {
             let st = store(a);
-            let mut evs = if a.has("--unread") {
-                let sess = a.get("--session").map(String::from).or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok()).unwrap_or("default".into());
-                hook::unread(&st, &sess)
-            } else {
-                st.events()
-            };
-            if let Some(art) = a.get("--artifact") {
-                evs.retain(|e| e.artifact == art);
-            }
-            if let Some(s) = a.get("--since").and_then(|s| s.parse::<u64>().ok()) {
-                evs.retain(|e| e.seq > s);
-            }
-            if let Some(k) = a.get("--kind") {
-                evs.retain(|e| e.kind == k);
-            }
-            // by default the person's decisions only: the passive kinds (view, seen, fold…) and
-            // other writers' events buried them (2026-11-10)
-            if !a.has("--all") && a.get("--kind").is_none() {
-                evs.retain(|e| who::is_human(&e.by) && !store::is_passive(&e.kind));
-            }
-            let now = util::epoch_now();
-            for e in &evs {
-                if a.has("--json") {
-                    println!("{}", serde_json::to_string(e).unwrap());
-                } else {
-                    println!("{:>4} {} {}", e.seq, local_stamp(&e.at, now), who::say(&hook::describe(&st, e)));
+            let name = a.pos(0, "name")?;
+            let value = match a.pos.get(1).map(String::as_str) {
+                None => Value::Null,
+                Some("-") => {
+                    let t = stdin();
+                    serde_json::from_str(t.trim()).map_err(|e| format!("stdin is not one JSON value ({e})"))?
                 }
+                Some(raw) => serde_json::from_str(raw).map_err(|e| format!("the value is not JSON ({e}): {}; quote text as '\"text\"'", vellum::text::truncate(raw, 60)))?,
+            };
+            if name.starts_with("job.") {
+                return Err("event names starting with job. are the runner's own (job.failed)".into());
+            }
+            for f in ["--board", "--id"] {
+                if a.has(f) && a.get(f).is_none() {
+                    return Err(format!("{f} needs a value"));
+                }
+            }
+            let ev = st.emit(name, a.get("--board").unwrap_or(""), a.get("--id").unwrap_or(""), value, &st.author, "emit")?;
+            println!("{}", ev.seq);
+        }
+        "act" => {
+            let st = store(a);
+            let (board, id, action) = (a.pos(0, "board")?, a.pos(1, "id")?, a.pos(2, "action")?);
+            let ev = st.act(board, id, action, a.pos.get(3).map(|v| json_or_str(v)), &st.author, "act")?;
+            if a.has("--json") {
+                println!("{}", serde_json::to_string(&ev).unwrap());
+            } else {
+                println!("{}", ev.seq);
             }
         }
         "wait" => {
@@ -1282,7 +1321,12 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 select::Outcome::Applied(e) => select::log_line(&format!("  applied {} {} {}", e.kind, e.id, e.value)),
                 select::Outcome::Opened(u) => select::log_line(&format!("  opened {u}")),
                 select::Outcome::Copied(how) => select::log_line(&format!("  copied via {how}")),
-                select::Outcome::Ignored(e) => select::log_line(&format!("  ignored: {e}")),
+                // refused: say why and exit non-zero (it used to exit 0 with the reason only
+                // in select.log, so a script could not tell a refusal from a success)
+                select::Outcome::Ignored(e) => {
+                    select::log_line(&format!("  ignored: {e}"));
+                    return Err(e);
+                }
             }
         }
         "session" => {
@@ -1353,6 +1397,92 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         c => return Err(format!("unknown command {c:?}; margin --help")),
     }
     Ok(())
+}
+
+/// Wait up to `ms` for nothing in particular: the sleep of a `--follow` loop. False when it is
+/// time to stop: a signal arrived (ctrl-c), or stdout is a pipe whose reader has gone.
+fn follow_wait(ms: i32) -> bool {
+    let mut p = libc::pollfd { fd: 1, events: 0, revents: 0 };
+    let n = unsafe { libc::poll(&mut p, 1, ms) };
+    !(daemon::exiting() || (n > 0 && p.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0))
+}
+
+/// `margin events`: read the log, from a seq or a named cursor, once or following.
+fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
+    use std::io::Write;
+    for f in ["--cursor", "--since", "--name", "--kind", "--artifact", "--commit"] {
+        if a.has(f) && a.get(f).is_none() {
+            return Err(format!("{f} needs a value"));
+        }
+    }
+    let cursor = a.get("--cursor");
+    if let Some(c) = cursor.filter(|c| !util::valid_id(c)) {
+        return Err(format!("bad cursor name {c:?}: letters, digits, - and _"));
+    }
+    let seq = |f: &str| a.get(f).map(|s| s.parse::<u64>().map_err(|_| format!("bad {f} {s:?}: an event seq (a whole number)"))).transpose();
+    if let Some(to) = seq("--commit")? {
+        let c = cursor.ok_or("--commit moves a cursor: margin events --cursor NAME --commit SEQ")?;
+        st.set_cursor(c, to);
+        return Ok(());
+    }
+    let (unread, follow) = (a.has("--unread"), a.has("--follow"));
+    if unread && (cursor.is_some() || follow) {
+        return Err("--unread reads a Claude session's own cursor: it takes neither --cursor nor --follow".into());
+    }
+    if a.has("--no-commit") && cursor.is_none() {
+        return Err("--no-commit goes with --cursor NAME".into());
+    }
+    let commit = cursor.filter(|_| !a.has("--no-commit"));
+    // a cursor is created on first use, at the end of the log, whether or not this read commits
+    let at = cursor.map(|c| st.cursor_or_create(c));
+    let mut from = seq("--since")?.or(at).unwrap_or(0);
+    let keep = |e: &store::Event| {
+        a.get("--artifact").map(|x| e.artifact == x).unwrap_or(true)
+            && a.get("--kind").map(|k| e.kind == k).unwrap_or(true)
+            && a.get("--name").map(|g| util::glob_match(g, &e.kind)).unwrap_or(true)
+            // by default the person's decisions only: the passive kinds (view, seen, fold…) and
+            // other writers' events buried them (2026-11-10)
+            && (a.has("--all") || a.has("--kind") || a.has("--name") || (who::is_human(&e.by) && !store::is_passive(&e.kind)))
+    };
+    if follow {
+        daemon::trap_signals();
+    }
+    let out = std::io::stdout();
+    loop {
+        let evs = if unread {
+            let sess = a.get("--session").map(String::from).or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok()).unwrap_or("default".into());
+            hook::unread(st, &sess).into_iter().filter(|e| e.seq > from).collect()
+        } else {
+            st.events_since(from)
+        };
+        let now = util::epoch_now();
+        for e in &evs {
+            from = from.max(e.seq);
+            if keep(e) {
+                let line = if a.has("--json") { serde_json::to_string(e).unwrap() } else { format!("{:>4} {} {}", e.seq, local_stamp(&e.at, now), who::say(&hook::describe(st, e))) };
+                let mut o = out.lock();
+                // a reader that has gone ends the command, quietly, before the cursor moves
+                if writeln!(o, "{line}").and_then(|_| o.flush()).is_err() {
+                    return Ok(());
+                }
+                if let Some(c) = commit {
+                    st.set_cursor(c, e.seq);
+                }
+            }
+        }
+        // past the events the filters left out too, so they are not read again
+        if let (Some(c), Some(_)) = (commit, evs.last()) {
+            st.set_cursor(c, from);
+        }
+        if !follow {
+            return Ok(());
+        }
+        while st.last_seq() <= from {
+            if !follow_wait(200) {
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// `margin rm <art>`: what would go, and with `yes` the removal. The store never deletes

@@ -2,9 +2,13 @@
 //!
 //! ```text
 //! $MARGIN_HOME (~/.local/state/margin)/<project>/
-//!   events.jsonl          append-only, every artifact
+//!   events.jsonl          append-only, every artifact; past EVENTS_CAP it rotates to
+//!                         events.1.jsonl, events.2.jsonl (seq goes on counting across them)
+//!   events.seq            the last seq handed out and the log's length then (the append's fast path)
 //!   .lock                 flock: every write takes it
-//!   delivered/<session>   last event seq handed to that Claude session
+//!   cursors/<name>        a named position in the log: the last seq a consumer has taken
+//!                         (`margin events --cursor`, a job's `job.<name>`)
+//!   delivered/<session>   the same thing for a Claude session: the last seq its hooks handed it
 //!   feeds.json            registered feeds (feed.rs)   feeds/<name>.log|.status.json   daemon.lock|.pid
 //!   <artifact>/doc.json   content (Claude)        state.json  decisions (sulin)
 //!              history.jsonl  every old revision  view/<pane>.json  folds, focus, scroll (the pane)
@@ -99,6 +103,57 @@ pub struct Event {
 /// Passive kinds are logged but never pushed into the prompt (design §2).
 pub fn is_passive(kind: &str) -> bool {
     matches!(kind, "fold" | "unfold" | "seen" | "open" | "close" | "focus" | "view" | "feed" | "toasttest")
+}
+
+/// Is this one of the person's decisions in a pane (a tick, a pick, a strike…): what the hooks
+/// hand a Claude session as binding? Not a passive kind, and not a named event someone appended
+/// with `margin emit`: that is for whoever listens for its name, never an instruction to Claude.
+pub fn is_decision(e: &Event) -> bool {
+    crate::who::is_human(&e.by) && !is_passive(&e.kind) && e.via != "emit"
+}
+
+/// The log rotates once events.jsonl is this long: the append and a read of what is new stay
+/// cheap however long the project lives. `$MARGIN_EVENTS_CAP` (bytes) overrides it.
+pub const EVENTS_CAP: u64 = 4 * 1024 * 1024;
+/// Rotated generations kept beside the live file (events.1.jsonl is the newest of them).
+pub const EVENTS_KEEP: usize = 2;
+
+fn events_cap() -> u64 {
+    std::env::var("MARGIN_EVENTS_CAP").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(EVENTS_CAP)
+}
+
+/// A named event's name (`margin emit`, a job's emit line, an action): letters, digits and
+/// `. _ - :`, starting with a letter or digit, so it is one shell word and one glob target.
+pub fn valid_event_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && s.starts_with(|c: char| c.is_ascii_alphanumeric()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
+}
+
+/// What an action's event carries about the block it was pressed on: a table row's `cells`,
+/// `target` and `detail`; any other block's fields. Never its children or its `actions`.
+pub fn snapshot(b: &crate::doc::Block) -> Value {
+    let keep = |k: &str| if b.kind == "tr" { matches!(k, "cells" | "target" | "detail") } else { k != "actions" };
+    Value::Object(b.f.iter().filter(|(k, _)| keep(k)).map(|(k, v)| (k.clone(), v.clone())).collect())
+}
+
+fn parse_events(bytes: &[u8]) -> Vec<Event> {
+    // lossy: a torn line of bad UTF-8 must not read as an empty log
+    String::from_utf8_lossy(bytes).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+fn read_cursor(p: &Path) -> Option<u64> {
+    fs::read_to_string(p).ok().and_then(|s| s.trim().parse().ok())
+}
+
+/// Write a cursor down for the first time, at `at`. `create_new`, not a rename: it must never
+/// replace a cursor a concurrent consumer just moved (an empty file left by a crash in between
+/// reads as "no cursor", i.e. the same starting point).
+fn create_cursor(p: &Path, at: u64) {
+    if p.exists() || p.parent().map(|d| fs::create_dir_all(d).is_err()).unwrap_or(true) {
+        return;
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().write(true).create_new(true).open(p) {
+        let _ = f.write_all(at.to_string().as_bytes());
+    }
 }
 
 pub struct Store {
@@ -317,6 +372,18 @@ fn read_json_strict<T: for<'a> Deserialize<'a> + Default>(p: &Path) -> Result<T,
     serde_json::from_str(&s).map_err(|e| format!("{}: {e}; nothing was written (fix the file or move it aside)", p.display()))
 }
 
+/// A session id or cursor name as a file name (the same mapping link.rs, wake.rs and recap.rs
+/// use), with `.` kept for the runner's own cursors (`job.<name>`).
+fn cursor_key(name: &str) -> String {
+    let k: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+    // never `.`, `..` or a hidden file
+    if k.starts_with('.') || k.is_empty() {
+        format!("_{k}")
+    } else {
+        k
+    }
+}
+
 /// A session id as a file name (the same mapping link.rs, wake.rs and recap.rs use).
 fn session_key(session: &str) -> String {
     session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
@@ -349,6 +416,17 @@ impl Store {
     }
     pub fn events_path(&self) -> PathBuf {
         self.dir().join("events.jsonl")
+    }
+    /// Generation `n` of the log: 0 is the live file, 1 the newest rotated one.
+    fn events_gen(&self, n: usize) -> PathBuf {
+        if n == 0 {
+            self.events_path()
+        } else {
+            self.dir().join(format!("events.{n}.jsonl"))
+        }
+    }
+    fn seq_path(&self) -> PathBuf {
+        self.dir().join("events.seq")
     }
 
     pub fn lock(&self) -> std::io::Result<Lock> {
@@ -830,54 +908,163 @@ impl Store {
         self.append_event_locked(a, id, kind, value, crate::who::HUMAN, via, rev)
     }
 
-    /// A feed's lifecycle event (start, exit, restart, stop), `by: feed:<name>`. Passive: it never
-    /// reaches Claude's prompt; `margin events --kind feed` lists them.
-    pub fn log_feed(&self, a: &str, feed: &str, value: Value) -> Result<Event, String> {
+    /// `margin emit`: append a named event from outside the pane. `board` and `id` say what it
+    /// is about (both may be empty); a board that is named must exist.
+    pub fn emit(&self, name: &str, board: &str, id: &str, value: Value, by: &str, via: &str) -> Result<Event, String> {
+        if !valid_event_name(name) {
+            return Err(format!("bad event name {name:?}: letters, digits and . _ - : (start with a letter or digit)"));
+        }
         let _l = self.lock().map_err(|e| e.to_string())?;
-        let rev = self.load(a).map(|d| d.rev).unwrap_or(0);
-        self.append_event_locked(a, "", "feed", value, &format!("feed:{feed}"), "daemon", rev)
+        let rev = if board.is_empty() { 0 } else { self.load(board)?.rev };
+        self.append_event_locked(board, id, name, value, by, via, rev)
+    }
+
+    /// An action on a block (`margin act`, an action's key in the pane): append the event
+    /// `<board>.<action>` carrying the block's id and a snapshot of it. It changes no content, so
+    /// feed ownership does not stop it: a feed keeps a row current, the person acts on it.
+    /// `id` empty or `-`: the board itself. `arg`: the CLI's optional VALUE, as `value.arg`.
+    pub fn act(&self, board: &str, id: &str, action: &str, arg: Option<Value>, by: &str, via: &str) -> Result<Event, String> {
+        if !crate::util::valid_id(action) {
+            return Err(format!("bad action name {action:?}: letters, digits, - and _"));
+        }
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        let d = self.load(board)?;
+        let id = if id == "-" { "" } else { id };
+        let mut value = match id {
+            "" => json!({}),
+            _ => snapshot(d.find(id).ok_or_else(|| format!("no component {id:?} in {board}; margin show {board}"))?),
+        };
+        if let Some(a) = arg {
+            value["arg"] = a;
+        }
+        self.append_event_locked(board, id, &format!("{board}.{action}"), value, by, via, d.rev)
+    }
+
+    /// The sidecar: (last seq handed out, the live file's length right after that append).
+    fn seq_file(&self) -> Option<(u64, u64)> {
+        let s = fs::read_to_string(self.seq_path()).ok()?;
+        let mut it = s.split_whitespace().map(|x| x.parse::<u64>().ok());
+        Some((it.next()??, it.next()??))
+    }
+
+    /// The highest seq on any parseable line of any generation: the slow path, for a log the
+    /// sidecar does not describe (none yet, a crash mid-append, a hand edit). A torn or edited
+    /// line is skipped and never lowers what is handed out next.
+    fn scan_seq(&self) -> u64 {
+        (0..=EVENTS_KEEP).flat_map(|n| parse_events(&fs::read(self.events_gen(n)).unwrap_or_default())).map(|e| e.seq).max().unwrap_or(0)
     }
 
     fn append_event_locked(&self, a: &str, id: &str, kind: &str, value: Value, by: &str, via: &str, rev: u64) -> Result<Event, String> {
-        let seq = self.last_seq() + 1;
-        let ev = Event { v: 1, seq, at: now_rfc3339(), artifact: a.into(), id: id.into(), kind: kind.into(), value, by: by.into(), via: via.into(), rev };
+        let path = self.events_path();
+        let mut len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let side = self.seq_file();
+        // the sidecar is trusted only while the log still ends where it says: then nothing was
+        // appended, torn or edited since, and the whole file need not be read
+        let trusted = side.map(|(_, l)| l == len).unwrap_or(false);
+        let last = match side {
+            Some((s, _)) if trusted => s,
+            _ => self.scan_seq().max(side.map(|(s, _)| s).unwrap_or(0)),
+        };
+        let ev = Event { v: 1, seq: last + 1, at: now_rfc3339(), artifact: a.into(), id: id.into(), kind: kind.into(), value, by: by.into(), via: via.into(), rev };
         let mut line = serde_json::to_string(&ev).unwrap() + "\n";
-        // a crash mid-append leaves a torn last line: end it first, or this event would join it,
-        // read as garbage too, and have its seq handed out again
-        if fs::read(self.events_path()).map(|b| b.last().map(|c| *c != b'\n').unwrap_or(false)).unwrap_or(false) {
+        if len >= events_cap() {
+            self.rotate_events_locked()?;
+            len = 0;
+        } else if !trusted && len > 0 && !ends_with_newline(&path) {
+            // a crash mid-append leaves a torn last line: end it first, or this event would join
+            // it, read as garbage too, and have its seq handed out again
             line.insert(0, '\n');
         }
-        let mut f = fs::OpenOptions::new().create(true).append(true).open(self.events_path()).map_err(|e| e.to_string())?;
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
         // one write, so a line is whole or absent short of a crash inside the call
         f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        // after the line: a crash between the two leaves a sidecar that no longer matches the
+        // length, which the next append takes as "scan"
+        let _ = fs::write(self.seq_path().with_extension("tmp"), format!("{} {}", ev.seq, len + line.len() as u64)).and_then(|_| fs::rename(self.seq_path().with_extension("tmp"), self.seq_path()));
         Ok(ev)
     }
 
+    /// events.jsonl becomes events.1.jsonl, the older generations move up one, and the one past
+    /// EVENTS_KEEP goes. Seq goes on counting (the sidecar keeps it), so a cursor is a position
+    /// in the whole log and stays valid; a cursor older than every kept generation has lost the
+    /// events in between.
+    fn rotate_events_locked(&self) -> Result<(), String> {
+        let _ = fs::remove_file(self.events_gen(EVENTS_KEEP));
+        for n in (0..EVENTS_KEEP).rev() {
+            if self.events_gen(n).exists() {
+                fs::rename(self.events_gen(n), self.events_gen(n + 1)).map_err(|e| format!("rotate events: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every event still kept, oldest first (the rotated generations, then the live file).
     pub fn events(&self) -> Vec<Event> {
-        String::from_utf8_lossy(&fs::read(self.events_path()).unwrap_or_default()).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+        self.events_since(0)
     }
 
+    /// The events after `since`, oldest first. Reads the live file, and an older generation only
+    /// when the live one starts after `since` (a cursor from before a rotation).
+    pub fn events_since(&self, since: u64) -> Vec<Event> {
+        let mut gens: Vec<Vec<Event>> = Vec::new();
+        for n in 0..=EVENTS_KEEP {
+            // a missing generation is not the end: the live file is absent right after a rotation
+            let Ok(bytes) = fs::read(self.events_gen(n)) else { continue };
+            let evs = parse_events(&bytes);
+            let covered = evs.first().map(|e| e.seq <= since + 1).unwrap_or(false);
+            gens.push(evs);
+            if covered {
+                break;
+            }
+        }
+        let mut out: Vec<Event> = gens.into_iter().rev().flatten().filter(|e| e.seq > since).collect();
+        // a rotation between two of the reads above shows one generation twice
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|e| seen.insert(e.seq));
+        out
+    }
+
+    /// The last seq handed out. Cheap: the sidecar, while the log still ends where it says.
     pub fn last_seq(&self) -> u64 {
-        // the file is small and append-only. The highest seq on any parseable line, not the last
-        // line's: a torn or hand-edited line is skipped and never lowers what's handed out next.
-        // Lossy, so a torn line of bad UTF-8 doesn't read as an empty log and restart seq at 1.
-        String::from_utf8_lossy(&fs::read(self.events_path()).unwrap_or_default())
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Event>(l).ok())
-            .map(|e| e.seq)
-            .max()
-            .unwrap_or(0)
+        let len = fs::metadata(self.events_path()).map(|m| m.len()).unwrap_or(0);
+        match self.seq_file() {
+            Some((s, l)) if l == len => s,
+            side => self.scan_seq().max(side.map(|(s, _)| s).unwrap_or(0)),
+        }
     }
 
-    /// The last event seq handed to `session`. A session margin hasn't seen starts where the
-    /// furthest-along session is: actions no session has read yet still reach it, while ones
-    /// already handed to another session aren't replayed as binding (a fresh session got four
-    /// old picks, two of them for one question, 2026-11-06).
+    /// A named cursor's position: the last seq its consumer has taken. None: never used.
+    pub fn cursor(&self, name: &str) -> Option<u64> {
+        read_cursor(&self.cursor_path(name))
+    }
+
+    pub fn cursor_path(&self, name: &str) -> PathBuf {
+        self.dir().join("cursors").join(cursor_key(name))
+    }
+
+    /// A cursor's position, creating it at the end of the log on first use: a new consumer
+    /// hears what happens from now on, not the project's history (`--since 0` replays).
+    pub fn cursor_or_create(&self, name: &str) -> u64 {
+        let p = self.cursor_path(name);
+        if let Some(n) = read_cursor(&p) {
+            return n;
+        }
+        let at = self.last_seq();
+        create_cursor(&p, at);
+        read_cursor(&p).unwrap_or(at)
+    }
+
+    pub fn set_cursor(&self, name: &str, seq: u64) {
+        let _ = write_atomic(&self.cursor_path(name), seq.to_string().as_bytes());
+    }
+
+    /// The last event seq handed to `session`: a cursor like any other, kept under `delivered/`
+    /// so `delivered_max` ("has Claude read it") counts sessions only. A session margin hasn't
+    /// seen starts where the furthest-along session is: actions no session has read yet still
+    /// reach it, while ones already handed to another session aren't replayed as binding (a
+    /// fresh session got four old picks, two of them for one question, 2026-11-06).
     pub fn delivered(&self, session: &str) -> u64 {
-        fs::read_to_string(self.delivered_path(session))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or_else(|| self.delivered_max())
+        read_cursor(&self.delivered_path(session)).unwrap_or_else(|| self.delivered_max())
     }
 
     fn delivered_path(&self, session: &str) -> PathBuf {
@@ -887,16 +1074,10 @@ impl Store {
     /// A hook's first sight of `session`: write its cursor down where `delivered` puts a new
     /// session. Without the file that fallback is taken afresh on every read, so it slides past
     /// whatever another session reads in the meantime and this one never hears it.
-    /// `create_new`, not a rename: it must never replace a cursor a concurrent hook just moved
-    /// (an empty file left by a crash in between reads as the fallback, i.e. the same value).
     pub fn first_seen(&self, session: &str) {
         let p = self.delivered_path(session);
-        if p.exists() || fs::create_dir_all(self.dir().join("delivered")).is_err() {
-            return;
-        }
-        let at = self.delivered_max();
-        if let Ok(mut f) = fs::OpenOptions::new().write(true).create_new(true).open(&p) {
-            let _ = f.write_all(at.to_string().as_bytes());
+        if !p.exists() {
+            create_cursor(&p, self.delivered_max());
         }
     }
 
@@ -939,7 +1120,7 @@ impl Store {
         fs::read_dir(self.dir().join("delivered"))
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
-                    .filter_map(|e| fs::read_to_string(e.path()).ok()?.trim().parse::<u64>().ok())
+                    .filter_map(|e| read_cursor(&e.path()))
                     .max()
                     .unwrap_or(0)
             })
@@ -998,6 +1179,12 @@ impl Store {
         }
         moved
     }
+}
+
+fn ends_with_newline(p: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut b = [0u8; 1];
+    fs::File::open(p).and_then(|mut f| f.seek(SeekFrom::End(-1)).and_then(|_| f.read_exact(&mut b))).map(|_| b[0] == b'\n').unwrap_or(true)
 }
 
 fn check_base(old: Option<&Doc>, base: Option<u64>) -> Result<(), String> {
@@ -1406,6 +1593,182 @@ pub mod tests {
         // a removed step's times go with it
         s.patch("plan", &[Op::Rm { id: "t1".into() }], None).unwrap();
         assert!(time("t1").is_null() && !time("t2").is_null());
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// `emit` appends a named event with the existing fields: the name is the kind, `by`/`via`
+    /// say who and how. A bad name or a board that isn't there is refused and logs nothing.
+    #[test]
+    fn emit_appends_a_named_event() {
+        let s = temp_store();
+        s.put(plan(), None).unwrap();
+        let e = s.emit("deploy.finished", "", "", json!({"ok": true}), "you", "emit").unwrap();
+        assert_eq!((e.seq, e.kind.as_str(), e.by.as_str(), e.via.as_str(), e.artifact.as_str()), (1, "deploy.finished", "you", "emit", ""));
+        let e = s.emit("ci.red", "plan", "t1", Value::Null, "cron", "emit").unwrap();
+        assert_eq!((e.seq, e.artifact.as_str(), e.id.as_str(), e.rev), (2, "plan", "t1", 1));
+        for bad in ["", "two words", "-x", "a/b", "a=b"] {
+            assert!(s.emit(bad, "", "", Value::Null, "you", "emit").unwrap_err().contains("bad event name"), "{bad}");
+        }
+        assert!(s.emit("x", "nope", "", Value::Null, "you", "emit").unwrap_err().contains("no artifact"));
+        assert_eq!(s.events().len(), 2);
+        // an emitted event is nobody's decision: the hooks never hand it to a Claude session
+        assert!(s.events().iter().all(|e| !is_decision(e)));
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// Concurrent appends from separate handles (as separate processes would): every seq is
+    /// handed out once, with no gap.
+    #[test]
+    fn concurrent_emits_get_distinct_consecutive_seqs() {
+        let s = temp_store();
+        let hs: Vec<_> = (0..16)
+            .map(|i| {
+                let st = Store::new(s.home.clone(), s.project.clone());
+                std::thread::spawn(move || st.emit("tick", "", "", json!(i), "you", "emit").unwrap().seq)
+            })
+            .collect();
+        let mut seqs: Vec<u64> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+        seqs.sort();
+        assert_eq!(seqs, (1..=16).collect::<Vec<u64>>());
+        assert_eq!(s.last_seq(), 16);
+        assert_eq!(s.events().iter().map(|e| e.seq).collect::<Vec<_>>(), (1..=16).collect::<Vec<u64>>());
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// The sidecar spares the append a read of the log, and is believed only while the log
+    /// still ends where it says: a log written behind its back is scanned again.
+    #[test]
+    fn the_seq_sidecar_is_checked_against_the_log() {
+        let s = temp_store();
+        for _ in 0..3 {
+            s.emit("a", "", "", Value::Null, "you", "emit").unwrap();
+        }
+        let len = fs::metadata(s.events_path()).unwrap().len();
+        assert_eq!(fs::read_to_string(s.seq_path()).unwrap(), format!("3 {len}"));
+        // a sidecar that lies about the seq but matches the length is the fast path: believed
+        fs::write(s.seq_path(), format!("40 {len}")).unwrap();
+        assert_eq!(s.emit("a", "", "", Value::Null, "you", "emit").unwrap().seq, 41);
+        // a line appended behind its back (an older binary, a hand edit): the log is scanned,
+        // and the seq never goes below what was handed out
+        let mut f = fs::OpenOptions::new().append(true).open(s.events_path()).unwrap();
+        f.write_all(b"{\"v\":1,\"seq\":90,\"at\":\"2026-11-10T10:00:00Z\",\"artifact\":\"\",\"id\":\"\",\"kind\":\"x\",\"by\":\"you\",\"via\":\"emit\"}\n").unwrap();
+        assert_eq!(s.last_seq(), 90);
+        assert_eq!(s.emit("a", "", "", Value::Null, "you", "emit").unwrap().seq, 91);
+        // no sidecar at all (a store from before it existed): scanned once, then written
+        fs::remove_file(s.seq_path()).unwrap();
+        assert_eq!(s.emit("a", "", "", Value::Null, "you", "emit").unwrap().seq, 92);
+        assert!(fs::read_to_string(s.seq_path()).unwrap().starts_with("92 "));
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// Rotation: the live file moves to events.1.jsonl, seq goes on counting, and a cursor on
+    /// either side of the rotation reads exactly what came after it.
+    #[test]
+    fn rotation_keeps_seq_and_cursors_valid() {
+        let s = temp_store();
+        for i in 0..5 {
+            s.emit("old", "", "", json!(i), "you", "emit").unwrap();
+        }
+        s.set_cursor("before", 3);
+        {
+            let _l = s.lock().unwrap();
+            s.rotate_events_locked().unwrap();
+        }
+        assert!(s.events_gen(1).exists() && !s.events_path().exists());
+        assert_eq!(s.last_seq(), 5, "the sidecar still knows, with no live file");
+        for i in 0..4 {
+            assert_eq!(s.emit("new", "", "", json!(i), "you", "emit").unwrap().seq, 6 + i);
+        }
+        s.set_cursor("after", 7);
+        let seqs = |c: &str| s.events_since(s.cursor(c).unwrap()).iter().map(|e| e.seq).collect::<Vec<_>>();
+        assert_eq!(seqs("before"), [4, 5, 6, 7, 8, 9], "a cursor from before the rotation reads across it");
+        assert_eq!(seqs("after"), [8, 9]);
+        assert_eq!(s.events().len(), 9);
+        // a second and third rotation: two generations are kept, the oldest goes, seq never restarts
+        for _ in 0..2 {
+            let _l = s.lock().unwrap();
+            s.rotate_events_locked().unwrap();
+        }
+        assert_eq!(s.emit("newest", "", "", Value::Null, "you", "emit").unwrap().seq, 10);
+        assert_eq!(s.events().iter().map(|e| e.seq).collect::<Vec<_>>(), [6, 7, 8, 9, 10], "events 1-5 went with the third generation");
+        assert_eq!(seqs("after"), [8, 9, 10]);
+        // a torn last line is still ended before the next event, rotation or not
+        let mut f = fs::OpenOptions::new().append(true).open(s.events_path()).unwrap();
+        f.write_all(br#"{"v":1,"seq":11,"at":"2026"#).unwrap();
+        assert_eq!(s.emit("after-torn", "", "", Value::Null, "you", "emit").unwrap().seq, 11);
+        assert_eq!(s.events().last().unwrap().kind, "after-torn");
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// The size cap rotates on the append itself.
+    #[test]
+    fn the_log_rotates_at_its_cap() {
+        let s = temp_store();
+        let big = "x".repeat(600);
+        // the cap is read per append; this test owns the variable (no other test sets it)
+        std::env::set_var("MARGIN_EVENTS_CAP", "2000");
+        for _ in 0..12 {
+            s.emit("big", "", "", json!(big), "you", "emit").unwrap();
+        }
+        std::env::remove_var("MARGIN_EVENTS_CAP");
+        assert!(s.events_gen(1).exists() && s.events_gen(2).exists() && !s.events_gen(3).exists());
+        assert!(fs::metadata(s.events_path()).unwrap().len() < 3000);
+        let seqs: Vec<u64> = s.events().iter().map(|e| e.seq).collect();
+        assert_eq!(*seqs.last().unwrap(), 12);
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "{seqs:?}");
+        assert_eq!(s.events_since(10).len(), 2);
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// A named cursor starts at the end of the log, moves only when set, and its name can't
+    /// leave the cursors directory.
+    #[test]
+    fn named_cursors_start_at_the_end() {
+        let s = temp_store();
+        s.emit("a", "", "", Value::Null, "you", "emit").unwrap();
+        s.emit("a", "", "", Value::Null, "you", "emit").unwrap();
+        assert_eq!(s.cursor("mine"), None);
+        assert_eq!(s.cursor_or_create("mine"), 2);
+        s.emit("a", "", "", Value::Null, "you", "emit").unwrap();
+        assert_eq!(s.cursor_or_create("mine"), 2, "created once: it does not slide");
+        assert_eq!(s.events_since(s.cursor("mine").unwrap()).len(), 1);
+        s.set_cursor("mine", 3);
+        assert_eq!(s.cursor("mine"), Some(3));
+        assert!(s.dir().join("cursors/mine").exists());
+        s.set_cursor("../../evil", 1);
+        assert!(!s.home.join("evil").exists() && !s.dir().join("evil").exists());
+        s.set_cursor("..", 1);
+        assert_eq!(s.cursor(".."), Some(1));
+        // a session's cursor is the same file format, in its own directory
+        s.set_delivered("sess", 2);
+        assert_eq!(read_cursor(&s.dir().join("delivered/sess")), Some(2));
+        assert_eq!(s.delivered_max(), 2, "named cursors don't count as a session having read");
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// An action appends `<board>.<action>` with the block's id and snapshot, on a feed-owned
+    /// row too (ownership guards content, not the person's actions); `decide` still refuses there.
+    #[test]
+    fn act_appends_the_event_with_a_snapshot_even_on_a_feed_owned_row() {
+        let s = temp_store();
+        let d: Doc = serde_json::from_value(json!({"id": "reviews", "title": "r", "blocks": [
+            {"type": "table", "id": "pr", "columns": [{"key": "title"}], "children": [
+                {"type": "tr", "id": "pr-1", "target": "https://example.com/1", "detail": "d", "cells": {"title": "One"}}]},
+            {"type": "row", "id": "note", "text": "hello", "tag": "x"}]})).unwrap();
+        s.put(d, None).unwrap();
+        fs::write(s.dir().join("feeds.json"), r#"{"feeds": [{"name": "reviews", "cmd": ["true"], "trigger": {"kind": "stream"}, "artifact": "reviews", "owns": "pr", "cwd": "/"}]}"#).unwrap();
+        assert!(s.decide("reviews", "pr-1", "pin", json!(true), "key", None).unwrap_err().contains("read-only"));
+        let e = s.act("reviews", "pr-1", "open", None, "you", "act").unwrap();
+        assert_eq!((e.kind.as_str(), e.id.as_str(), e.by.as_str(), e.via.as_str(), e.artifact.as_str()), ("reviews.open", "pr-1", "you", "act", "reviews"));
+        assert_eq!(e.value, json!({"cells": {"title": "One"}, "target": "https://example.com/1", "detail": "d"}));
+        let e = s.act("reviews", "note", "ping", Some(json!("now")), "you", "act").unwrap();
+        assert_eq!(e.value, json!({"text": "hello", "tag": "x", "arg": "now"}));
+        assert_eq!(s.act("reviews", "-", "refresh", None, "you", "act").unwrap().id, "");
+        assert!(s.act("reviews", "nope", "open", None, "you", "act").unwrap_err().contains("no component \"nope\""));
+        assert!(s.act("review", "pr-1", "open", None, "you", "act").unwrap_err().contains("did you mean \"reviews\""));
+        assert!(s.act("reviews", "pr-1", "bad name", None, "you", "act").is_err());
+        assert_eq!(s.events().len(), 3, "a refusal logs nothing");
+        assert_eq!(s.load("reviews").unwrap().rev, 1, "and an action changes no content");
         fs::remove_dir_all(&s.home).ok();
     }
 }

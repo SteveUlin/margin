@@ -106,6 +106,8 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("ls", s(&[]), "", true),
         ("gc", s(&[]), "", true),
         ("events", s(&["--all"]), "", true),
+        ("emit", s(&["walk.done", r#"{"n":1}"#, "--board", "a"]), "", true),
+        ("act", s(&["a", "t1", "poke"]), "", true),
         ("wait", s(&["a.zz", "--timeout", "1s"]), "", false),
         ("hook", s(&["prompt"]), &hook_in, true),
         ("doc", s(&["a", "notes"]), "# Notes\n\nA line.\n", true),
@@ -401,6 +403,240 @@ fn the_skills_worked_example_runs_end_to_end() {
     // run again from the top, the create is refused and nothing after it runs
     let o = Command::new("sh").args(["-e", "-c", &block]).current_dir(&decoy).env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("XDG_CONFIG_HOME", decoy.join("config")).env("MARGIN_HOME", &home).env("MARGIN_PROJECT", "p").env("MARGIN_HOST", "plain").stdin(Stdio::null()).output().unwrap();
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("plan already exists"));
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// A command for margin with nothing of Claude Code (or of this machine's margin setup) in its
+/// environment: PATH, a decoy HOME, and the store on the command line. What cron or a shell with
+/// no AI in it would run.
+fn bare(decoy: &Path, home: &Path, argv: &[&str]) -> Command {
+    let mut c = Command::new(BIN);
+    c.args(["--home", &home.display().to_string(), "--project", "p"])
+        .args(argv)
+        .current_dir(decoy)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", decoy)
+        .env("MARGIN_HOST", "plain")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    c
+}
+
+/// Run one to its end: (succeeded, stdout, stderr).
+fn plain(decoy: &Path, home: &Path, argv: &[&str], stdin: &str) -> (bool, String, String) {
+    let mut ch = bare(decoy, home, argv).spawn().unwrap();
+    ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    let o = ch.wait_with_output().unwrap();
+    (o.status.success(), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+fn json_lines(out: &str) -> Vec<serde_json::Value> {
+    out.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}"))).collect()
+}
+
+/// `margin emit`: a named event from anywhere, with the value as JSON (an argument or stdin),
+/// the seq on stdout, and a refusal (exit 1, nothing logged) for a value that is not JSON, a bad
+/// name or a board that isn't there.
+#[test]
+fn emit_appends_a_named_event_and_prints_its_seq() {
+    let (decoy, home) = (temp("emit-decoy"), temp("emit-home"));
+    let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
+    assert!(run(&["new", "ci"], "").0);
+    let (ok, out, _) = run(&["emit", "deploy.finished", r#"{"sha":"abc","ok":true}"#], "");
+    assert!(ok && out == "1\n", "{out}");
+    let (ok, out, _) = run(&["emit", "ci.report", "-", "--board", "ci", "--id", "x"], "[1, 2]\n");
+    assert!(ok && out == "2\n", "{out}");
+    let (ok, out, _) = run(&["emit", "bare"], "");
+    assert!(ok && out == "3\n", "{out}");
+    for (argv, stdin, why) in [
+        (vec!["emit", "x", "not json"], "", "the value is not JSON"),
+        (vec!["emit", "x", "-"], "{", "stdin is not one JSON value"),
+        (vec!["emit", "two words"], "", "bad event name"),
+        (vec!["emit", "x", "1", "--board", "nope"], "", "no artifact \"nope\""),
+        (vec!["emit", "job.failed"], "", "the runner's own"),
+        (vec!["emit"], "", "missing <name>"),
+    ] {
+        let (ok, out, err) = run(&argv, stdin);
+        assert!(!ok && out.is_empty() && err.starts_with("margin emit: ") && err.contains(why), "{argv:?}: {out}{err}");
+    }
+    let (ok, out, _) = run(&["events", "--name", "*", "--json"], "");
+    let evs = json_lines(&out);
+    assert!(ok && evs.len() == 3, "{out}");
+    assert_eq!(evs[0], serde_json::json!({"v": 1, "seq": 1, "at": evs[0]["at"], "artifact": "", "id": "", "kind": "deploy.finished", "value": {"sha": "abc", "ok": true}, "by": "you", "via": "emit", "rev": 0}));
+    assert_eq!((&evs[1]["artifact"], &evs[1]["id"], &evs[1]["value"], &evs[1]["rev"]), (&serde_json::json!("ci"), &serde_json::json!("x"), &serde_json::json!([1, 2]), &serde_json::json!(1)));
+    assert!(evs[2]["value"].is_null());
+    // the human listing names the event, what it is about and who sent it
+    let (_, out, _) = run(&["events"], "");
+    assert!(out.contains("deploy.finished") && out.contains("ci.report ci.x") && out.contains("via emit"), "{out}");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// Two `margin emit` processes at once never share a seq and leave no gap.
+#[test]
+fn concurrent_emits_from_two_processes_get_consecutive_seqs() {
+    let (decoy, home) = (temp("race-decoy"), temp("race-home"));
+    let mut seqs = Vec::new();
+    for _ in 0..10 {
+        let kids: Vec<_> = (0..2).map(|i| bare(&decoy, &home, &["emit", "race", &i.to_string()]).spawn().unwrap()).collect();
+        for k in kids {
+            let o = k.wait_with_output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            seqs.push(String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().unwrap());
+        }
+    }
+    seqs.sort();
+    assert_eq!(seqs, (1..=20).collect::<Vec<u64>>());
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// `margin events`: --name matches the kind by glob; a cursor starts at the end of the log and
+/// moves as events are printed; --no-commit leaves it; --commit moves it; --since 0 replays.
+#[test]
+fn events_reads_by_name_and_through_a_named_cursor() {
+    let (decoy, home) = (temp("cursor-decoy"), temp("cursor-home"));
+    let run = |argv: &[&str]| plain(&decoy, &home, argv, "");
+    let kinds = |out: &str| json_lines(out).iter().map(|e| format!("{}:{}", e["seq"], e["kind"].as_str().unwrap())).collect::<Vec<_>>();
+    for n in ["a.one", "b.one", "a.two"] {
+        assert!(run(&["emit", n]).0);
+    }
+    assert_eq!(kinds(&run(&["events", "--name", "a.*", "--json"]).1), ["1:a.one", "3:a.two"]);
+    assert_eq!(kinds(&run(&["events", "--name", "*.one", "--since", "1", "--json"]).1), ["2:b.one"]);
+    assert_eq!(kinds(&run(&["events", "--kind", "b.one", "--json"]).1), ["2:b.one"]);
+    // a new cursor starts at the end: nothing of the history
+    let (ok, out, _) = run(&["events", "--cursor", "mine", "--json"]);
+    assert!(ok && out.is_empty(), "{out}");
+    assert_eq!(std::fs::read_to_string(home.join("p/cursors/mine")).unwrap(), "3");
+    for n in ["a.three", "b.two"] {
+        assert!(run(&["emit", n]).0);
+    }
+    // --no-commit: the same events again and again
+    for _ in 0..2 {
+        assert_eq!(kinds(&run(&["events", "--cursor", "mine", "--no-commit", "--json"]).1), ["4:a.three", "5:b.two"]);
+    }
+    // the explicit commit of at-least-once delivery: one event handled, one left
+    assert!(run(&["events", "--cursor", "mine", "--commit", "4"]).0);
+    assert_eq!(kinds(&run(&["events", "--cursor", "mine", "--no-commit", "--json"]).1), ["5:b.two"]);
+    // a committing read takes what is left, once
+    assert_eq!(kinds(&run(&["events", "--cursor", "mine", "--json"]).1), ["5:b.two"]);
+    assert!(run(&["events", "--cursor", "mine", "--json"]).1.is_empty());
+    // a filtered read moves the cursor past what it left out too
+    assert!(run(&["emit", "b.three"]).0 && run(&["emit", "a.four"]).0);
+    assert_eq!(kinds(&run(&["events", "--cursor", "mine", "--name", "b.*", "--json"]).1), ["6:b.three"]);
+    assert_eq!(std::fs::read_to_string(home.join("p/cursors/mine")).unwrap(), "7");
+    // --since 0 replays through the cursor
+    assert_eq!(kinds(&run(&["events", "--cursor", "mine", "--since", "0", "--json"]).1).len(), 7);
+    // a second cursor is independent, and starts at today's end
+    assert!(run(&["events", "--cursor", "other", "--json"]).1.is_empty());
+    assert_eq!(std::fs::read_to_string(home.join("p/cursors/other")).unwrap(), "7");
+    for (argv, why) in [
+        (vec!["events", "--cursor", "a/b"], "bad cursor name"),
+        (vec!["events", "--commit", "3"], "--commit moves a cursor"),
+        (vec!["events", "--cursor", "mine", "--commit", "x"], "bad --commit"),
+        (vec!["events", "--no-commit"], "--no-commit goes with --cursor"),
+        (vec!["events", "--since", "soon"], "bad --since"),
+        (vec!["events", "--unread", "--follow"], "--unread"),
+    ] {
+        let (ok, _, err) = run(&argv);
+        assert!(!ok && err.contains(why), "{argv:?}: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// `--follow` prints an event emitted after it started, commits its cursor as it prints, and
+/// ends with exit 0 on SIGINT.
+#[test]
+fn events_follow_sees_an_event_emitted_after_it_started() {
+    use std::io::{BufRead, BufReader};
+    let (decoy, home) = (temp("follow-decoy"), temp("follow-home"));
+    assert!(plain(&decoy, &home, &["emit", "before"], "").0);
+    let mut ch = bare(&decoy, &home, &["events", "--follow", "--cursor", "f", "--name", "late.*", "--json"]).spawn().unwrap();
+    // it is following once its cursor exists (created at the end: seq 1)
+    let t = Instant::now();
+    while !home.join("p/cursors/f").exists() && t.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(plain(&decoy, &home, &["emit", "other"], "").0);
+    assert!(plain(&decoy, &home, &["emit", "late.one", r#"{"n":1}"#], "").0);
+    let mut lines = BufReader::new(ch.stdout.take().unwrap()).lines();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for l in lines.by_ref().map_while(Result::ok) {
+            if tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    let first: serde_json::Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(10)).expect("the followed event")).unwrap();
+    assert_eq!((first["seq"].as_u64(), first["kind"].as_str(), &first["value"]["n"]), (Some(3), Some("late.one"), &serde_json::json!(1)));
+    assert!(plain(&decoy, &home, &["emit", "late.two"], "").0);
+    let second: serde_json::Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(10)).expect("the second event")).unwrap();
+    assert_eq!(second["seq"].as_u64(), Some(4));
+    let t = Instant::now();
+    while std::fs::read_to_string(home.join("p/cursors/f")).unwrap_or_default() != "4" && t.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(home.join("p/cursors/f")).unwrap(), "4", "committed as it printed");
+    unsafe { libc_kill(ch.id() as i32, 2) };
+    let st = ch.wait().unwrap();
+    assert_eq!(st.code(), Some(0), "ctrl-c ends a follow cleanly: {st:?}");
+    // a follower whose reader has gone ends too, without an event to trip over
+    let mut ch = bare(&decoy, &home, &["events", "--follow", "--json"]).spawn().unwrap();
+    drop(ch.stdout.take());
+    let t = Instant::now();
+    let done = loop {
+        if let Some(s) = ch.try_wait().unwrap() {
+            break Some(s);
+        }
+        if t.elapsed() > Duration::from_secs(10) {
+            let _ = ch.kill();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(done.and_then(|s| s.code()), Some(0), "a closed stdout ends a follow");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+extern "C" {
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, sig: i32) -> i32;
+}
+
+/// `margin act` appends the action's event and prints its seq; a refusal exits 1 with the
+/// reason. `margin select` exits 1 on a refusal too (it used to exit 0 and only log).
+#[test]
+fn act_and_select_exit_nonzero_when_they_refuse() {
+    let (decoy, home) = (temp("act-decoy"), temp("act-home"));
+    let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
+    let doc = r#"{"title":"Reviews","blocks":[{"type":"table","id":"pr","columns":[{"key":"title"}],"children":[
+      {"type":"tr","id":"pr-1","target":"https://example.com/1","cells":{"title":"One"}}]},{"type":"todo","id":"t1","text":"a step"}]}"#;
+    assert!(run(&["new", "reviews"], doc).0);
+    assert!(run(&["feed", "add", "reviews", "--every", "1h", "--owns", "pr", "--", "true"], "").0);
+    let (ok, out, err) = run(&["act", "reviews", "pr-1", "open"], "");
+    assert!(ok && out == "1\n", "{out}{err}");
+    let (_, out, _) = run(&["events", "--name", "reviews.*", "--json"], "");
+    let e = &json_lines(&out)[0];
+    assert_eq!((e["kind"].as_str(), e["id"].as_str(), e["by"].as_str(), e["via"].as_str()), (Some("reviews.open"), Some("pr-1"), Some("you"), Some("act")));
+    assert_eq!(e["value"], serde_json::json!({"cells": {"title": "One"}, "target": "https://example.com/1"}));
+    for (argv, why) in [(vec!["act", "reviews", "pr-9", "open"], "no component \"pr-9\""), (vec!["act", "review", "pr-1", "open"], "did you mean \"reviews\""), (vec!["act", "reviews", "pr-1"], "missing <action>")] {
+        let (ok, out, err) = run(&argv, "");
+        assert!(!ok && out.is_empty() && err.starts_with("margin act: ") && err.contains(why), "{argv:?}: {err}");
+    }
+    // select: a content-changing verb on a feed-owned row is still refused, and now says so
+    let (ok, _, err) = run(&["select", "mg:pin/reviews.pr-1"], "");
+    assert!(!ok && err.contains("is kept current by feed `reviews`"), "{err}");
+    let (ok, _, err) = run(&["select", "mg:pick/reviews.t1=x"], "");
+    assert!(!ok && err.contains("t1 is a todo"), "{err}");
+    let (ok, _, err) = run(&["select", "mg:todo/reviews.t1=next"], "");
+    assert!(ok, "{err}");
+    assert!(run(&["feed", "rm", "reviews"], "").0);
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }

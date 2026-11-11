@@ -499,7 +499,9 @@ impl Worker {
         }
     }
 
-    /// Change state: status file, the pane's health line, and a passive event on transitions.
+    /// Change state: the status file and the pane's health line. Not the event log: a job's
+    /// state is state (it is in the status file), and the log is for facts someone may react to
+    /// (a handler watching the log was re-run by its own lifecycle lines, 2026-11-10 review).
     pub fn set_state(&mut self, state: &str, until: Option<f64>, err: Option<String>) {
         let changed = self.status.state != state;
         if changed {
@@ -517,9 +519,6 @@ impl Worker {
         }
         if changed || until.is_some() {
             self.write_health();
-        }
-        if changed {
-            let _ = self.st.log_feed(&self.f.artifact, &self.f.name, json!({"state": state, "error": self.status.last_error, "restarts": self.status.restarts}));
         }
     }
 

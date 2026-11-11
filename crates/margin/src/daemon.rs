@@ -29,6 +29,17 @@ pub fn exiting() -> bool {
     EXITING.load(Ordering::Relaxed)
 }
 
+/// SIGTERM, SIGINT and SIGHUP raise the `exiting` flag instead of killing the process: the
+/// daemon stops its workers first, and `margin events --follow` / `job logs --follow` end with
+/// exit 0.
+pub fn trap_signals() {
+    unsafe {
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_term as *const () as libc::sighandler_t);
+    }
+}
+
 fn lock_path(st: &Store) -> std::path::PathBuf {
     st.dir().join("daemon.lock")
 }
@@ -113,11 +124,7 @@ pub fn run(st: Store) -> Result<(), String> {
     };
     let pid_path = st.dir().join("daemon.pid");
     write_atomic(&pid_path, std::process::id().to_string().as_bytes()).map_err(|e| e.to_string())?;
-    unsafe {
-        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, on_term as *const () as libc::sighandler_t);
-    }
+    trap_signals();
     eprintln!("{} margin daemon {} up for {}", crate::util::now_rfc3339(), std::process::id(), st.project);
     let mut workers: HashMap<String, Running> = HashMap::new();
     let mut idle_since: Option<f64> = None;

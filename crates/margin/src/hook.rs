@@ -6,7 +6,7 @@
 //! unexplained injected text.
 
 use crate::link;
-use crate::store::{is_passive, Activity, Event, Store};
+use crate::store::{Activity, Event, Store};
 use crate::util::project_store_for;
 use serde_json::{json, Value};
 use std::io::Read;
@@ -87,6 +87,16 @@ pub fn describe(st: &Store, e: &Event) -> String {
                 format!("sulin declined your proposal to {what} on {at} {text}: leave it as they have it")
             }
         }
+        // a named event (`margin emit`, an action, a job's emit): its name, what it is about, who
+        k if e.via == "emit" || e.via == "job" || k.contains('.') => {
+            let about = match (e.artifact.is_empty(), e.id.is_empty()) {
+                (true, _) => String::new(),
+                (false, true) => format!(" {}", e.artifact),
+                (false, false) => format!(" {at}"),
+            };
+            let val = if e.value.is_null() { String::new() } else { format!(" {}", vellum::text::truncate(&v, 100)) };
+            format!("{k}{about}{val} (by {}, via {})", if crate::who::is_human(&e.by) { "sulin" } else { &e.by }, e.via)
+        }
         k => format!("sulin {k} {at} {v}"),
     }
 }
@@ -94,7 +104,7 @@ pub fn describe(st: &Store, e: &Event) -> String {
 /// Unread, non-passive events sulin made, for this session.
 pub fn unread(st: &Store, session: &str) -> Vec<Event> {
     let from = st.delivered(session);
-    st.events().into_iter().filter(|e| e.seq > from && crate::who::is_human(&e.by) && !is_passive(&e.kind)).collect()
+    st.events_since(from).into_iter().filter(crate::store::is_decision).collect()
 }
 
 /// Mid-turn, an action younger than this waits: sulin often clicks and takes it back a moment
@@ -125,7 +135,7 @@ fn is_undo(kind: &str) -> bool {
 /// look. A run on one component collapses to its last action, and to nothing when it ends where
 /// Claude last heard it (ticked then cleared, picked A then B then A).
 pub fn pending(all: &[Event], from: u64, now: f64, settle: f64) -> (Vec<Event>, Option<u64>) {
-    let mine = |e: &&Event| crate::who::is_human(&e.by) && !is_passive(&e.kind);
+    let mine = |e: &&Event| crate::store::is_decision(e);
     let fresh: Vec<&Event> = all.iter().filter(|e| e.seq > from).filter(mine).collect();
     let age = |e: &Event| now - crate::util::parse_rfc3339(&e.at).unwrap_or(now);
     let ready: Vec<&Event> = if settle > 0.0 { fresh.iter().take_while(|e| age(e) >= settle).copied().collect() } else { fresh };

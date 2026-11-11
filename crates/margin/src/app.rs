@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::host::{Host, Selection};
 use crate::scene::{Input, Placement, Scene};
 use crate::select;
-use crate::store::{is_passive, Store, View};
+use crate::store::{Store, View};
 use crate::util::{epoch_now, now_rfc3339};
 use serde_json::json;
 use std::ffi::CString;
@@ -297,11 +297,9 @@ impl Live {
         // each tail component's run: its state and its last 30 lines (tail.rs)
         self.scene.tails = crate::tail::for_doc(&self.st, &self.art, &self.doc);
         self.delivered = self.st.delivered_max();
-        let evs = self.st.events();
-        self.unread = evs
-            .iter()
-            .filter(|e| e.artifact == self.art && crate::who::is_human(&e.by) && !is_passive(&e.kind) && e.seq > self.delivered)
-            .count();
+        // only what is new to Claude or to this pane: never the whole log on every reload
+        let evs = self.st.events_since(self.delivered.min(self.last_seq));
+        self.unread = evs.iter().filter(|e| e.artifact == self.art && crate::store::is_decision(e) && e.seq > self.delivered).count();
         // a selection that reached margin through Zellij flashes the token it came from; a fold
         // token toggles the fold here (the pane's own keys and clicks fold directly)
         let fresh: Vec<_> = evs.iter().filter(|e| e.seq > self.last_seq && e.artifact == self.art).cloned().collect();
