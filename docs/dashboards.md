@@ -26,7 +26,7 @@ This file keeps only what an AI building a board doesn't need: where the code is
 - `crates/margin/src/doc.rs` (`SCHEMA`, `check_under`) is what every write is checked against.
 - `crates/margin/src/tabs.rs` (`attention`) decides the marks on a pane's tabs.
 - `crates/margin/src/example.rs` embeds `skill/examples/` and holds the tests that keep each
-  example applying: the artifact through `Store::put`, the feed's output written as the feed.
+  example applying: the artifact through `Store::put` (the write under `margin new`), the feed's output written as the feed.
 
 ## Keeping the kit true
 

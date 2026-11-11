@@ -363,8 +363,32 @@ impl Store {
         self.doc_path(a).exists()
     }
 
+    /// The one message for an artifact this project doesn't have. Every command that takes an
+    /// existing artifact fails with it, so the fix (`margin new`) is named wherever the mistake
+    /// shows, and a mistyped name points at the artifact it was probably meant to be (a typo
+    /// used to create a second board: writes created what they didn't find).
+    pub fn missing(&self, a: &str) -> String {
+        let near = self
+            .names()
+            .into_iter()
+            .filter(|n| n != a)
+            .map(|n| (crate::util::edit_distance(a, &n), n))
+            .filter(|(d, _)| *d <= 2)
+            .min();
+        let hint = near.map(|(_, n)| format!(" (did you mean {n:?}?)")).unwrap_or_default();
+        format!("no artifact {a:?} in project {}: create it with margin new {a}{hint}", self.project)
+    }
+
+    /// The ids of this project's artifacts, from the directory alone (no document is parsed).
+    fn names(&self) -> Vec<String> {
+        let Ok(rd) = fs::read_dir(self.dir()) else { return vec![] };
+        let mut v: Vec<String> = rd.flatten().filter(|e| e.path().join("doc.json").exists()).filter_map(|e| e.file_name().into_string().ok()).filter(|n| !n.starts_with('.')).collect();
+        v.sort();
+        v
+    }
+
     pub fn load(&self, a: &str) -> Result<Doc, String> {
-        let s = fs::read_to_string(self.doc_path(a)).map_err(|_| format!("no artifact {a:?} in project {}", self.project))?;
+        let s = fs::read_to_string(self.doc_path(a)).map_err(|_| self.missing(a))?;
         let d: Doc = serde_json::from_str(&s).map_err(|e| format!("{a}/doc.json: {e}"))?;
         // design §3 "Versions": a newer format is refused, not read as v 1 and rewritten
         if d.v != 1 {
@@ -442,9 +466,38 @@ impl Store {
         }
     }
 
-    /// Create or replace a whole document. With `base_rev`, refuse if the stored rev differs.
+    /// The store's whole-document write: create or replace, whichever applies. The CLI never
+    /// calls it for a document someone named: `margin new` goes through `create` and
+    /// `margin put` / a whole-document `margin apply` through `replace`, which each allow one
+    /// of the two. What is left here is `margin demo` (which resets its own artifact) and code
+    /// that has just loaded the document it writes back. With `base_rev`, refuse if the stored
+    /// rev differs.
     pub fn put(&self, d: Doc, base_rev: Option<u64>) -> Result<u64, String> {
         let _l = self.lock().map_err(|e| e.to_string())?;
+        self.put_locked(d, base_rev)
+    }
+
+    /// `margin new`: create an artifact, refusing one that exists. Decided under the lock, so
+    /// of two concurrent creates exactly one succeeds and the other is told it exists (decided
+    /// outside it, both took the create branch and the second replaced the first's document:
+    /// 2026-11-09 review, 39 of 40 parallel runs).
+    pub fn create(&self, d: Doc) -> Result<u64, String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        if self.exists(&d.id) {
+            let a = &d.id;
+            let rev = self.load(a).map(|o| format!(" (rev {})", o.rev)).unwrap_or_default();
+            return Err(format!("{a} already exists{rev}; change it with margin apply/add/set, or remove it with margin rm {a} --yes"));
+        }
+        self.put_locked(d, None)
+    }
+
+    /// `margin put` and a whole-document `margin apply`: replace the document of an artifact
+    /// that exists. A missing one is an error that names `margin new`, never a create.
+    pub fn replace(&self, d: Doc, base_rev: Option<u64>) -> Result<u64, String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        if !self.exists(&d.id) {
+            return Err(self.missing(&d.id));
+        }
         self.put_locked(d, base_rev)
     }
 
@@ -499,7 +552,8 @@ impl Store {
     /// A feed's write: groups of ops (one group per stdout line), each applied all-or-nothing, so
     /// one bad line is rejected and logged without losing its neighbours. `on_change` ops (the
     /// feed's "last write" stamp) apply only when the groups changed content, so a feed that
-    /// re-prints the same state costs no revision. Creates the artifact on a feed's first write.
+    /// re-prints the same state costs no revision. A feed updates its artifact and never creates
+    /// it: a missing one fails the write with the message that names `margin new`.
     pub fn feed_write(&self, a: &str, groups: &[Vec<Op>], w: &Writer, on_change: &[Op]) -> (Option<u64>, Vec<String>) {
         let mut errs = Vec::new();
         let _l = match self.lock() {
@@ -507,24 +561,10 @@ impl Store {
             Err(e) => return (None, vec![e.to_string()]),
         };
         let old = match self.load(a) {
-            Ok(d) => Some(d),
-            Err(_) if !self.exists(a) && crate::util::valid_id(a) => None,
+            Ok(d) => d,
             Err(e) => return (None, vec![e]),
         };
-        let mut d = old.clone().unwrap_or_else(|| Doc {
-            v: 1,
-            id: a.into(),
-            title: a.into(),
-            kind: "feed".into(),
-            rev: 0,
-            icon: None,
-            blocks: vec![],
-            updated: String::new(),
-            sessions: vec![],
-            by: String::new(),
-            hints: vec![],
-            purpose: String::new(),
-        });
+        let mut d = old.clone();
         let claims = self.claims(a);
         let base_blocks = d.blocks.clone();
         let base_title = d.title.clone();
@@ -539,7 +579,7 @@ impl Store {
                 Err(e) => errs.push(e),
             }
         }
-        if d.blocks == base_blocks && d.title == base_title && old.is_some() {
+        if d.blocks == base_blocks && d.title == base_title {
             return (None, errs);
         }
         for op in on_change {
@@ -548,7 +588,7 @@ impl Store {
                 d = t;
             }
         }
-        match self.save_doc_locked(&mut d, old.as_ref(), &w.by()) {
+        match self.save_doc_locked(&mut d, Some(&old), &w.by()) {
             Ok(rev) => (Some(rev), errs),
             Err(e) => {
                 errs.push(e);
@@ -557,28 +597,12 @@ impl Store {
         }
     }
 
-    /// Apply ops atomically: all land or none do. A todo's `status` is a shared field (design §2):
+    /// Apply ops to an artifact that exists, atomically: all land or none do (a missing artifact
+    /// is `missing`'s error, never a create). A todo's `status` is a shared field (design §2):
     /// it goes to state.json with `by: claude`, and overruling sulin's own tick is logged.
     pub fn patch(&self, a: &str, ops: &[Op], base_rev: Option<u64>) -> Result<u64, String> {
         let _l = self.lock().map_err(|e| e.to_string())?;
         self.patch_locked(a, ops, base_rev)
-    }
-
-    /// `margin apply` with ops: patch the artifact, or create it when this is its first write.
-    /// Which of the two is decided under the lock: decided outside it, two first writers both
-    /// took the create branch and the second replaced the first's document (2026-11-09 review:
-    /// 39 of 40 parallel runs kept one component of two, both reporting success).
-    pub fn apply(&self, a: &str, ops: &[Op], base_rev: Option<u64>) -> Result<u64, String> {
-        let _l = self.lock().map_err(|e| e.to_string())?;
-        if self.exists(a) {
-            return self.patch_locked(a, ops, base_rev);
-        }
-        // a first write creates the artifact: build it from nothing, then put it whole
-        let mut d = Doc { v: 1, id: a.into(), title: a.into(), kind: String::new(), rev: 0, icon: None, blocks: vec![], updated: String::new(), sessions: vec![], by: String::new(), hints: vec![], purpose: String::new() };
-        for op in ops {
-            d.apply(op)?;
-        }
-        self.put_locked(d, base_rev)
     }
 
     fn patch_locked(&self, a: &str, ops: &[Op], base_rev: Option<u64>) -> Result<u64, String> {
@@ -945,7 +969,7 @@ impl Store {
 
     fn archive_locked(&self, a: &str) -> Result<PathBuf, String> {
         if !crate::util::valid_id(a) || !self.exists(a) {
-            return Err(format!("no artifact {a:?} in project {}", self.project));
+            return Err(self.missing(a));
         }
         let dir = self.dir().join(".archive");
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -1144,28 +1168,82 @@ pub mod tests {
         assert!(!line.contains("t2"), "a finished step isn't news: {line}");
     }
 
-    /// Two first writers of one artifact: each sees no doc.json, and deciding create-or-patch
-    /// outside the lock let the second's whole-document put replace the first's.
+    /// `create` makes an artifact once; a second create is refused and says how to change or
+    /// remove the one there, and what is there is left exactly as it was.
     #[test]
-    fn concurrent_first_writes_keep_every_writers_component() {
+    fn new_creates_and_refuses_a_second_time() {
+        let s = temp_store();
+        assert_eq!(s.create(Doc::empty("board")).unwrap(), 1);
+        let d = s.load("board").unwrap();
+        assert_eq!((d.title.as_str(), d.rev, d.blocks.len()), ("board", 1, 0));
+        let add = |id: &str| Op::Add { parent: None, block: serde_json::from_value(json!({"type": "todo", "id": id, "text": "x"})).unwrap(), before: None, after: None };
+        assert_eq!(s.patch("board", &[add("t1")], None).unwrap(), 2);
+        let e = s.create(Doc { title: "Other".into(), ..Doc::empty("board") }).unwrap_err();
+        assert_eq!(e, "board already exists (rev 2); change it with margin apply/add/set, or remove it with margin rm board --yes");
+        let d = s.load("board").unwrap();
+        assert_eq!((d.title.as_str(), d.rev, d.find("t1").is_some()), ("board", 2, true), "the refused create changed nothing");
+        // a create carries its content, checked as any write is
+        assert_eq!(s.create(plan()).unwrap(), 1);
+        assert!(s.create(Doc { blocks: vec![serde_json::from_value(json!({"type": "nope", "id": "x"})).unwrap()], ..Doc::empty("bad") }).is_err() && !s.exists("bad"));
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// Every update refuses an artifact that isn't there, with one message that names the
+    /// command that creates it and, for a near miss, the artifact that was probably meant.
+    /// Nothing is created on the way.
+    #[test]
+    fn updates_refuse_a_missing_artifact_and_name_the_nearest() {
+        let s = temp_store();
+        s.create(plan()).unwrap();
+        s.create(Doc::empty("reviews")).unwrap();
+        let plain = "no artifact \"scratch\" in project proj: create it with margin new scratch";
+        assert_eq!(s.missing("scratch"), plain);
+        assert_eq!(s.missing("paln"), "no artifact \"paln\" in project proj: create it with margin new paln (did you mean \"plan\"?)");
+        assert!(s.missing("review").ends_with("(did you mean \"reviews\"?)"));
+        assert!(s.missing("plans2").ends_with("(did you mean \"plan\"?)") && !s.missing("planning").contains("did you mean"), "within two edits, no further");
+        let set = Op::Set { id: "t1".into(), field: "text".into(), value: json!("x") };
+        assert_eq!(s.patch("scratch", &[set.clone()], None).unwrap_err(), plain);
+        assert_eq!(s.replace(Doc::empty("scratch"), None).unwrap_err(), plain);
+        assert_eq!(s.load("scratch").unwrap_err(), plain);
+        assert_eq!(s.archive("scratch").unwrap_err(), plain);
+        let w = Writer::Feed { name: "f".into(), owns: "f".into() };
+        assert_eq!(s.feed_write("scratch", &[vec![set]], &w, &[]), (None, vec![plain.to_string()]));
+        assert!(!s.exists("scratch") && !s.art("scratch").exists(), "a refused write leaves no trace");
+        // replace is the update of a whole document
+        assert_eq!(s.replace(Doc { title: "Reviews".into(), ..Doc::empty("reviews") }, None).unwrap(), 2);
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// Two creators of one artifact: each sees no doc.json, and deciding outside the lock let
+    /// the second's document replace the first's with both reporting success. Exactly one
+    /// create wins; the rest are told it exists. Writers to the artifact once it exists all land.
+    #[test]
+    fn concurrent_new_keeps_exactly_one() {
         for round in 0..20 {
             let s = temp_store();
+            let block = |i: usize| -> crate::doc::Block { serde_json::from_value(json!({"type": "todo", "id": format!("c{i}"), "text": "mine"})).unwrap() };
             let hs: Vec<_> = (0..8)
                 .map(|i| {
                     let st = Store::new(s.home.clone(), s.project.clone());
-                    std::thread::spawn(move || {
-                        let block = serde_json::from_value(json!({"type": "todo", "id": format!("c{i}"), "text": "mine"})).unwrap();
-                        st.apply("race", &[Op::Add { parent: None, block, before: None, after: None }], None).unwrap()
-                    })
+                    std::thread::spawn(move || st.create(Doc { blocks: vec![block(i)], ..Doc::empty("race") }).map(|rev| (i, rev)))
+                })
+                .collect();
+            let rs: Vec<Result<(usize, u64), String>> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+            let won: Vec<&(usize, u64)> = rs.iter().filter_map(|r| r.as_ref().ok()).collect();
+            assert_eq!(won.len(), 1, "round {round}: exactly one create succeeds: {rs:?}");
+            assert!(rs.iter().filter_map(|r| r.as_ref().err()).all(|e| e.starts_with("race already exists (rev 1)")), "round {round}: {rs:?}");
+            let d = s.load("race").unwrap();
+            assert_eq!((d.rev, d.ids()), (1, vec![format!("c{}", won[0].0)]), "round {round}: the winner's document, whole");
+            let hs: Vec<_> = (10..18)
+                .map(|i| {
+                    let st = Store::new(s.home.clone(), s.project.clone());
+                    std::thread::spawn(move || st.patch("race", &[Op::Add { parent: None, block: block(i), before: None, after: None }], None).unwrap())
                 })
                 .collect();
             let mut revs: Vec<u64> = hs.into_iter().map(|h| h.join().unwrap()).collect();
             revs.sort();
-            assert_eq!(revs, (1..=8).collect::<Vec<u64>>(), "round {round}: one create, seven patches");
-            let d = s.load("race").unwrap();
-            for i in 0..8 {
-                assert!(d.find(&format!("c{i}")).is_some(), "round {round}: c{i} lost; has {:?}", d.ids());
-            }
+            assert_eq!(revs, (2..=9).collect::<Vec<u64>>(), "round {round}: eight updates, each its own rev");
+            assert_eq!(s.load("race").unwrap().ids().len(), 9, "round {round}");
             fs::remove_dir_all(&s.home).ok();
         }
     }
@@ -1235,7 +1313,7 @@ pub mod tests {
         assert!(e.contains("version 2") && e.contains("doc.json"), "{e}");
         let set = Op::Set { id: "t1".into(), field: "text".into(), value: json!("x") };
         assert!(s.patch("plan", &[set.clone()], None).is_err());
-        assert!(s.apply("plan", &[set], None).is_err());
+        assert!(s.replace(plan(), None).is_err());
         assert!(s.put(plan(), None).is_err(), "a put over it would reset what it can't read");
         assert!(s.decide("plan", "Q1", "pick", json!("mcp"), "select", None).is_err());
         assert_eq!(fs::read_to_string(s.doc_path("plan")).unwrap(), newer);

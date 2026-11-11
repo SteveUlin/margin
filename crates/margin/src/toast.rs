@@ -60,6 +60,10 @@ pub fn send(st: &Store, art: &str, text: &str, level: &str, at: &str, ttl: Optio
     if text.trim().is_empty() {
         return Err("a toast needs text".into());
     }
+    // a toast is shown by an artifact's pane: one sent to a name with no artifact showed nowhere
+    if !st.exists(art) {
+        return Err(st.missing(art));
+    }
     if !at.is_empty() && st.load(art).ok().and_then(|d| d.find(at).map(|_| ())).is_none() {
         return Err(format!("no component {at:?} in {art} to anchor the toast to (leave --at off to float it)"));
     }

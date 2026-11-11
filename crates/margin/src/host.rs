@@ -142,7 +142,7 @@ impl Host for PlainHost {
     }
     fn open(&self, st: &Store, art: &str, _o: &OpenOpts, _cfg: &Config) -> Result<Opened, String> {
         if !st.exists(art) {
-            return Err(format!("no artifact {art:?}; create it with `margin put` first"));
+            return Err(st.missing(art));
         }
         if let Some(pid) = view_pids(st, art).first() {
             return Ok(Opened::Pane { handle: format!("pid {pid}"), created: false });

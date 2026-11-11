@@ -548,6 +548,11 @@ impl Worker {
     /// as a sibling, so the feed replacing its root never wipes it.
     fn write_health(&mut self) {
         let b = self.health_block();
+        // a feed never creates its artifact: with none there is no health line to write, and
+        // the run itself fails with the message that names `margin new`
+        if !self.st.exists(&self.f.artifact) {
+            return;
+        }
         let doc = self.st.load(&self.f.artifact).ok();
         let exists = doc.as_ref().and_then(|d| d.find(&b.id)).is_some();
         let op = if exists {
@@ -694,8 +699,14 @@ impl Worker {
     }
 
     /// Run the command to completion (interval, watch). Ok(true) = it changed the artifact.
+    /// A feed's output is an update: with no artifact to update the run fails before the
+    /// command starts, with the store's one message for a missing artifact (`feed ls` and the
+    /// log show it), and nothing is created.
     pub fn run_once(&mut self) -> Result<bool, String> {
         *self.last_stderr.lock().unwrap() = String::new();
+        if !self.st.exists(&self.f.artifact) {
+            return Err(self.st.missing(&self.f.artifact));
+        }
         let mut ch = self.spawn()?;
         let mut out = ch.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -892,8 +903,18 @@ impl Worker {
                     let g = std::mem::take(&mut pending);
                     // a stream's "run" is each batch of lines it hands over; not logged, or a
                     // busy stream would write a log line a second
-                    let changed = self.apply(&g);
-                    self.ran(if changed { "wrote" } else { "unchanged" }, "", false);
+                    if !self.st.exists(&self.f.artifact) {
+                        // the same failure as a periodic run's, logged once per outage
+                        let e = self.st.missing(&self.f.artifact);
+                        if self.status.last_outcome != "failed" {
+                            self.log.line(&format!("run: failed: {e}"));
+                        }
+                        self.status.last_error = e;
+                        self.ran("failed", "", false);
+                    } else {
+                        let changed = self.apply(&g);
+                        self.ran(if changed { "wrote" } else { "unchanged" }, "", false);
+                    }
                 }
                 if closed {
                     break;
@@ -1171,6 +1192,7 @@ mod tests {
     #[test]
     fn a_run_is_tracked_apart_from_a_write() {
         let st = temp_store();
+        st.create(crate::doc::Doc::empty("plan")).unwrap();
         let mut f = feed("jj", "jj");
         f.trigger = Trigger::Interval { every: 60.0 };
         f.min_gap = 0.0;
@@ -1205,6 +1227,7 @@ mod tests {
         let f = feed("jj", "jj");
         let block = |v: Value| -> Block { serde_json::from_value(v).unwrap() };
         let health = block(json!({"type": "feed", "id": "jj-feed", "name": "jj", "state": "live", "until": "2026-11-10T00:00:00Z", "note": "exit 1"}));
+        st.create(crate::doc::Doc::empty("plan")).unwrap();
         st.feed_write("plan", &[vec![Op::Add { parent: None, block: health, before: None, after: None }]], &f.writer(), &[]);
         mark_health(&st, &f, "paused");
         let d = st.load("plan").unwrap();
@@ -1257,10 +1280,55 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A feed updates its artifact and never creates it: a run with no artifact fails with the
+    /// message that names `margin new` (and the name it was probably meant to be), the status
+    /// and log show it, and nothing is created, health line included.
+    #[test]
+    fn a_run_against_a_missing_artifact_fails_without_creating_it() {
+        let st = temp_store();
+        st.create(crate::doc::Doc::empty("plan")).unwrap();
+        let mut f = Feed { artifact: "plans".into(), ..feed("jj", "jj") };
+        f.trigger = Trigger::Interval { every: 60.0 };
+        f.min_gap = 0.0;
+        f.cmd = vec!["printf".into(), r#"{"type":"section","id":"jj","title":"t"}\n"#.into()];
+        let mut w = Worker::new(Store::new(st.home.clone(), st.project.clone()), f.clone(), Arc::new(Ctl::default()), false);
+        let want = "no artifact \"plans\" in project proj: create it with margin new plans (did you mean \"plan\"?)";
+        assert_eq!(w.run_once(), Err(want.to_string()));
+        w.set_state("live", None, None);
+        w.write_health();
+        assert!(!st.exists("plans") && !st.art("plans").exists(), "nothing created");
+        assert_eq!(st.load("plan").unwrap().rev, 1, "and the artifact beside it is untouched");
+        // the supervisor's loop records it as a failed run: `feed ls` shows the message
+        let ctl = Arc::new(Ctl::default());
+        let mut w = Worker::new(Store::new(st.home.clone(), st.project.clone()), f.clone(), ctl.clone(), false);
+        let h = std::thread::spawn(move || {
+            w.run();
+        });
+        let t0 = epoch_now();
+        while read_status(&st, "jj").map(|s| s.last_outcome != "failed").unwrap_or(true) && epoch_now() - t0 < 10.0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        ctl.stop("stopped");
+        h.join().unwrap();
+        let s = read_status(&st, "jj").unwrap();
+        assert_eq!((s.last_outcome.as_str(), s.last_error.as_str()), ("failed", want));
+        assert!(s.last_run_text(epoch_now()).contains("create it with margin new plans"), "{}", s.last_run_text(epoch_now()));
+        let log = std::fs::read_to_string(log_path(&st, "jj")).unwrap();
+        assert!(log.contains(&format!("run: failed: {want}")), "{log}");
+        assert!(!st.exists("plans"));
+        // once it is created, the same feed writes
+        st.create(crate::doc::Doc::empty("plans")).unwrap();
+        let mut w = Worker::new(Store::new(st.home.clone(), st.project.clone()), f, Arc::new(Ctl::default()), false);
+        assert_eq!(w.run_once(), Ok(true));
+        assert!(st.load("plans").unwrap().find("jj").is_some());
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
     /// One non-UTF-8 byte in a one-shot run's output costs that byte, not the run.
     #[test]
     fn run_once_survives_bad_bytes() {
         let st = temp_store();
+        st.create(crate::doc::Doc::empty("plan")).unwrap();
         let mut f = feed("jj", "jj");
         f.trigger = Trigger::Interval { every: 60.0 };
         f.min_gap = 0.0;
@@ -1336,6 +1404,7 @@ mod tests {
     #[test]
     fn feed_history_stays_small() {
         let st = temp_store();
+        st.create(crate::doc::Doc::empty("plan")).unwrap();
         let w = feed("jj", "jj").writer();
         for i in 0..5 {
             let l = format!(r#"{{"type":"text","id":"jj","text":"run {i}"}}"#);
@@ -1345,10 +1414,11 @@ mod tests {
         let l = r#"{"type":"text","id":"jj","text":"run 4"}"#;
         assert_eq!(st.feed_write("plan", &[parse_line(l).unwrap()], &w, &[]).0, None);
         let d = st.load("plan").unwrap();
-        assert_eq!(d.rev, 5);
+        assert_eq!(d.rev, 6, "the create, then five feed writes");
         let hist = std::fs::read_to_string(st.art("plan").join("history.jsonl")).unwrap();
         let lines: Vec<&str> = hist.lines().collect();
-        assert_eq!(lines.len(), 4);
+        // the created (empty) document whole, then a marker per feed write the next one replaced
+        assert_eq!(lines.len(), 5);
         assert!(lines[1..].iter().all(|l| l.contains("\"compact\":true")), "{hist}");
         std::fs::remove_dir_all(&st.home).ok();
     }

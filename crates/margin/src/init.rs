@@ -303,7 +303,7 @@ fn next_steps(o: &Opts) -> Vec<String> {
         (format!("{m} demo"), "plan")
     } else {
         v.push(format!("  - difftastic (difft) isn't installed: `{m} demo` and `{m} diff` need it; the pane below doesn't"));
-        (format!("{m} add hello - todo t1 \"my first step\""), "hello")
+        (format!("{m} new hello && {m} add hello - todo t1 \"my first step\""), "hello")
     };
     let in_zellij = std::env::var("ZELLIJ_SESSION_NAME").map(|s| !s.is_empty()).unwrap_or(false);
     if in_zellij {

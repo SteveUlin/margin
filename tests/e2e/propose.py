@@ -74,7 +74,7 @@ def run():
         return
     chat = wait(lambda: next((p for p in zj("list-panes", "-a", "-j") or [] if not p["is_plugin"]), None), 8)
     cenv = dict(ENV, ZELLIJ_SESSION_NAME=S, ZELLIJ_PANE_ID=str(chat["id"]))
-    m("put", "plan", "--title", "propose e2e", inp=json.dumps({"blocks": [
+    m("new", "plan", "--title", "propose e2e", inp=json.dumps({"blocks": [
         {"type": "question", "id": "Q1", "text": "Ship as CLI or MCP?", "options": ["cli", "mcp"], "default": "cli"},
         {"type": "todo", "id": "t1", "text": "Write the changelog"}]}))
     m("open", "plan", env=cenv)

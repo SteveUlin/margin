@@ -2,13 +2,14 @@
 # margin feed for the `tracker` example: a JSON file of work items -> the sections `wk-now`,
 # `wk-next` and `wk-waiting`.
 #
+#   margin example tracker | margin new tracker                  # the artifact it updates (a feed never creates one)
 #   ./tracker.feed.sh tracker.data.json                          # look at the lines it prints
 #   ./tracker.feed.sh tracker.data.json | margin apply tracker   # apply them by hand (before registering)
 #   margin feed add tracker --watch tracker.data.json --artifact tracker --owns wk \
 #       -- ./tracker.feed.sh tracker.data.json
 #
 # It prints THREE lines, one section each. A line is a whole component: margin replaces the one
-# with that id where it stands, so the sections keep the places the first `margin apply` gave
+# with that id where it stands, so the sections keep the places `margin new` gave
 # them, and the `decided` section between and after them (not under `wk`) is never touched: the
 # feed owns `wk` and `wk-...`, Claude and the person own every other id in the same artifact.
 #

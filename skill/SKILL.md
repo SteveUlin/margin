@@ -28,14 +28,13 @@ plan "…"`) pinned above the content; long reasoning goes in its own artifact (
   lead-in, sub-bullets for detail, `folded: true` on sections opened only on demand. **Why:** a pane
   of every past step read as "cluttered and not super useful" (2026-11-08).
 - **Long-form goes beside the chat.** An overview, proposal, comparison or any reply longer than
-  a screen goes in its own artifact, a tab of the pane: `margin doc <notes> <id> < notes.md`
-  (markdown, written in bullets, one idea each), then `margin tab <art> add <notes>`; chat gets its
-  conclusion in two or three lines plus "it's in the pane". Revise it in place under the same id
+  a screen goes in its own artifact, a tab of the pane: `margin new <notes>` once, `margin doc
+  <notes> <id> < notes.md` (markdown, in bullets, one idea each), `margin tab <art> add <notes>`; chat
+  gets its conclusion in two or three lines plus "it's in the pane". Revise it under the same id
   (change bars show what moved); `margin tab <art> rm <notes>` when the topic closes. Chat keeps
   direct answers, reasoning, what you did and how you know, disagreement, and anything that needs
   a reply now. Reference material (reviews, research, logs) gets its own artifact too, and a `link`
-  row (`target: mg:open/<art>`). **Why:** in chat a long piece scrolls away while {{user}} types
-  an answer to it.
+  row (`target: mg:open/<art>`). **Why:** in chat a long piece scrolls away while they answer it.
 - **Keep the next item explained.** The top item of Next gets a folded explainer in its own
   top-level section right after Next (`margin doc <art> <id>x --title "About <id>: …"`): what,
   why, what it would look like, what's open. A `+ more` note on another Next item asks for one.
@@ -47,7 +46,7 @@ plan "…"`) pinned above the content; long reasoning goes in its own artifact (
 
 ```fish
 margin ls                                  # this project's artifacts (they outlive sessions)
-margin apply plan <<'EOF'                  # the one write; creates the artifact on first use
+margin new plan <<'EOF'                    # create: the only command that makes an artifact
 {"title": "fix the flake", "purpose": "CI green: the flaky test passes 200 runs", "blocks": [
   {"type": "section", "id": "now", "title": "Now", "children": [
     {"type": "todo", "id": "t1", "text": "Reproduce the flaky test"},
@@ -57,7 +56,7 @@ margin apply plan <<'EOF'                  # the one write; creates the artifact
 EOF
 margin open plan                           # a split in your tab, never moves focus
 cargo test && margin set plan t1 status=done note="200 runs" && margin set plan t2 status=doing
-margin add plan now todo t3 "Regression test"            # also: rm, move, title; note= clears
+margin add plan now todo t3 "Regression test"            # add creates, set changes; also rm, move, title
 margin add plan - section ask title="Needs you" --after now     # only now that there is a question
 margin ask plan Q1 "Which store?" sqlite files --suggest files --why "files need no daemon" --parent ask
 margin add plan ask claim A1 "CI runs tests in one process"
@@ -66,7 +65,7 @@ margin add plan decided decided D3 "Keep artifacts 30 days" by=claude
 margin show plan                           # the pane as text, with {{user}}'s decisions merged in
 ```
 
-1. **One pane per chat.** If a hook line names your pane, use it. Else write the shape and
+1. **One pane per chat.** If a hook line names your pane, use it. Else `margin new` the shape and
    `margin open <art>` once (outside Zellij it prints a `margin view …` line for {{user}} to
    run). After that, change the pane or add a tab to it; never open a second one for a new topic.
 2. **Each turn begins with the hook's lines.** `margin: your pane is <art> · doing … · N open` is
@@ -74,16 +73,17 @@ margin show plan                           # the pane as text, with {{user}}'s d
    what {{user}} did in the pane. Treat them as their own input. `margin events --unread` lists
    any you haven't been handed.
 3. **Exactly one todo is `doing`; tick it as the step lands.** The pane's live strip already shows
-   the tool call you're running, so don't narrate calls into the doc. A plan that lags reads as
-   stalled.
+   the tool call you're running, so don't narrate calls into the doc. A lagging plan reads as stalled.
 4. **Never spend a tool call on margin alone.** Chain the write onto the step's real command or
    send it with the next real call; after 10 tool calls with no pane write the hook nudges you to.
    **Why:** a standalone call re-reads the whole context (est. 3× a task's tokens vs 1.1× chained).
-5. **`apply` takes** a whole document (create or replace), a component with an `id` and optional
-   `parent` (upsert), or ops (`{"op": "set", "id": …, "fields": {…}}`, also add/rm/move/title), one
-   per line, all or none. Give every todo, question, claim and diff an id. Every write prints
-   `rev N`; when you rewrite from what you read, pass `--base-rev N` so a stale base fails loudly.
-   `margin schema [type]` lists types and fields; a wrong field fails with a "did you mean".
+5. **Creating and changing are different commands.** `new` creates an artifact and refuses one that
+   exists; every other write refuses one that doesn't ("create it with margin new", plus the nearest
+   name), so a typo never makes a second board. Inside one: `add`/`ask` create (an id there is
+   refused), `set`/`move`/`rm` change (a missing id is refused). `apply` is state from a script: a
+   component with an `id` and optional `parent` (upsert), ops (`{"op": "set", "id": …, "fields":
+   {…}}`), or a whole document (replaces), one per line, all or none. Every write prints `rev N`
+   (`--base-rev N` fails on a stale base); `margin schema [type]` lists types and fields.
 
 ## Rules
 

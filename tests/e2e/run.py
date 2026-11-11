@@ -193,7 +193,7 @@ def run(h):
 
     # 3. kitty images: unfold the explainer so the image is on screen, check Zellij re-emits it
     n_before = len(h.kitty_seen)
-    m("put", "pic", "--title", "graph", inp=json.dumps({"blocks": [{"type": "image", "id": "g", "rows": 10,
+    m("new", "pic", "--title", "graph", inp=json.dumps({"blocks": [{"type": "image", "id": "g", "rows": 10,
         "path": os.path.join(ROOT, "assets/demo/graph.png"), "alt": "matcher pipeline"}]}))
     m("open", "pic", "--float", env=claude_env)
     time.sleep(2.0)

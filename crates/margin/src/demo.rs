@@ -47,7 +47,7 @@ pub fn doc() -> Result<Doc, String> {
 fn plan(a: &std::path::Path) -> Result<Doc, String> {
     let now = epoch_now();
     serde_json::from_value(json!({
-        "id": "plan", "title": "fix recs flake", "kind": "plan",
+        "id": "plan", "title": "fix recs flake", "kind": "demo",
         "blocks": [
             {"type": "section", "id": "steps", "title": "Steps", "children": [
                 {"type": "todo", "id": "t1", "text": "Reproduce the flaky test", "note": "1 in 20 runs", "status": "done"},
@@ -87,7 +87,15 @@ fn plan(a: &std::path::Path) -> Result<Doc, String> {
     .map_err(|e| e.to_string())
 }
 
+/// Create the demo artifact `plan`, or reset it when it is the demo's own (kind `demo`). A
+/// `plan` that is someone's work is refused: the demo is a creating command, and it once
+/// replaced whatever `plan` held.
 pub fn setup(st: &Store) -> Result<u64, String> {
+    if let Ok(d) = st.load("plan") {
+        if d.kind != "demo" {
+            return Err(format!("plan already exists (rev {}) and is not the demo's; run the demo in another project (--project demo), or remove it with margin rm plan --yes", d.rev));
+        }
+    }
     // a fresh start: drop old decisions and events for the demo artifact
     let _ = std::fs::remove_file(st.state_path("plan"));
     let _ = std::fs::remove_dir_all(st.art("plan").join("view"));

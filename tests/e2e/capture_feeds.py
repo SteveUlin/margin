@@ -114,7 +114,7 @@ def agents():
     sim.end(DOT, d, nc, now - 2400)
     art = {"blocks": [{"type": "text", "id": "intro", "style": "note",
                        "text": "Claude Code sessions on this machine, from their transcripts. A feed keeps this current; no model calls."}]}
-    m("put", "agents", "--title", "agents", inp=json.dumps(art))
+    m("new", "agents", "--title", "agents", inp=json.dumps(art))
     env = dict(ENV, CLAUDE_PROJECTS=root, AGENTS_EVERY="0.5")
     m("feed", "add", "agents", "--stream", "--artifact", "agents", "--owns", "ag", "--", os.path.join(ROOT, "feeds/agents"), env=env)
     h = view("agents", 22, "agents ·")
@@ -154,7 +154,7 @@ def jj():
     open(os.path.join(repo, "prior.py"), "w").write("alpha = 1\nbeta = 1\n")
     j("describe", "-m", "shop: Beta prior per item class")
     j("new")
-    m("put", "changes", "--title", "changes · shop", inp=json.dumps({"blocks": [
+    m("new", "changes", "--title", "changes · shop", inp=json.dumps({"blocks": [
         {"type": "text", "id": "why", "style": "note", "text": "The jj feed rewrites the ledger below whenever jj records an operation."}]}))
     m("feed", "add", "jj", "--watch", ".jj/repo/op_heads/heads", "--artifact", "changes", "--", os.path.join(ROOT, "feeds/jj"), cwd=repo)
     h = view("changes", 24, "jj · shop")
@@ -194,7 +194,7 @@ while :; do i=$((i+1))
 done
 """)
     os.chmod(flaky, 0o755)
-    m("put", "prices", "--title", "prices", inp=json.dumps({"blocks": [
+    m("new", "prices", "--title", "prices", inp=json.dumps({"blocks": [
         {"type": "text", "id": "why", "style": "note", "text": "A flaky stream feed: the daemon restarts it with backoff (1 s, 2 s, 4 s)."}]}))
     h = view("prices", 14, "prices")
     h.send("\x1b[O")
@@ -222,7 +222,7 @@ def transcripts():
     sim.end(P, sid, cwd, now - 240)
     sim.put(P, sid, cwd, {"type": "user", "message": {"content": "now the sync retry, with backoff"}}, now - 60)
     sim.tool(P, sid, cwd, "y1", "Bash", {"description": "Run the sync tests", "command": "deno test"}, now - 30)
-    m("put", "session", "--title", "this session", inp=json.dumps({"blocks": []}))
+    m("new", "session", "--title", "this session", inp=json.dumps({"blocks": []}))
     env = dict(ENV, CLAUDE_PROJECTS=root, QUEUE_EVERY="0.5", TURNS_EVERY="0.5")
     tp = sim.path(P, sid)
     m("feed", "add", "queue", "--stream", "--artifact", "session", "--owns", "q", "--", os.path.join(ROOT, "feeds/queue"), tp, env=env)

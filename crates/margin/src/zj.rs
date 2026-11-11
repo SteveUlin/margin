@@ -129,7 +129,7 @@ fn remember(sess: &str, st: &Store) {
 /// Open (or reuse) the pane for an artifact. Returns the pane handle and whether it was created.
 pub fn open(st: &Store, art: &str, o: &OpenOpts, cfg: &Config) -> Result<(String, bool), String> {
     if !st.exists(art) {
-        return Err(format!("no artifact {art:?}; create it with `margin put` first"));
+        return Err(st.missing(art));
     }
     let sess = session(o.session.as_deref()).ok_or("not inside Zellij ($ZELLIJ_SESSION_NAME unset): pass --session")?;
     let tab = match o.tab_id {

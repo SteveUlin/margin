@@ -18,7 +18,7 @@ json.dump({}, open(ENV["MARGIN_CONFIG"], "w"))
 doc = {"title": "static", "blocks": [{"type": "section", "id": "s", "title": "Steps", "children": [
     {"type": "todo", "id": "a", "text": "done thing", "status": "done"}, {"type": "todo", "id": "b", "text": "next thing"}]},
     {"type": "claim", "id": "A1", "text": "an assumption"}]}
-subprocess.run([MARGIN, "put", "plan"], env=ENV, input=json.dumps(doc), text=True, check=True)
+subprocess.run([MARGIN, "new", "plan"], env=ENV, input=json.dumps(doc), text=True, check=True)
 
 
 def cpu(pid):

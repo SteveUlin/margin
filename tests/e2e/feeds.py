@@ -141,7 +141,7 @@ def run(h):
     claude_env = dict(ENV, ZELLIJ_SESSION_NAME=S, ZELLIJ_PANE_ID=str(chat["id"]))
 
     # Claude's part of the artifact: a question sulin will answer, and a note
-    m("put", "live", "--title", "feeds e2e", inp=json.dumps({"blocks": [
+    m("new", "live", "--title", "feeds e2e", inp=json.dumps({"blocks": [
         {"type": "text", "id": "intro", "text": "Claude wrote this line; feeds own the rest."},
         {"type": "question", "id": "Q1", "text": "Keep going?", "options": ["yes", "no"], "default": "yes"},
     ]}))
@@ -228,7 +228,7 @@ def plain():
     env = dict(ENV, MARGIN_HOST="plain")
     r = m("open", "live", env=env)
     check("plain host: open prints the view command", "margin view live" in r.stdout, r.stdout.strip())
-    m("put", "pq", "--title", "plain", env=env, inp=json.dumps({"blocks": [
+    m("new", "pq", "--title", "plain", env=env, inp=json.dumps({"blocks": [
         {"type": "question", "id": "Q2", "text": "Plain host works?", "options": ["yes", "no"], "default": "no"}]}))
     h = Host([MARGIN, "view", "pq"], cols=80, rows=20, env=env)
     try:

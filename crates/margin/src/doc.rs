@@ -591,6 +591,12 @@ pub fn walk<'a>(blocks: &'a [Block], f: &mut dyn FnMut(&'a Block, Option<&'a Blo
 }
 
 impl Doc {
+    /// An artifact with nothing in it yet, titled by its id: what `margin new <art>` creates
+    /// when it is given no document.
+    #[cfg(test)]
+    pub fn empty(id: &str) -> Doc {
+        Doc { v: 1, id: id.into(), title: id.into(), kind: String::new(), rev: 0, icon: None, blocks: vec![], updated: String::new(), sessions: vec![], by: String::new(), hints: vec![], purpose: String::new() }
+    }
     pub fn find(&self, id: &str) -> Option<&Block> {
         let mut out = None;
         walk(&self.blocks, &mut |b, _, _| {

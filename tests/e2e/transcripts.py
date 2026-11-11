@@ -234,7 +234,7 @@ def part2():
         cenv = dict(ENV, ZELLIJ_SESSION_NAME=S, ZELLIJ_PANE_ID=str(chat["id"]))
         tr = Transcript(os.path.join(PROJECTS, "-live", "live1.jsonl"), REPO, datetime.now(timezone.utc))
         tr.prompt("start the live test")
-        m("put", "live", "--title", "transcripts e2e", inp=json.dumps({"blocks": []}))
+        m("new", "live", "--title", "transcripts e2e", inp=json.dumps({"blocks": []}))
         m("open", "live", env=cenv)
         mp = wait(lambda: next((p for p in zj("list-panes", "-a", "-j") or [] if p["title"] == "margin:live"), None), 5)
 

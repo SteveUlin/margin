@@ -73,7 +73,8 @@ margin demo live       # plays a turn against it: steps tick, a card resolves
 - **No Zellij:** `margin open plan` prints a `margin view plan` command. Run that in any terminal
   beside the chat; keys and mouse clicks work in the pane.
 - **No difftastic:** `margin demo` draws a diff and fails without `difft`. Skip the demo:
-  `margin add hello - todo t1 "my first step" && margin view hello` needs nothing else. `init`
+  `margin new hello && margin add hello - todo t1 "my first step" && margin view hello` needs
+  nothing else. `init`
   prints whichever of these fits the machine.
 
 Then, in Claude Code: "start a margin for this". Claude reads the skill, writes the pane's shape,

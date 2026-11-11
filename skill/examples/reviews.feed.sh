@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # margin feed for the `reviews` example: a JSON file of pull requests -> the table `pr`.
 #
+#   margin example reviews | margin new reviews                  # the artifact it updates (a feed never creates one)
 #   ./reviews.feed.sh reviews.data.json                          # look at the line it prints
 #   ./reviews.feed.sh reviews.data.json | margin apply reviews   # apply it by hand (before registering)
 #   margin feed add reviews --watch reviews.data.json --artifact reviews --owns pr \

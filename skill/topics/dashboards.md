@@ -46,10 +46,11 @@ feed script and sample data. Start from the nearest one; `margin example <name>`
   the same kind of thing. Never color for decoration.
 - A symbol is followed by a space (`✗ failed`, never `✗failed`) in any text you write.
 
-**(b) Write it once**: a whole document on stdin. This fixes the layout and the parts you own.
+**(b) Create it**: `margin new` with a whole document on stdin. This fixes the layout and the
+parts you own. `new` is the only command that creates an artifact, and it refuses one that exists.
 
 ```sh
-margin apply reviews <<'EOF'
+margin new reviews <<'EOF'
 {"title": "Reviews", "purpose": "Pull requests waiting on my review",
  "hints": ["enter  open the pull request", "d  its description"],
  "blocks": [
@@ -65,7 +66,11 @@ margin show reviews                               # the tree: type, id, text
 ```
 
 - Envelope keys: `title`, `purpose`, `hints`, `kind`, `blocks`, nothing else (`margin schema
-  document` describes each). It prints `reviews rev N`.
+  document` describes each). It prints `reviews rev 1`.
+- From here on every write is an update, and an update never creates: `margin apply`, `add`,
+  `set`, a feed's run and the rest fail on a name with no artifact (`no artifact "reveiws" …:
+  create it with margin new reveiws (did you mean "reviews"?)`). To redo the layout, replace the
+  document with `margin put reviews < doc.json`, or start over: `margin rm reviews --yes`, then `new`.
 - A schema error names the block and the field and writes nothing; `margin schema <type>` lists
   a type's fields.
 - The last block above places the feed's health line (state, trigger, last write, the error when
@@ -89,7 +94,8 @@ margin show reviews                               # the tree: type, id, text
 table that is one line: the table block with all its `tr` children. `margin help feeds` has the
 contract and a complete script; test it by hand with `./script | margin apply reviews`.
 
-**(d) Register it** (from the directory the script's relative paths start at):
+**(d) Register it** (from the directory the script's relative paths start at). The artifact
+must exist by now: a feed updates its artifact and never creates it, at `feed add` or at a run.
 
 ```sh
 margin feed add reviews --every 2m --artifact reviews --owns pr -- ./reviews-feed.sh

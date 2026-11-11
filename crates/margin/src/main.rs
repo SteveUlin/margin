@@ -43,12 +43,17 @@ use store::Store;
 
 const HELP: &str = "margin: live artifacts beside the chat
 
-content (Claude):
-  margin apply <art> [--base-rev N] [--json] < input   the one write: ops, components (upsert), or a whole doc
+content (Claude): creating and changing are different commands, for an artifact and inside one
+  create   margin new (an artifact)    margin add, margin ask (a component; an id that exists is refused)
+  change   margin set, move, rm, title, purpose, hints (what they name must exist)
+  state from a script   margin apply (components upsert by id; the artifact must exist)
+  margin new <art> [--title T] [--purpose P] [--kind K] [< doc.json]   create an artifact (empty, or from a
+                                                       whole doc); one that exists is refused
+  margin apply <art> [--base-rev N] [--json] < input   update: ops, components (upsert by id), or a whole doc
   margin schema [type|document] [--json]              the document's fields, component types, fields, values
-  margin put <art> [--title T] [--kind K] < doc.json   alias of apply (whole doc)
-  margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]
-  margin set <art> <id> <field> <value> | <field>=<value>... [--base-rev N]   typed by the schema
+  margin put <art> [--title T] [--kind K] < doc.json   replace the whole document of an existing artifact
+  margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]   create a component
+  margin set <art> <id> <field> <value> | <field>=<value>... [--base-rev N]   change one (typed by the schema)
   margin rm <art> <id>          margin move <art> <id> --before X|--after X|--parent P
   margin rm <art> [--yes]                              remove a whole artifact (to .archive/; without --yes: a preview)
   margin title <art> <title>                                        rename the artifact
@@ -126,18 +131,19 @@ global flags (before or after the command):
 ";
 
 const CMDS: &[Cmd] = &[
-    Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  the one write: stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (create or replace)\n  several lines are one write; creates the artifact on first write\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n", flags: &["--base-rev", "--json", "--title", "--kind"], max_pos: Some(1) },
-    Cmd { name: "put", help: "margin put <art> [--title T] [--kind K] [--base-rev N] < doc.json\n  alias of apply that reads a bare array as the block list: create or replace a whole artifact\n", flags: &["--title", "--kind", "--base-rev", "--json"], max_pos: Some(1) },
+    Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  state from a script: update an artifact that exists. stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a feed prints \"this is the state now\"); the\n  artifact itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n", flags: &["--base-rev", "--json", "--title", "--kind"], max_pos: Some(1) },
+    Cmd { name: "new", help: "margin new <art> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes an artifact. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal or\n  an empty stdin it starts empty, titled <art> unless --title says otherwise. An artifact that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <art> --yes. Every\n  other writing command refuses an artifact that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
+    Cmd { name: "put", help: "margin put <art> [--title T] [--kind K] [--base-rev N] < doc.json\n  change: replace the whole document of an existing artifact (a bare array is the block list).\n  A missing artifact is an error: create it with margin new\n", flags: &["--title", "--kind", "--base-rev", "--json"], max_pos: Some(1) },
     Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
-    Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  add one component under <parent> (- = top level); creates the artifact on first write\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
-    Cmd { name: "set", help: "margin set <art> <id> <field> <value> [--base-rev N]\nmargin set <art> <id> <field>=<value>... [--base-rev N]\n  set fields; text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
-    Cmd { name: "rm", help: "margin rm <art> <id> [--base-rev N] [--json]\n  remove a component and its children\nmargin rm <art> [--yes]\n  remove a whole artifact. Without --yes it prints what would go (title, rev, the feeds\n  registered on it, the panes showing it) and removes nothing. With --yes the artifact moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and its feeds are unregistered. Panes are left\n  open: margin close <art>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
-    Cmd { name: "move", help: "margin move <art> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
-    Cmd { name: "title", help: "margin title <art> <title> [--base-rev N]\n  rename the artifact (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
-    Cmd { name: "hints", help: "margin hints <art> [text...] [--json]\n  the artifact's reminders: a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
-    Cmd { name: "purpose", help: "margin purpose <art> [\"text\"] [--json]\n  what the pane is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
-    Cmd { name: "patch", help: "margin patch <art> [--base-rev N] < ops.json\n  alias of margin apply (one op, an op array, or components)\n", flags: &["--base-rev", "--json"], max_pos: Some(1) },
-    Cmd { name: "ask", help: "margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  Creates the artifact on first write; an id that exists is refused (use set)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
+    Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the artifact must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
+    Cmd { name: "set", help: "margin set <art> <id> <field> <value> [--base-rev N]\nmargin set <art> <id> <field>=<value>... [--base-rev N]\n  change: set fields of a component that exists (a missing id is refused; create it with margin add); text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
+    Cmd { name: "rm", help: "margin rm <art> <id> [--base-rev N] [--json]\n  change: remove a component that exists, and its children\nmargin rm <art> [--yes]\n  remove a whole artifact. Without --yes it prints what would go (title, rev, the feeds\n  registered on it, the panes showing it) and removes nothing. With --yes the artifact moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and its feeds are unregistered. Panes are left\n  open: margin close <art>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
+    Cmd { name: "move", help: "margin move <art> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n  change: move a component that exists\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
+    Cmd { name: "title", help: "margin title <art> <title> [--base-rev N]\n  change: rename an artifact that exists (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
+    Cmd { name: "hints", help: "margin hints <art> [text...] [--json]\n  change: the reminders of an artifact that exists, a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
+    Cmd { name: "purpose", help: "margin purpose <art> [\"text\"] [--json]\n  change: what the pane of an artifact that exists is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
+    Cmd { name: "patch", help: "margin patch <art> [--base-rev N] < ops.json\n  alias of margin apply (one op, an op array, or components): the artifact must exist\n", flags: &["--base-rev", "--json"], max_pos: Some(1) },
+    Cmd { name: "ask", help: "margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  create: a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  An id that exists is refused (change it with margin set); the artifact must exist (margin new)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
     Cmd { name: "propose", help: "margin propose <art> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
     Cmd { name: "diff", help: "margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <art> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "image", help: "margin image <art> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
@@ -162,10 +168,10 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "daemon", help: "margin daemon\n  the feed supervisor, in the foreground (the CLI starts it on demand; units/ has a systemd unit)\n", flags: &[], max_pos: Some(0) },
-    Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  set up the demo plan artifact; `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
+    Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo artifact `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
     Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
     Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
-    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data]\n  print one: the artifact (a whole document: margin example reviews | margin apply reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data"], max_pos: Some(1) },
+    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data]\n  print one: the artifact (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
 
@@ -212,7 +218,8 @@ fn feed_sub_help(sub: &str) -> Option<&'static str> {
                      (a file replaced by rename is still watched)
   --stream           start it once and keep it running; lines land as they arrive, and it is
                      restarted with backoff when it exits
-  --artifact A       the artifact it writes (default: <name>)
+  --artifact A       the artifact it updates (default: <name>); it must exist (margin new):
+                     a feed never creates its artifact
   --owns PREFIX      the id prefix it owns there: PREFIX and PREFIX-… (default: <name>; * = all)
   --min-gap 1s       at least this long between two writes
   --timeout 60s      a run of --every / --watch is stopped after this long
@@ -370,14 +377,6 @@ fn stdin() -> String {
     s
 }
 
-/// `add` and `ask`: like `apply`, the first write to an artifact creates it (title = its id), so
-/// Claude never needs to know whether it exists. The store decides which under its lock.
-fn create_or_patch(st: &Store, art: &str, ops: Vec<Op>, a: &Args) -> Result<(), String> {
-    let rev = st.apply(art, &ops, a.rev()?)?;
-    report(art, rev, a);
-    Ok(())
-}
-
 /// A `set` value typed by the schema; an empty one removes the field (`note=`), since an empty
 /// string stored in its place still drew as a field with nothing in it.
 fn set_value(kind: &str, field: &str, raw: &str) -> Value {
@@ -421,10 +420,36 @@ fn report(art: &str, rev: u64, a: &Args) {
     }
 }
 
-/// `margin apply` (and its aliases `put`, `patch`): stdin in the feed line grammar, or a
-/// whole-document envelope `{"title", "blocks"}`. One all-or-nothing write. `whole`: `put`'s
-/// reading, where a bare array is the block list, not an op list.
-fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool) -> Result<(), String> {
+/// What a whole-document write does with the artifact it names: `margin new` creates it and
+/// refuses one that exists; `put` and a whole-document `apply` replace one that exists and
+/// refuse a missing one. No command does whichever applies: a mistyped name once made a
+/// second board.
+#[derive(Clone, Copy, PartialEq)]
+enum Whole {
+    Create,
+    Replace,
+}
+
+/// `margin new <art>`: create the artifact from `input` (a whole document, a bare array of
+/// blocks, or nothing: an empty artifact).
+fn new_cmd(st: &Store, art: &str, input: &str, a: &Args) -> Result<(), String> {
+    let t = input.trim();
+    let whole_doc = match serde_json::from_str::<Value>(t) {
+        Ok(Value::Array(_)) => true,
+        Ok(Value::Object(m)) => m.get("op").is_none() && m.get("type").is_none(),
+        _ => false,
+    };
+    if !t.is_empty() && !whole_doc {
+        return Err(format!("stdin is not a whole document ({{\"title\", \"blocks\"}}) or an array of blocks; create it empty with `margin new {art}`, then pipe ops or components to `margin apply {art}`"));
+    }
+    apply_cmd(st, art, input, a, true, Whole::Create)
+}
+
+/// `margin apply` (and `put`, `patch`): stdin in the feed line grammar, or a whole-document
+/// envelope `{"title", "blocks"}`. One all-or-nothing write to an artifact that exists. `whole`:
+/// `put`'s reading, where a bare array is the block list, not an op list. `mode`: `margin new`
+/// comes through here too, with `Whole::Create`.
+fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool, mode: Whole) -> Result<(), String> {
     let t = input.trim();
     let v: Option<Value> = if t.is_empty() { Some(json!({})) } else { serde_json::from_str(t).ok() };
     let envelope = match &v {
@@ -455,6 +480,12 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool) -> Resul
         if let Some(k) = a.get("--kind") {
             v["kind"] = json!(k);
         }
+        if let Some(p) = a.get("--purpose") {
+            v["purpose"] = json!(p.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+        if mode == Whole::Create && v.get("title").is_none() {
+            v["title"] = json!(art);
+        }
         if v.get("blocks").is_none() {
             v["blocks"] = json!([]);
         }
@@ -472,7 +503,11 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool) -> Resul
             }
         }
         let d: Doc = serde_json::from_value(v).map_err(|e| e.to_string())?;
-        let rev = st.put(d, a.rev()?)?;
+        // which of the two it is, the store checks under its lock
+        let rev = match mode {
+            Whole::Create => st.create(d)?,
+            Whole::Replace => st.replace(d, a.rev()?)?,
+        };
         report(art, rev, a);
         return Ok(());
     }
@@ -480,8 +515,7 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool) -> Resul
     if ops.is_empty() {
         return Err("nothing to apply".into());
     }
-    // patch, or create on a first write: the store decides which under its lock
-    let rev = st.apply(art, &ops, a.rev()?)?;
+    let rev = st.patch(art, &ops, a.rev()?)?;
     report(art, rev, a);
     Ok(())
 }
@@ -618,7 +652,7 @@ fn tail_cmd(a: &Args, rest: Vec<String>) -> Result<(), String> {
     if let Some(p) = a.get("--parent") {
         c["parent"] = json!(p);
     }
-    apply_cmd(&st, art, &c.to_string(), a, false)?;
+    apply_cmd(&st, art, &c.to_string(), a, false, Whole::Replace)?;
     let code = tail::run(&st, art, id, &title, &rest)?;
     if code != 0 {
         std::process::exit(code);
@@ -641,7 +675,15 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "apply" | "patch" | "put" => {
             let st = store(a);
-            apply_cmd(&st, a.pos(0, "artifact")?, &stdin(), a, cmd == "put")?;
+            apply_cmd(&st, a.pos(0, "artifact")?, &stdin(), a, cmd == "put", Whole::Replace)?;
+        }
+        "new" => {
+            let st = store(a);
+            // a terminal has no document to give: the artifact starts empty (reading it would
+            // wait for a ctrl-d nobody knows to type)
+            use std::io::IsTerminal;
+            let input = if std::io::stdin().is_terminal() { String::new() } else { stdin() };
+            new_cmd(&st, a.pos(0, "artifact")?, &input, a)?;
         }
         "add" => {
             let st = store(a);
@@ -671,7 +713,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             }
             let block = Block { kind: kind.into(), id: id.into(), children: vec![], f };
             let parent = (parent != "-").then(|| parent.to_string());
-            create_or_patch(&st, art, vec![Op::Add { parent, block, before: a.get("--before").map(String::from), after: a.get("--after").map(String::from) }], a)?;
+            patch(&st, art, vec![Op::Add { parent, block, before: a.get("--before").map(String::from), after: a.get("--after").map(String::from) }], a)?;
         }
         "set" => {
             let st = store(a);
@@ -764,10 +806,10 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 f.insert("applies".into(), json!(w));
             }
             let block = Block { kind: "question".into(), id: id.into(), children: vec![], f };
-            if st.load(art).map(|d| d.find(id).is_some()).unwrap_or(false) {
+            if st.load(art)?.find(id).is_some() {
                 return Err(format!("{id} already exists in {art}: change it with `margin set {art} {id} <field>=<value>`, or ask under a new id"));
             }
-            create_or_patch(&st, art, vec![Op::Add { parent: a.get("--parent").map(String::from), block, before: None, after: None }], a)?;
+            patch(&st, art, vec![Op::Add { parent: a.get("--parent").map(String::from), block, before: None, after: None }], a)?;
         }
         "propose" => {
             // a change to one of the person's decisions, offered on the component; his accept applies it
@@ -794,6 +836,10 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "diff" => {
             let st = store(a);
             let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+            // before difft runs: a missing artifact is the first thing wrong
+            if !st.exists(art) {
+                return Err(st.missing(art));
+            }
             let tmp = std::env::temp_dir().join(format!("margin-diff-{}", std::process::id()));
             let (old, new, label) = if let Some(rev) = a.get("--rev") {
                 let file = a.pos(2, "file")?;
@@ -831,6 +877,9 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "image" => {
             let st = store(a);
             let (art, id, png) = (a.pos(0, "artifact")?, a.pos(1, "id")?, a.pos(2, "png")?);
+            if !st.exists(art) {
+                return Err(st.missing(art));
+            }
             let path = std::fs::canonicalize(png).map_err(|e| format!("{png}: {e}"))?;
             vellum::image::Image::load_png(&path)?;
             let mut f = serde_json::Map::new();
@@ -978,7 +1027,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             for (pid, n) in mdoc::long_paragraphs(&sec) {
                 eprintln!("{}", who::say(&format!("hint: {pid} is a paragraph of {n} sentences; bullets (one idea each) read faster and each is a row sulin can react to")));
             }
-            apply_cmd(&st, art, &sec.to_string(), a, false)?;
+            apply_cmd(&st, art, &sec.to_string(), a, false, Whole::Replace)?;
         }
         "toast" => {
             let st = store(a);
@@ -1013,7 +1062,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 println!("{}", if link::remove(&st, &sess) { "unlinked" } else { "no link" });
             } else if let Some(art) = a.pos.first() {
                 if !st.exists(art) {
-                    return Err(format!("no artifact {art:?}"));
+                    return Err(st.missing(art));
                 }
                 link::set(&st, &sess, art, "explicit");
                 println!("linked {art}");
@@ -1048,7 +1097,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let h = host::pick(&cfg, a.get("--session"));
             let more: Vec<String> = a.get("--tabs").map(|t| t.split(',').filter(|x| !x.is_empty() && *x != art).map(String::from).collect()).unwrap_or_default();
             if let Some(t) = more.iter().find(|t| !st.exists(t)) {
-                return Err(format!("no artifact {t:?} for --tabs"));
+                return Err(format!("--tabs: {}", st.missing(t)));
             }
             // on show already as a tab of another pane beside the chat: that pane is its pane
             if more.is_empty() && !a.has("--stacked") {
@@ -1110,7 +1159,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let st = store(a);
             let primary = a.pos(0, "artifact")?;
             if !st.exists(primary) {
-                return Err(format!("no artifact {primary:?}"));
+                return Err(st.missing(primary));
             }
             let mut panes: Vec<String> = match a.get("--pane") {
                 Some(p) => vec![p.to_string()],
@@ -1124,7 +1173,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 (None, _) => None,
                 (Some(op), Some(art)) => {
                     if op == "add" && !st.exists(art) {
-                        return Err(format!("no artifact {art:?}"));
+                        return Err(st.missing(art));
                     }
                     Some((op.as_str(), art.as_str()))
                 }
@@ -1253,7 +1302,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 }
                 _ => {
                     let rev = demo::setup(&st)?;
-                    println!("plan rev {rev} in project {}", st.project);
+                    println!("plan rev {rev} in project {} (the demo's own artifact: run again, it resets it)", st.project);
                     println!("next: margin open plan    (in Zellij a split; elsewhere it prints the view command), then: margin demo live");
                 }
             }
@@ -1309,7 +1358,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
 /// `margin rm <art>`: what would go, and with `yes` the removal. The store never deletes
 /// (`Store::archive`, as `margin gc`): the artifact's directory moves to `.archive/`, so a
 /// mistaken removal is one `mv` from undone. Its feeds are unregistered first, since a feed left
-/// registered would write the artifact back into being on its next run. Without `yes` nothing
+/// registered would fail every run from then on (a feed never creates its artifact). Without `yes` nothing
 /// changes and the command fails, so a script can't take the preview for the removal.
 fn rm_artifact(st: &Store, art: &str, yes: bool, panes: &[String]) -> Result<String, String> {
     let d = st.load(art)?;
@@ -1385,6 +1434,11 @@ fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
                 timeout: a.get("--timeout").and_then(util::parse_duration).unwrap_or(60.0),
                 added: util::now_rfc3339(),
             };
+            // a feed updates its artifact and never creates it: a mistyped --artifact is caught
+            // here, not as a board nobody asked for
+            if !st.exists(&artifact) {
+                return Err(st.missing(&artifact));
+            }
             let desc = f.trigger.describe();
             edit_registry(&st, |r| r.add(f, a.has("--replace")))?;
             // ids Claude already wrote under the prefix change hands now; say so
@@ -1616,7 +1670,7 @@ fn set_doc_field(st: &Store, art: &str, change: impl Fn(&mut Doc) -> bool) -> Re
         if !change(&mut d) {
             return Ok(base);
         }
-        match st.put(d, Some(base)) {
+        match st.replace(d, Some(base)) {
             Ok(rev) => return Ok(rev),
             Err(e) if e.starts_with("stale base") => last = e,
             Err(e) => return Err(e),
@@ -1660,22 +1714,153 @@ mod tests {
         run(cmd, &Args::parse(&all))
     }
 
-    /// `add` and `ask` on an artifact that doesn't exist yet create it, as `apply` does.
+    /// `margin new <art>` with no document (unit tests have no stdin to give).
+    fn mk(art: &str, flags: &[String]) {
+        let mut all = vec![art.to_string()];
+        all.extend(flags.iter().cloned());
+        let a = Args::parse(&all);
+        new_cmd(&store(&a), art, "", &a).unwrap();
+    }
+
+    /// `margin new` is the one command that creates an artifact: empty, or from a document; a
+    /// second `new` is refused and leaves what is there alone.
     #[test]
-    fn add_and_ask_create_the_artifact() {
+    fn new_creates_an_artifact_and_refuses_one_that_exists() {
+        let (st, f) = tmp_store("new");
+        let a = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).chain(f.iter().cloned()).collect::<Vec<_>>());
+        new_cmd(&st, "a1", "", &a(&[])).unwrap();
+        let d = st.load("a1").unwrap();
+        assert_eq!((d.title.as_str(), d.rev, d.blocks.len(), d.by.as_str()), ("a1", 1, 0, "claude"));
+        new_cmd(&st, "a2", "", &a(&["--title", "Fix CI", "--purpose", "green  by Friday", "--kind", "plan"])).unwrap();
+        let d = st.load("a2").unwrap();
+        assert_eq!((d.title.as_str(), d.purpose.as_str(), d.kind.as_str()), ("Fix CI", "green by Friday", "plan"));
+        // a whole document, and a bare array of blocks
+        new_cmd(&st, "a3", r#"{"v":1,"title":"Doc","hints":["k  key"],"blocks":[{"type":"todo","id":"t1","text":"one"}]}"#, &a(&[])).unwrap();
+        let d = st.load("a3").unwrap();
+        assert_eq!((d.title.as_str(), d.hints.len(), d.find("t1").is_some()), ("Doc", 1, true));
+        new_cmd(&st, "a4", r#"[{"type":"todo","id":"t1","text":"one"}]"#, &a(&[])).unwrap();
+        assert_eq!((st.load("a4").unwrap().title.as_str(), st.load("a4").unwrap().ids()), ("a4", vec!["t1".to_string()]));
+        // a second time: refused, whatever it carries, and nothing changes
+        for input in ["", r#"{"title":"Other","blocks":[]}"#] {
+            let e = new_cmd(&st, "a3", input, &a(&[])).unwrap_err();
+            assert_eq!(e, "a3 already exists (rev 1); change it with margin apply/add/set, or remove it with margin rm a3 --yes");
+        }
+        assert_eq!((st.load("a3").unwrap().title.as_str(), st.load("a3").unwrap().rev), ("Doc", 1));
+        // ops and single components are updates, not a document to start from; a bad block creates nothing
+        for input in [r#"{"type":"todo","id":"t1","text":"one"}"#, r#"{"op":"rm","id":"t1"}"#, "not json"] {
+            let e = new_cmd(&st, "a5", input, &a(&[])).unwrap_err();
+            assert!(e.contains("not a whole document") && e.contains("margin new a5"), "{e}");
+        }
+        assert!(new_cmd(&st, "a5", r#"[{"type":"nope","id":"x"}]"#, &a(&[])).is_err() && !st.exists("a5"));
+        assert!(new_cmd(&st, "bad name", "", &a(&[])).is_err());
+        // the same name again once the first is removed
+        go("rm", &["a3", "--yes"], &f).unwrap();
+        new_cmd(&st, "a3", "", &a(&[])).unwrap();
+        let _ = std::fs::remove_dir_all(&st.home);
+    }
+
+    /// The opposite of what it once was (`add_and_ask_create_the_artifact`): `add` and `ask`
+    /// create a component in an artifact that exists, and refuse an artifact that doesn't.
+    #[test]
+    fn add_and_ask_refuse_a_missing_artifact() {
         let (st, f) = tmp_store("create");
+        for (cmd, v) in [("add", &["a1", "-", "section", "now", "title=Now"][..]), ("ask", &["a1", "Q1", "Which?", "x", "y"])] {
+            assert_eq!(go(cmd, v, &f).unwrap_err(), "no artifact \"a1\" in project t: create it with margin new a1", "{cmd}");
+        }
+        assert!(!st.exists("a1") && !st.art("a1").exists());
+        mk("a1", &f);
         go("add", &["a1", "-", "section", "now", "title=Now"], &f).unwrap();
         go("add", &["a1", "now", "todo", "t1", "first", "step"], &f).unwrap();
         let d = st.load("a1").unwrap();
-        assert_eq!((d.title.as_str(), d.rev, d.find("t1").unwrap().s("text")), ("a1", 2, "first step"));
-        go("ask", &["a2", "Q1", "Which?", "x", "y", "--suggest", "y"], &f).unwrap();
-        let d = st.load("a2").unwrap();
+        assert_eq!((d.title.as_str(), d.rev, d.find("t1").unwrap().s("text")), ("a1", 3, "first step"));
+        go("ask", &["a1", "Q1", "Which?", "x", "y", "--suggest", "y"], &f).unwrap();
+        let d = st.load("a1").unwrap();
         let q = d.find("Q1").unwrap();
         assert_eq!((q.kind.as_str(), q.s("suggest"), q.s("default")), ("question", "y", ""), "a suggestion, no default");
-        // an id that exists is refused, pointing at set; a parent that doesn't exist creates nothing
-        let e = go("ask", &["a2", "Q1", "Again?", "x", "y"], &f).unwrap_err();
-        assert!(e.contains("margin set a2 Q1"), "{e}");
-        assert!(go("add", &["a3", "nowhere", "todo", "t1", "x"], &f).is_err() && !st.exists("a3"));
+        // inside the artifact the same split: create refuses an id that exists, change one that doesn't
+        let e = go("ask", &["a1", "Q1", "Again?", "x", "y"], &f).unwrap_err();
+        assert!(e.contains("margin set a1 Q1"), "{e}");
+        assert!(go("add", &["a1", "now", "todo", "t1", "again"], &f).is_err());
+        assert!(go("set", &["a1", "t9", "text=x"], &f).unwrap_err().contains("no component \"t9\""));
+        // a near miss names the artifact that was meant, and creates nothing
+        let e = go("add", &["a2", "-", "todo", "t1", "x"], &f).unwrap_err();
+        assert!(e.ends_with("create it with margin new a2 (did you mean \"a1\"?)") && !st.exists("a2"), "{e}");
+        let _ = std::fs::remove_dir_all(&st.home);
+    }
+
+    /// Every command that writes to an artifact refuses one that isn't there, with the one
+    /// message that names `margin new` and the nearest name, and creates nothing: a mistyped
+    /// name used to make a second board.
+    #[test]
+    fn every_writing_command_refuses_a_missing_artifact_with_the_hint() {
+        let (st, f) = tmp_store("missing");
+        mk("plan", &f);
+        go("add", &["plan", "-", "todo", "t1", "one"], &f).unwrap();
+        let want = "no artifact \"paln\" in project t: create it with margin new paln (did you mean \"plan\"?)";
+        let a = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).chain(f.iter().cloned()).collect::<Vec<_>>());
+        let walk: Vec<(&str, Vec<&str>)> = vec![
+            ("add", vec!["paln", "-", "todo", "t2", "two"]),
+            ("set", vec!["paln", "t1", "text=x"]),
+            ("rm", vec!["paln", "t1"]),
+            ("rm", vec!["paln", "--yes"]),
+            ("move", vec!["paln", "t1", "--after", "t1"]),
+            ("ask", vec!["paln", "q1", "Which?", "x", "y"]),
+            ("title", vec!["paln", "Plan"]),
+            ("purpose", vec!["paln", "why"]),
+            ("hints", vec!["paln", "k  key"]),
+            ("propose", vec!["paln", "t1", "tick", "done"]),
+            ("diff", vec!["paln", "d1", "--old", "/nonexistent-a", "--new", "/nonexistent-b"]),
+            ("image", vec!["paln", "i1", "/nonexistent.png"]),
+            ("toast", vec!["paln", "hello"]),
+            ("show", vec!["paln"]),
+            ("link", vec!["paln", "--session", "s"]),
+        ];
+        for (cmd, v) in &walk {
+            assert_eq!(go(cmd, v, &f).unwrap_err(), want, "{cmd}");
+        }
+        // the commands that read stdin, by the function `run` hands it to
+        let whole = r#"{"title":"P","blocks":[]}"#;
+        let comp = r#"{"type":"todo","id":"t2","text":"two"}"#;
+        let op = r#"{"op":"set","id":"t1","fields":{"text":"x"}}"#;
+        for (what, input, bare) in [("apply a whole document", whole, false), ("apply a component", comp, false), ("apply/patch an op", op, false), ("put", whole, true), ("put an array", "[]", true), ("put nothing", "", true)] {
+            assert_eq!(apply_cmd(&st, "paln", input, &a(&[]), bare, Whole::Replace).unwrap_err(), want, "{what}");
+        }
+        // doc and tail write a component through apply_cmd
+        let sec = mdoc::to_section("notes", None, "# Notes\n\nA line.\n");
+        assert_eq!(apply_cmd(&st, "paln", &sec.to_string(), &a(&[]), false, Whole::Replace).unwrap_err(), want, "doc");
+        assert_eq!(tail_cmd(&a(&["paln", "tl"]), vec!["true".into()]).unwrap_err(), want, "tail");
+        // feed registration: a mistyped --artifact (or a name with no artifact) registers nothing
+        let e = feed_cmd(&a(&["add", "jj", "--every", "1h", "--artifact", "paln"]), vec!["true".into()]).unwrap_err();
+        assert_eq!(e, want, "feed add");
+        assert!(feed_cmd(&a(&["add", "jj", "--every", "1h"]), vec!["true".into()]).unwrap_err().starts_with("no artifact \"jj\" in project t: create it with margin new jj"));
+        assert!(feed::Registry::load(&st.dir()).feeds.is_empty());
+        // nothing was created on the way, and the artifact beside it is as it was
+        assert!(!st.exists("paln") && !st.art("paln").exists() && !st.exists("jj"));
+        assert_eq!(st.list().len(), 1);
+        assert_eq!(st.load("plan").unwrap().rev, 2);
+        // a whole-document apply to an artifact that exists is still an update
+        apply_cmd(&st, "plan", r#"{"title":"Plan","blocks":[{"type":"todo","id":"t1","text":"one"}]}"#, &a(&[]), false, Whole::Replace).unwrap();
+        assert_eq!((st.load("plan").unwrap().title.as_str(), st.load("plan").unwrap().rev), ("Plan", 3));
+        let _ = std::fs::remove_dir_all(&st.home);
+    }
+
+    /// The demo creates its artifact and resets its own, and never replaces a `plan` that is
+    /// someone's work.
+    #[test]
+    fn demo_resets_its_own_plan_and_refuses_anyone_elses() {
+        if diffblock::difft_bin().is_err() {
+            eprintln!("skipped: difft is not installed");
+            return;
+        }
+        let (st, f) = tmp_store("demo");
+        assert_eq!(demo::setup(&st).unwrap(), 1);
+        assert_eq!(demo::setup(&st).unwrap(), 2, "its own: reset");
+        go("rm", &["plan", "--yes"], &f).unwrap();
+        mk("plan", &f);
+        go("add", &["plan", "-", "todo", "t1", "mine"], &f).unwrap();
+        let e = demo::setup(&st).unwrap_err();
+        assert!(e.starts_with("plan already exists (rev 2) and is not the demo's") && e.contains("margin rm plan --yes"), "{e}");
+        assert!(st.load("plan").unwrap().find("t1").is_some());
         let _ = std::fs::remove_dir_all(&st.home);
     }
 
@@ -1683,6 +1868,7 @@ mod tests {
     #[test]
     fn set_with_an_empty_value_removes_the_field() {
         let (st, f) = tmp_store("unset");
+        mk("p", &f);
         go("add", &["p", "-", "todo", "t1", "step", "note=200 runs"], &f).unwrap();
         assert_eq!(st.load("p").unwrap().find("t1").unwrap().s("note"), "200 runs");
         go("set", &["p", "t1", "note=", "text=renamed"], &f).unwrap();
@@ -1781,6 +1967,8 @@ mod tests {
     #[test]
     fn rm_of_an_artifact_previews_then_archives() {
         let (st, f) = tmp_store("rmart");
+        mk("scratch", &f);
+        mk("keep", &f);
         go("add", &["scratch", "-", "todo", "t1", "one"], &f).unwrap();
         go("title", &["scratch", "Scratch board"], &f).unwrap();
         go("add", &["keep", "-", "todo", "t1", "stays"], &f).unwrap();
@@ -1791,13 +1979,14 @@ mod tests {
         assert!(st.exists("scratch") && st.claims("scratch").len() == 1, "the preview changes nothing");
         assert!(go("rm", &["scratch"], &f).is_err() && st.exists("scratch"));
         let out = rm_artifact(&st, "scratch", true, &["pid 7".into()]).unwrap();
-        for must in ["\"Scratch board\"", "rev 2", "sc (every 1m)", "pid 7", "removed scratch: archived as .archive/scratch-"] {
+        for must in ["\"Scratch board\"", "rev 3", "sc (every 1m)", "pid 7", "removed scratch: archived as .archive/scratch-"] {
             assert!(out.contains(must), "{must}: {out}");
         }
         assert!(!st.exists("scratch") && st.exists("keep") && st.claims("scratch").is_empty());
         let kept: Vec<_> = std::fs::read_dir(st.dir().join(".archive")).unwrap().map(|e| e.unwrap().path()).collect();
         assert!(kept.len() == 1 && kept[0].join("doc.json").exists() && kept[0].join("history.jsonl").exists(), "archived whole: {kept:?}");
         // the same name again on the same day gets its own place in the archive
+        mk("scratch", &f);
         go("add", &["scratch", "-", "todo", "t1", "again"], &f).unwrap();
         go("rm", &["scratch", "--yes"], &f).unwrap();
         assert_eq!(std::fs::read_dir(st.dir().join(".archive")).unwrap().count(), 2);

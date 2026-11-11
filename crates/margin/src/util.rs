@@ -140,9 +140,31 @@ pub fn valid_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Levenshtein distance between two artifact names (for "did you mean").
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut prev = row[0];
+        row[0] = i;
+        for j in 1..=b.len() {
+            let cur = row[j];
+            row[j] = if a[i - 1] == b[j - 1] { prev } else { 1 + prev.min(row[j]).min(row[j - 1]) };
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn edit_distance_counts_single_character_edits() {
+        for (a, b, d) in [("plan", "plan", 0), ("plan", "paln", 2), ("reviews", "review", 1), ("margin", "margn", 1), ("a", "", 1), ("kitten", "sitting", 3)] {
+            assert_eq!(edit_distance(a, b), d, "{a} {b}");
+        }
+    }
     #[test]
     fn time_roundtrip() {
         assert_eq!(rfc3339(0.0), "1970-01-01T00:00:00Z");

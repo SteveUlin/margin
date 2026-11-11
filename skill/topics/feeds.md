@@ -1,7 +1,8 @@
 # feeds: scripts that keep a panel current without you
 
 A feed is a command margin's daemon runs for you; what it prints on stdout is `margin apply`
-input. It keeps part of an artifact current with no AI in the loop, so it costs no tokens and
+input: an update to an artifact that exists (create it first, with `margin new`; a feed never
+creates one). It keeps part of an artifact current with no AI in the loop, so it costs no tokens and
 keeps going after the session ends. Register one only when {{user}} asked for something kept live.
 
 ## The contract of a feed script
@@ -90,8 +91,9 @@ Test it by hand before registering it, then register it and watch one change go 
 
 ```sh
 chmod +x prs-feed.sh
+margin new reviews --title "Reviews" --purpose "Pull requests waiting on my review"   # 0. the artifact
 ./prs-feed.sh prs.json                        # 1. one line of JSON on stdout, exit 0
-./prs-feed.sh prs.json | margin apply reviews # 2. `reviews rev 1`: it passes the schema (creates the artifact)
+./prs-feed.sh prs.json | margin apply reviews # 2. `reviews rev 2`: it passes the schema
 margin render reviews --width 90 --height 12  # 3. the table as text
 margin feed add reviews --watch prs.json --artifact reviews --owns pr -- ./prs-feed.sh prs.json
 margin feed ls                                # 4. `reviews  live  watch prs.json  reviews/pr … ran 2s ago · unchanged`
@@ -101,9 +103,11 @@ margin feed logs reviews                      # 5. a line per run, its stderr, r
 - Step 2 works only before the feed is registered; afterwards the ids are the feed's and the
   write fails with "belongs to feed". Test a changed script with `margin feed run reviews`
   instead: one run in the foreground, as the feed (`reviews rev N` or `reviews unchanged`).
-- An artifact a feed line created has its id for a title and no purpose: set them once with
-  `margin title reviews "Reviews"` and `margin purpose reviews "…"`, or (better) write the layout
-  first as a whole document and let the feed fill its part (`margin help dashboards`, step b).
+- Step 0 is not optional. A feed's output is an update: `feed add` refuses an `--artifact` that
+  doesn't exist, and a run whose artifact has gone fails with `no artifact "reviews" …: create it
+  with margin new reviews` (in `margin feed ls` and the log) instead of making one. Here the
+  artifact starts empty; better, give `new` the layout as a whole document and let the feed fill
+  its part (`margin help dashboards`, step b).
 - `margin example` has three larger ones (a table, tabs with rows and run strips, sections of
   todos), each with a script and sample data; `margin help dashboards` covers the components.
 
@@ -140,6 +144,7 @@ margin feed pause <name> | resume <name> | rm <name>
 ## Feeds that ship with margin
 
 ```sh
+margin new changes && margin new agents && margin new live     # the artifacts they update, once
 # the repo's recent jj changes, rerun whenever jj records an operation
 margin feed add jj --watch .jj/repo/op_heads/heads --artifact changes -- {{feeds}}/jj
 # Claude Code sessions on this machine: who's working, who needs {{user}}, queued messages

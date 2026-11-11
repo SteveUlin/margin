@@ -77,7 +77,7 @@ The ops, as JSON. `margin apply` reads them on stdin, and a feed prints them, on
 {"v":1,"title":"plan","blocks":[…]}
 ```
 
-A bare component is an upsert: it replaces the component with that id in place, or adds it to `parent` (default: the top level). The last line is a whole document (`apply` only). `set` with a `null` value removes the field; `"field":"note","value":"…"` still works for one field. Several lines, or an array, are one write: all land or none do. `margin schema` lists every type's fields and allowed values, and a write that names an unknown field or value fails with a suggestion. Any write can carry `--base-rev N`; if the artifact moved on, the write fails instead of landing on the wrong thing:
+A bare component is an upsert: it replaces the component with that id in place, or adds it to `parent` (default: the top level). The last line is a whole document (`apply` only): it replaces the one there. All of these are updates to an artifact that exists; `margin new` is the one command that creates one, and a write that names a missing artifact fails with `create it with margin new <art>` and the nearest existing name. `set` with a `null` value removes the field; `"field":"note","value":"…"` still works for one field. Several lines, or an array, are one write: all land or none do. `margin schema` lists every type's fields and allowed values, and a write that names an unknown field or value fails with a suggestion. Any write can carry `--base-rev N`; if the artifact moved on, the write fails instead of landing on the wrong thing:
 
 ```text
 margin set: stale base: you edited rev 3 but the artifact is at rev 9;
@@ -110,10 +110,10 @@ No Claude, no Zellij. You need two terminals.
    mkdir -p /tmp/margin-tour; cd /tmp/margin-tour
    ```
 
-2. [ ] **Create the artifact.** `put` makes it, `add` inserts one component at a time; each prints the new rev.
+2. [ ] **Create the artifact.** `new` makes it (and refuses a name that already has one); `add` creates one component at a time. Each prints the new rev. Every write after `new` is an update and fails on a name with no artifact, so a typo can't make a second board.
 
    ```fish
-   margin put tour --title "margin tour" </dev/null
+   margin new tour --title "margin tour"
    margin add tour - section steps title=Steps
    margin add tour steps todo t1 "Make an artifact"
    margin add tour steps todo t2 "Open it in a pane"
@@ -298,16 +298,17 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
 
 | command | does |
 |---|---|
-| `margin apply A [--base-rev N] [--json] < in` | the one write: ops, components (upsert), or a whole doc; all or none |
+| `margin new A [--title T] [--purpose P] [< doc.json]` | create an artifact: empty, or from a whole doc (a bare array is the block list); refuses one that exists |
+| `margin apply A [--base-rev N] [--json] < in` | update (state from a script): ops, components (upsert by id), or a whole doc (replaces); all or none; A must exist |
 | `margin schema [TYPE] [--json]` | the component types, fields and allowed values every write is checked against |
-| `margin put A [--title T] < doc.json` | alias of apply; a bare array is the block list |
-| `margin add A PARENT\|- TYPE ID [text…] [k=v…]` | insert; every bare word is text; `--before X`/`--after X` |
-| `margin set A ID FIELD VALUE` or `A ID k=v…` | fields, typed by the schema (text stays text) |
+| `margin put A [--title T] < doc.json` | replace the whole document of an existing artifact; a bare array is the block list |
+| `margin add A PARENT\|- TYPE ID [text…] [k=v…]` | create a component (an id that exists is refused); every bare word is text; `--before X`/`--after X` |
+| `margin set A ID FIELD VALUE` or `A ID k=v…` | change a component's fields (a missing id is refused), typed by the schema (text stays text) |
 | `margin rm A ID` | remove (decisions on it show as orphaned) |
 | `margin rm A [--yes]` | remove a whole artifact: a preview without `--yes`; with it, its feeds are unregistered and it moves to `.archive/` |
 | `margin move A ID --before X\|--after X\|--parent P` | reorder |
 | `margin title A "T"` | rename |
-| `margin patch A < ops.json` | alias of apply |
+| `margin patch A < ops.json` | alias of apply (A must exist) |
 | `margin ask A ID "Q" opt… --default D` | a question; `--why` `--applies` `--parent` |
 | `margin diff A ID --old F --new F [--path L]` | a difftastic diff block |
 | `margin diff A ID --rev R [--to R2] FILE` | the same from jj revisions |
@@ -336,7 +337,7 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 
 | command | does |
 |---|---|
-| `margin feed add N --every 10s\|--watch P…\|--stream -- CMD…` | register; `--artifact` `--owns` `--min-gap` `--timeout` `--replace` |
+| `margin feed add N --every 10s\|--watch P…\|--stream -- CMD…` | register; `--artifact` (it must exist: a feed never creates one) `--owns` `--min-gap` `--timeout` `--replace` |
 | `margin feed ls` | state, trigger, restarts, last run and its outcome |
 | `margin feed run N` | once, in the foreground; leaves the daemon's status alone |
 | `margin feed logs N [--follow] [--lines N]` | stderr and the daemon's notes |

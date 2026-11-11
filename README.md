@@ -56,6 +56,7 @@ alone; `--dry-run` prints the changes first). Restart Claude Code afterwards.
 With Claude: say "start a margin for this" in a Claude Code session. By hand, in any directory:
 
 ```sh
+margin new plan --title "Fix the flake"     # create: the only command that makes an artifact
 margin add plan - section steps title=Steps
 margin add plan steps todo t1 "Reproduce the flaky test"
 margin ask plan Q1 "Seed from the test name?" yes no --suggest yes
@@ -64,8 +65,11 @@ margin set plan t1 status done
 margin events           # what you did in the pane, as Claude will read it
 ```
 
-`margin demo` writes a larger sample plan (it needs difftastic), `margin example reviews | margin
-apply reviews` a sample dashboard, and `margin help` lists every command and reference topic.
+Creating and changing are different commands: `margin new` creates an artifact and refuses one
+that exists; every other write refuses a name with no artifact (and suggests the nearest), so a
+typo is an error, never a second board. `margin demo` writes a larger sample plan (it needs
+difftastic), `margin example reviews | margin new reviews` a sample dashboard, and `margin help`
+lists every command and reference topic.
 [docs/guide.md](docs/guide.md) walks through an artifact, a feed, and a session with Claude.
 
 ## Requirements

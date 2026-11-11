@@ -1,7 +1,7 @@
 //! `margin example`: complete dashboards to copy from, embedded in the binary.
 //!
 //! Each example is four plain files in `skill/examples/`: the artifact (`<name>.json`, a whole
-//! document for `margin apply`), the feed script that keeps it current (`<name>.feed.sh`), a
+//! document for `margin new`), the feed script that keeps it current (`<name>.feed.sh`), a
 //! sample of the data the script reads (`<name>.data.json`), and what the script prints for that
 //! sample (`<name>.feed.out`, which the tests hold the script to). They are the worked half of
 //! `margin help dashboards`: an AI that has never seen this repository reads one, pipes it into a
@@ -53,28 +53,28 @@ pub fn list() -> String {
     for e in EXAMPLES {
         s += &format!("  {:<9} {}\n", e.name, e.about);
     }
-    s += "\n  margin example <name>          the artifact: a whole document, ready for `margin apply <art>`\n";
+    s += "\n  margin example <name>          the artifact: a whole document, ready for `margin new <art>`\n";
     s += "  margin example <name> --feed   the script that keeps it current (bash + jq)\n";
     s += "  margin example <name> --data   a sample of the data that script reads\n";
-    s += "\n  margin example reviews | margin apply reviews && margin render reviews --width 100\n";
+    s += "\n  margin example reviews | margin new reviews && margin render reviews --width 100\n";
     s
 }
 
 impl Example {
     /// What goes to stderr beside the artifact: the steps from this JSON to a live, feed-kept
-    /// board. On stderr so that `margin example <name> | margin apply <art>` pipes clean JSON.
+    /// board. On stderr so that `margin example <name> | margin new <art>` pipes clean JSON.
     pub fn notes(&self) -> String {
         let n = self.name;
         format!(
             "# {n}: {about}
 # stdout is the artifact, a whole document: {{title, purpose, hints, blocks}}. From here to a live board:
 #   1. create the artifact (prints `{n} rev 1`), and look at one frame of it as text
-#        margin example {n} | margin apply {n}
+#        margin example {n} | margin new {n}
 #        margin render {n} --width 100 --height 40
 #   2. take the feed script and its sample data
 #        margin example {n} --feed > {n}.feed.sh && chmod +x {n}.feed.sh
 #        margin example {n} --data > {n}.data.json
-#   3. run the feed by hand: its stdout is `margin apply` input (here it changes nothing, so no new rev)
+#   3. run the feed by hand: its stdout is `margin apply` input, an update (here it changes nothing, so no new rev)
 #        ./{n}.feed.sh {n}.data.json | margin apply {n}
 #   4. register it; from then on the daemon keeps the board current and no AI is involved
 #        margin feed add {n} {trigger} --artifact {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
@@ -120,7 +120,7 @@ mod tests {
         }
         for e in EXAMPLES {
             assert!(l.contains(&format!("  {} ", e.name)) && l.contains(e.about), "{}", e.name);
-            assert!(e.notes().contains(&format!("margin example {0} | margin apply {0}", e.name)));
+            assert!(e.notes().contains(&format!("margin example {0} | margin new {0}", e.name)));
             assert!(e.notes().contains(&format!("--owns {} ", e.owns)));
         }
         assert!(get("nope").is_none());
@@ -150,6 +150,7 @@ mod tests {
             let w = Writer::Feed { name: e.name.into(), owns: e.owns.into() };
             let g = groups(e, e.out);
             assert!(!g.is_empty(), "{}: the feed prints nothing", e.name);
+            st.create(Doc::empty("empty")).unwrap();
             let (rev, errs) = st.feed_write("empty", &g, &w, &[]);
             assert!(rev.is_some() && errs.is_empty(), "{} into an empty artifact: {errs:?}", e.name);
             st.put(doc(e), None).unwrap();
