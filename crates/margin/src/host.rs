@@ -1,7 +1,7 @@
 //! Where panes live. margin's renderer is a plain terminal program (`margin view`); a **host**
 //! decides where it runs and how sulin's selections come back. Two hosts:
 //!
-//! - `ZellijHost` (zj.rs underneath): opens a split or pinned float in Claude's tab without moving
+//! - `ZellijHost` (zj.rs underneath): opens a split or pinned float in the caller's tab without moving
 //!   focus, finds panes by title, closes them, tells the renderer whether its tab is on screen, and
 //!   routes double-clicked `mg:` tokens through Zellij's `copy_command` (`margin select`).
 //! - `PlainHost`: no multiplexer. `margin open` prints the `margin view` command to run in any

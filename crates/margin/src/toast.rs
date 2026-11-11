@@ -1,7 +1,7 @@
 //! Toasts (to4): a short message that says one thing and goes away. Anchored to the row it's about
 //! (drawn on that row's right, so nothing moves), or floating over the bottom of the pane when it
 //! names no row. Its countdown starts once the pane has been seen, not when it was sent; an error
-//! stays until sulin clicks it. Claude, feeds and margin itself can send one.
+//! stays until sulin clicks it. An author, a handler and margin itself can send one.
 //!
 //! Toasts live beside the document (`<project>/toasts/<art>.json`), not in it: sending one bumps
 //! no revision and never conflicts with anyone's writes. One toast per row: a newer one on the
@@ -29,7 +29,7 @@ pub struct Toast {
     pub ttl: f64,
     /// RFC 3339.
     pub sent: String,
-    /// Who sent it: claude, a feed's name, or margin.
+    /// Who sent it: an author's name, a handler's, or margin.
     #[serde(default)]
     pub by: String,
     /// How it shows its time running out: number, dots, pie, edge or fade; empty takes the
@@ -74,7 +74,7 @@ pub fn send(st: &Store, art: &str, text: &str, level: &str, at: &str, ttl: Optio
         all.retain(|t| t.at != at);
     }
     let t = Toast {
-        // nanoseconds: two toasts sent in one millisecond (a feed's burst) stay two
+        // nanoseconds: two toasts sent in one millisecond (a handler's burst) stay two
         id: format!("t{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0) & 0xffff_ffff),
         text: text.trim().to_string(),
         level: level.into(),
@@ -96,15 +96,15 @@ pub fn send(st: &Store, art: &str, text: &str, level: &str, at: &str, ttl: Optio
     Ok(t)
 }
 
-/// A test toast (`mg:toasttest`, behind a link row Claude puts in the pane while toasts are being
+/// A test toast (`mg:toasttest`, behind a link row the author puts in the pane while toasts are being
 /// tried out): each one the next level in turn, so a few clicks show the stack and every colour.
 pub fn test(st: &Store, art: &str) -> Result<Toast, String> {
     let n = load(st, art).len();
     let (level, text) = [
         ("ok", "test: tests passed · 137 in 4.1s"),
-        ("info", "test: a feed wrote 3 rows"),
+        ("info", "test: a handler wrote 3 rows"),
         ("warn", "test: a subagent is taking longer than usual"),
-        ("error", "test: the jj feed crashed (errors wait for a click)"),
+        ("error", "test: the jj handler failed (errors wait for a click)"),
     ][n % 4];
     send(st, art, text, level, "", Some(10.0), "margin")
 }
@@ -164,16 +164,16 @@ mod tests {
     #[test]
     fn one_per_row_and_a_few_floating() {
         let st = store();
-        send(&st, "plan", "first", "ok", "t1", None, "claude").unwrap();
-        send(&st, "plan", "second", "warn", "t1", None, "claude").unwrap();
+        send(&st, "plan", "first", "ok", "t1", None, "author").unwrap();
+        send(&st, "plan", "second", "warn", "t1", None, "author").unwrap();
         for i in 0..8 {
-            send(&st, "plan", &format!("float {i}"), "info", "", None, "claude").unwrap();
+            send(&st, "plan", &format!("float {i}"), "info", "", None, "author").unwrap();
         }
         let all = load(&st, "plan");
         assert_eq!(all.iter().filter(|t| t.at == "t1").map(|t| t.text.as_str()).collect::<Vec<_>>(), ["second"]);
         assert_eq!(all.iter().filter(|t| t.at.is_empty()).count(), FLOATING);
-        assert!(send(&st, "plan", "x", "loud", "", None, "claude").is_err());
-        assert!(send(&st, "plan", "x", "ok", "nope", None, "claude").is_err(), "an anchor must exist");
+        assert!(send(&st, "plan", "x", "loud", "", None, "author").is_err());
+        assert!(send(&st, "plan", "x", "ok", "nope", None, "author").is_err(), "an anchor must exist");
     }
 
     #[test]

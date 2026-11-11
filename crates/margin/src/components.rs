@@ -158,7 +158,7 @@ fn tone(p: &Palette, name: &str, dflt: Rgb) -> Rgb {
         "yellow" | "warn" => p.yellow,
         "red" | "bad" => p.red,
         "orange" | "changed" => p.orange,
-        "blue" | "claude" => p.blue,
+        "blue" | "claude" => p.blue, // stored-name: a tone documents carry (doc.rs TONES)
         "aqua" => p.aqua,
         "purple" | "you" => p.purple,
         "grey" | "dim" => p.grey1,
@@ -175,11 +175,13 @@ pub struct Ctx<'a> {
     pub now: f64,
     pub wall: f64,
     pub m: Motion,
-    /// Highest event seq any Claude session has been handed.
+    /// Highest event seq any consumer session has been handed.
     pub delivered: u64,
-    /// A Claude session keeps this board (link.rs). Without one nothing on it speaks of Claude:
-    /// a decision is "sent", with no promise about who reads it.
+    /// A consumer's session keeps this board (`consumer::Presence`). Without one nothing on it
+    /// names a consumer: a decision is "sent", with no promise about who reads it.
     pub linked: bool,
+    /// The consumer's display name; empty when nobody keeps the board.
+    pub consumer: &'a str,
     /// Flash intensity per id (selection acknowledgement).
     pub flash: &'a HashMap<String, f32>,
     /// Animated progress values per progress id.
@@ -220,7 +222,7 @@ pub struct Drawn {
 }
 
 /// Does this block draw in full? The focused row is never cut: whatever a row shortens with `…`
-/// to stay one line (a table cell, a feed row's text, a log line) wraps instead while the row
+/// to stay one line (a table cell, a plain row's text, a log line) wraps instead while the row
 /// has the focus, so every cut can be read by moving onto it. Moving off restores the one line.
 pub fn in_full(cx: &Ctx, b: &Block) -> bool {
     cx.focused == Some(b.id.as_str())
@@ -244,8 +246,8 @@ pub fn todo_status(cx: &Ctx, b: &Block) -> String {
 }
 
 /// What a click on a todo's circle (or space on it) sets: next, then skipped, then clear (the
-/// step is Claude's again). None on a running step (it has a stop pill) and on one Claude
-/// finished: done is Claude's to set, never sulin's (2026-11-08).
+/// step is the author's again). None on a running step (it has a stop pill) and on one the author
+/// finished: done is the author's to set, never sulin's (2026-11-08).
 pub fn todo_cycle(st: &str, mine: bool) -> Option<&'static str> {
     match st {
         "doing" if !mine => None,
@@ -258,7 +260,7 @@ pub fn todo_cycle(st: &str, mine: bool) -> Option<&'static str> {
 }
 
 /// Is this step sulin's own (r2)? His claim (`o` in the pane: a `<id>#own` decision) wins over
-/// Claude's `owner` field, so he can take a step or hand it back.
+/// The author's `owner` field, so he can take a step or hand it back.
 pub fn yours(state: &State, b: &Block) -> bool {
     match state.decisions.get(&format!("{}#own", b.id)) {
         Some(d) => d.value == serde_json::json!(true),
@@ -266,8 +268,8 @@ pub fn yours(state: &State, b: &Block) -> bool {
     }
 }
 
-/// What the circle (or space, or a bare token) does on this step. Claude's steps cycle next →
-/// skipped → back (done is Claude's); sulin's own steps go open → done → open, the one place he
+/// What the circle (or space, or a bare token) does on this step. The author's steps cycle next →
+/// skipped → back (done is the author's); sulin's own steps go open → done → open, the one place he
 /// sets done, because the work is his.
 pub fn cycle_for(state: &State, b: &Block) -> Option<&'static str> {
     let st = status_of(state, b);
@@ -280,7 +282,7 @@ pub fn cycle_for(state: &State, b: &Block) -> Option<&'static str> {
 
 /// A section's fold when sulin hasn't chosen one: the `folded` field, or folded because the work
 /// in it is finished (every todo done or skipped, no open question). A finished thread keeps
-/// its one header line, so the pane shows what's live without Claude pruning it.
+/// its one header line, so the pane shows what's live without the author pruning it.
 pub fn default_folded(state: &State, b: &Block) -> bool {
     if b.flag("folded") {
         return true;
@@ -346,7 +348,7 @@ pub fn status_of(state: &State, b: &Block) -> String {
         .unwrap_or_else(|| if b.s("status").is_empty() { "todo".into() } else { b.s("status").to_string() })
 }
 
-/// A question counts as resolved once Claude has been handed sulin's pick, or once Claude applied
+/// A question counts as resolved once a consumer has been handed sulin's pick, or once the author applied
 /// the default (`applied: true`).
 pub fn question_resolved(cx: &Ctx, b: &Block) -> bool {
     if b.flag("applied") {
@@ -760,7 +762,7 @@ pub fn draw(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
     d
 }
 
-/// Claude's proposal to change one of the person's decisions, under the block it targets: what and why
+/// The author's proposal to change one of the person's decisions, under the block it targets: what and why
 /// on one line, accept and decline on the next (buttons in mouse mode, tokens otherwise). Purple
 /// is his colour: the decision is still his.
 fn proposal_strip(cx: &Ctx, id: &str, pr: &serde_json::Value, g: &Grid, w: u16, ind: u16) -> (Grid, Vec<(u16, u16, u16, String)>) {
@@ -975,7 +977,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
                 }
             };
             let node_x = lane.as_ref().map(|gv| gx0 + gv["node"].as_u64().unwrap_or(0) as u16).unwrap_or(gx0);
-            // its id, dim, the way claims show theirs: what Claude names in chat, sulin can see.
+            // its id, dim, the way claims show theirs: what the author names in chat, sulin can see.
             // A long id (a slug made from the text) stays hidden; `i` shows every id
             // The ids of one section's steps share a column as wide as the widest of them, so
             // `c9` and `c10` start their text in the same place
@@ -988,7 +990,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             // reach (they act on release without a drag, so a stray press-and-drag hits nothing);
             // with the mouse off the one `mg:todo` token is the double-click route
             let tokv = |v: &str| short("todo", &b.id, Some(v));
-            // done is Claude's to set, never sulin's: a running step offers stop, and every
+            // done is the author's to set, never sulin's: a running step offers stop, and every
             // other open step cycles from its circle (todo_cycle)
             let mut btns: Vec<(&str, String, Rgb)> = if cx.mouse && st == "doing" && !mine { vec![("stop", tokv("skipped"), p.red)] } else { vec![] };
             // a pill is the label plus a space and a cap each side; one cell between pills. On a
@@ -1102,7 +1104,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
                 }
             }
             let mut buttons = Vec::new();
-            // the circle is the control: next → skip → back to Claude's. Two cells wide, since a
+            // the circle is the control: next → skip → back to the author's. Two cells wide, since a
             // nerd-font icon draws over its neighbour
             if let Some(v) = cycle_for(cx.state, b).filter(|_| cx.mouse) {
                 buttons.push((node_x, 0, 2, tokv(v)));
@@ -1276,6 +1278,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             }
             Drawn { grid: Some(g), buttons, ..Default::default() }
         }
+        "feed" => draw_feed(cx, b, w, ind),
         "image" => draw_image(cx, b, w, ind),
         "row" => draw_row(cx, b, w, ind),
         "rule" => {
@@ -1291,7 +1294,6 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
         "tr" => draw_tr(cx, b, w),
         "runs" => draw_runs(cx, b, w, ind),
         "plot" => draw_plot(cx, b, w, ind),
-        "feed" => draw_feed(cx, b, w, ind),
         "diff" => crate::diffblock::draw(cx, b, w, ind),
         k => {
             let mut g = new_grid(w, 1, g0);
@@ -1366,7 +1368,7 @@ fn draw_question(cx: &Ctx, b: &Block, w: u16) -> Drawn {
     if question_resolved(cx, b) {
         let ans = picked.clone().unwrap_or(default.clone());
         let by_you = picked.is_some();
-        // your pick's time, or when Claude took the default
+        // your pick's time, or when the author took the default
         let at = dec.map(|d| d.at.as_str()).or_else(|| b.opt("applied_at"));
         let g = decided_row(cx, 1, &b.id, b.s("text"), Some((&ans, by_you)), by_you, at, w);
         return Drawn { grid: Some(g), ..Default::default() };
@@ -1395,7 +1397,7 @@ fn draw_question(cx: &Ctx, b: &Block, w: u16) -> Drawn {
         rows
     };
     // radios (glyph, space, label) and tokens wrap onto as many rows as they need
-    // the answer Claude suggests carries a robot after its label; it is a mark, not a selection
+    // the answer the author suggests carries a robot after its label; it is a mark, not a selection
     let suggest = b.s("suggest").to_string();
     let radio_rows = rows_of(&opts.iter().map(|o| format!("{} {o}{}", icon::RADIO_ON, if *o == suggest { format!(" {}", icon::ROBOT) } else { String::new() })).collect::<Vec<_>>(), 3);
     let toks: Vec<String> = opts.iter().map(|o| short("pick", &b.id, Some(o))).collect();
@@ -1421,20 +1423,20 @@ fn draw_question(cx: &Ctx, b: &Block, w: u16) -> Drawn {
         Some(t) => width(t) + 2,
         None => width(&lead) + width(&lead_name),
     };
-    // when Claude goes ahead (r4): a step ("taken when t4 starts"), a time (a countdown), or prose;
-    // held, Claude stops there instead
+    // when the author goes ahead (r4): a step ("taken when t4 starts"), a time (a countdown), or prose;
+    // held, the author stops there instead
     let held = decision(cx, &b.id).map(|d| d.kind == "hold").unwrap_or(false);
     let step = b.opt("applies").and_then(|a| cx.doc.find(a)).filter(|s| s.kind == "todo");
     let step_on = step.map(|s| matches!(status_of(cx.state, s).as_str(), "doing" | "done")).unwrap_or(false);
     let left = b.opt("takes_at").and_then(parse_rfc3339).map(|t| t - cx.wall);
     let mut tick = None;
     let (tail, tail_hot) = match (&picked, held) {
-        (Some(_), _) => (Some(if cx.linked { format!("{} sent · Claude reads it next turn", icon::SEND) } else { format!("{} sent", icon::SEND) }), false),
+        (Some(_), _) => (Some(if cx.linked { format!("{} sent · {} reads it next turn", icon::SEND, cx.consumer) } else { format!("{} sent", icon::SEND) }), false),
         (None, true) => {
             let at = step.map(|s| format!("at {}", s.id)).or(left.map(|_| "at its time".to_string())).unwrap_or_else(|| "where it applies".into());
-            (Some(format!("{} you asked Claude to wait · it stops {at}", icon::USER)), false)
+            (Some(if cx.consumer.is_empty() { format!("{} you asked for a wait · it stops {at}", icon::USER) } else { format!("{} you asked {} to wait · it stops {at}", icon::USER, cx.consumer) }), false)
         }
-        (None, false) if talking => (Some(if cx.linked { format!("{} sent · Claude raises it in chat", icon::SEND) } else { format!("{} sent", icon::SEND) }), false),
+        (None, false) if talking => (Some(if cx.linked { format!("{} sent · {} raises it in chat", icon::SEND, cx.consumer) } else { format!("{} sent", icon::SEND) }), false),
         (None, false) if default.is_empty() => (None, false),
         (None, false) => match (step, left, b.opt("applies")) {
             (Some(s), _, _) if step_on => (Some(format!("{} started: taking the default now", s.id)), true),
@@ -1589,7 +1591,8 @@ fn draw_claim(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     }
     if let Some(ac) = ack {
         put(&mut g, ind + 4, y, icon::ROBOT, Style::fg(p.blue).on(g0));
-        let x = put(&mut g, ind + 4 + TX, y, "Claude", Style::fg(p.aqua).on(g0).bold());
+        // the answer to a struck claim: under the consumer's name, or a plain label with nobody linked
+        let x = put(&mut g, ind + 4 + TX, y, if cx.consumer.is_empty() { "reply" } else { cx.consumer }, Style::fg(p.aqua).on(g0).bold());
         put(&mut g, x + 1, y, &truncate(ac, w.saturating_sub(x + 2) as usize), Style::fg(p.grey2).on(g0));
     }
     Drawn { grid: Some(g), buttons, ..Default::default() }
@@ -1616,10 +1619,10 @@ fn row_glyph(cx: &Ctx, name: &str) -> (String, Rgb, bool) {
     }
 }
 
-/// One line of a ledger or monitor, written by a feed or by Claude: a state glyph, an optional
+/// One line of a ledger or monitor, written by a handler, an owner or by hand: a state glyph, an optional
 /// tag pill, the text, a grey aside, and a right-aligned live age (`since`) or `meta`. `detail`
 /// wraps under it, dim: `DETAIL_ROWS` rows at most, then cut (the detail panel has all of it).
-/// The age ticks in the renderer, so a feed needn't rewrite a row just because time passed. A
+/// The age ticks in the renderer, so a handler needn't rewrite a row just because time passed. A
 /// row with a `target` opens it on click.
 fn draw_row(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     /// Rows a row's detail takes before it is cut.
@@ -2076,7 +2079,8 @@ fn draw_runs(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     Drawn { grid: Some(g), ..Default::default() }
 }
 
-/// A feed's health line: what it is
+/// The health line of a block of kind `feed`, which stores written before the feed runner was
+/// removed may still hold: what it is.
 fn draw_feed(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     let p = cx.p;
     let g0 = p.bg0;
@@ -2160,10 +2164,10 @@ mod cycle_tests {
         assert_eq!(todo_cycle("todo", false), Some("next"));
         assert_eq!(todo_cycle("next", true), Some("skipped"));
         assert_eq!(todo_cycle("skipped", true), Some("clear"));
-        // Claude's own next or skip still cycles from where it stands
+        // The author's own next or skip still cycles from where it stands
         assert_eq!(todo_cycle("next", false), Some("skipped"));
         assert_eq!(todo_cycle("skipped", false), Some("next"));
-        // running and finished steps are Claude's: no circle action
+        // running and finished steps are the author's: no circle action
         assert_eq!(todo_cycle("doing", false), None);
         assert_eq!(todo_cycle("done", false), None);
         // an old mark of his (done, say) clears
@@ -2242,7 +2246,7 @@ mod dash_tests {
         let cx = Ctx {
             doc, state: &state, p: &EVERFOREST, now: 0.0, wall, m: Motion { on: false, slow: 1.0 }, delivered: 0, flash: &flash,
             progress: &progress, kitty: false, cell: (10, 20), images: &images, focused: None, pulse: &pulse, pulse_period: 2.4,
-            pulse_breaths: 0.0, mouse, hover: None, flog: false, linked: true,
+            pulse_breaths: 0.0, mouse, hover: None, flog: false, linked: true, consumer: "Otto",
         };
         let (mut text, mut drawn, mut first) = (String::new(), HashMap::new(), true);
         crate::doc::walk(&doc.blocks, &mut |b, _, depth| {

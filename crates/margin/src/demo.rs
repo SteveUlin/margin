@@ -63,7 +63,7 @@ fn plan(a: &std::path::Path) -> Result<Doc, String> {
                 {"type": "status", "id": "c2", "text": "deno lint", "state": "pass", "result": "clean"},
                 {"type": "status", "id": "c3", "text": "check.py recs", "state": "fail", "result": "2 tells", "target": "https://example.com/recs/check"}
             ]},
-            {"type": "section", "id": "inbox", "title": "Open questions", "note": "pick an answer, or talk about it; the robot marks Claude's suggestion", "children": [
+            {"type": "section", "id": "inbox", "title": "Open questions", "note": "pick an answer, or talk about it; the robot marks the suggested answer", "children": [
                 {"type": "question", "id": "Q1", "text": "MCP server in v0, or CLI only?", "options": ["cli", "mcp", "both"], "suggest": "cli",
                  "why": "CLI works today with zero config; MCP adds typed tools"},
                 {"type": "question", "id": "Q2", "text": "Keep build logs after a session?", "options": ["keep", "30d", "drop"]}

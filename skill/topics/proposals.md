@@ -4,9 +4,9 @@ Their picks, ticks and strikes are theirs. When you think one should change, pro
 don't take it and don't route around it.
 
 ```fish
-margin propose plan t3 tick skipped --why "no user-facing change"   # tick done|todo|skipped|next
-margin propose plan Q1 pick files --why "sqlite needs a daemon"
-margin propose plan A1 strike --why "CI runs two processes since last week"
+margin claude propose plan t3 tick skipped --why "no user-facing change"   # tick done|todo|skipped|next
+margin claude propose plan Q1 pick files --why "sqlite needs a daemon"
+margin claude propose plan A1 strike --why "CI runs two processes since last week"
 ```
 
 The proposal shows on the component. Their accept applies it as their decision; you get a

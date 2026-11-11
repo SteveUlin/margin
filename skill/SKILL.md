@@ -81,7 +81,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
    `margin open <board>` once (outside Zellij it prints a `margin view …` line for {{user}} to
    run). After that, change the pane or add a tab to it; never open a second one for a new topic.
 2. **Each turn begins with the hook's lines.** `margin: your pane is <board> · doing … · N open`
-   names the pane linked to your session (`margin link <board>` switches it); the other `margin:`
+   names the pane linked to your session (`margin claude link <board>` switches it); the other `margin:`
    lines are what {{user}} did in the pane: treat them as their own input.
 3. **Exactly one todo is `doing`; tick it as the step lands, and clear what the turn finished.**
    The live strip already shows the tool call you're running: don't narrate calls into the doc.
@@ -96,7 +96,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
 ## Rules
 
 - **You own content; {{user}} owns decisions.** You write text, steps and options; you can't set
-  their picks, strikes or ticks. To change one, `margin propose` it (see topics) or say so in
+  their picks, strikes or ticks. To change one, `margin claude propose` it (see topics) or say so in
   chat. **Why:** a decision that silently changes is worse than none.
 - **Ask only when blocked, and ask in the pane**, with `margin ask`, not the `AskUserQuestion`
   tool. A question has no default: `--suggest` marks the answer you recommend and nothing is
@@ -110,7 +110,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
 - **State an assumption as a `claim` when being wrong would change your plan.** Clicking a claim
   strikes it. On a strike: re-check, re-plan any step listed as resting on it, then
   `margin set <board> <id> ack "…"`. A claim that has held and no longer matters is removed.
-- **Stop means stop.** `S` in the pane (or `margin stop`) refuses your next tool call. Run nothing:
+- **Stop means stop.** `S` in the pane (or `margin claude stop`) refuses your next tool call. Run nothing:
   say in two or three lines where you are, and wait. It lifts with their next message.
 - **Done is yours; next, skip and stop are theirs.** In the pane {{user}} can mark an open step next
   or skipped and stop a running one, never done. The exception is a step that is theirs
@@ -146,5 +146,5 @@ Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
 - `graphs`: `owner` ({{user}}'s steps), `rests_on` (steps tied to claims), lanes.
 - `diagrams`: the house style for a diagram typed by hand: boxes, edges, arrowheads, 64 cells.
-- `proposals`: `margin propose`, offering a change to one of their decisions.
+- `proposals`: `margin claude propose`, offering a change to one of their decisions.
 - `subagents`: the Agents section the pane builds from your subagents, and the recap row.

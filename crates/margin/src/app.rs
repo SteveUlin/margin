@@ -461,26 +461,38 @@ impl Live {
     }
 
     fn reload(&mut self, now: f64) {
+        // the board composed (store.rs): the layout and each owner's file, each read again only
+        // when that file changed. An owner's write leaves the board's rev (the layout's) where it
+        // was and moves its own, in `owned`
+        let mut owner_wrote = false;
         if let Ok(d) = self.st.load(&self.art) {
+            owner_wrote = d.rev == self.raw.rev && d.owned != self.raw.owned;
             self.raw = d;
         }
         // the tab on screen reads its datasets with the document (a binding added by this
         // revision draws at once); a tab out of view keeps the rows it had until it is shown.
         // The first load always reads, so opening a pane animates nothing in
+        let gen = self.data.gen;
         if self.on_screen || !self.data_ready {
             self.refresh_data();
         } else {
             self.data_dirty = true;
         }
+        // the scene and the table layouts take a new look at a document on a new rev or a new
+        // data generation. An owner's rows changed on the same rev, so they get a generation:
+        // the scene then reconciles them by id as content (change bars, the unseen count), which
+        // is what tells them from a dataset's rows
+        if owner_wrote && self.data.gen == gen {
+            self.data = std::rc::Rc::new(crate::data::Snapshot { sets: self.data.sets.clone(), gen: crate::data::next_gen() });
+        }
         self.doc = crate::data::expand(&self.raw, &self.data);
         self.scene.data_gen = self.data.gen;
         self.state = self.st.state(&self.art);
-        self.activity = crate::link::activity_for(&self.st, &self.art);
-        self.scene.recap = crate::recap::for_pane(&self.st, &self.art);
+        // who is working on this board, through the seam (consumer.rs): nobody, unless a
+        // consumer's session keeps it
+        self.activity = self.scene.present(crate::consumer::on_board(&self.st, &self.art));
         self.scene.stopped = self.st.stopped();
-        (self.scene.linked, self.scene.ended) = crate::link::liveness(&self.st, &self.art);
         self.scene.stale = crate::owner::stale_on(&self.st, &self.art, epoch_now());
-        self.scene.agents = crate::agents::for_pane(&self.st, &self.art);
         self.toasts = crate::toast::load(&self.st, &self.art);
         self.delivered = self.st.delivered_max();
         // only what is new to Claude or to this pane: never the whole log on every reload
@@ -884,17 +896,19 @@ impl Live {
         self.subtab_show(&tabs, &next);
     }
 
-    /// The stop signal: Claude's next tool call is refused until sulin sends a message.
+    /// The stop signal, for the session that keeps this board: its next tool call is refused
+    /// until sulin sends a message. On a board no session keeps there is nobody to stop, and the
+    /// key does nothing.
     fn stop(&mut self, now: f64) {
-        if self.st.stop(&self.art, "pane").is_ok() {
+        if self.scene.linked && self.st.stop(&self.art, "pane").is_ok() {
             self.reload(now);
         }
     }
 
     fn set_review(&mut self, on: bool) {
         self.review = on;
-        // said in the store too, where the rewake watcher reads it (wake.rs)
-        crate::wake::review_mark(&self.st, &self.pane, &self.art, on);
+        // told to the board's consumer too, which may be holding something back for it
+        crate::consumer::review(&self.st, &self.pane, &self.art, on);
         self.scene.review = on;
         if !on {
             self.target = None;
@@ -1469,6 +1483,8 @@ impl Pane {
         let mut w = vec![st.dir(), st.dir().join("delivered"), st.dir().join("cursors"), st.activity_dir(), st.dir().join("toasts")];
         for l in &self.tabs {
             w.push(st.art(&l.art));
+            // where its owners' files are: an owner's write changes nothing else of the board
+            w.push(st.owned_dir(&l.art));
         }
         w
     }
@@ -1511,7 +1527,7 @@ fn leave(pn: &mut Pane) {
     for l in &mut pn.tabs {
         l.save_view();
         if l.review {
-            crate::wake::review_mark(&l.st, &l.pane, &l.art, false);
+            crate::consumer::review(&l.st, &l.pane, &l.art, false);
         }
     }
 }
@@ -1537,7 +1553,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
     // without a copy_command route (plain host), a click on a token is the only pointer input
     let mouse0 = cfg.mouse || host.selection() == Selection::InPane;
     let mut pn = Pane::open(&st, &art, &more, &cfg, &pane, mouse0, host.is_visible().is_none())?;
-    crate::wake::review_reset(&st);
+    crate::consumer::pane_started(&st);
     let modes = Modes { mouse: mouse0, kitty_keys: true, focus: true, paste: true };
     let mut term = Terminal::enter(modes).map_err(|e| e.to_string())?;
     let mut parser = Parser::new();
@@ -1578,12 +1594,13 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
     let mut imgs = ImgSync::default();
     // toasts: is the pane on screen (their clocks start then), checked at most once a second
     let (mut toast_vis, mut toast_vis_t) = (false, -10.0f64);
-    // the ● on this pane's tab while Claude waits on sulin out of view; Drop takes it down
-    let mut attn = crate::attention::Attention::default();
-    // r5: when the pane last checked whether a wake-up is due (what one covered is in wake::woke)
-    let mut wake_check = -10.0f64;
-    // what that check last covered, and whether actions were still waiting out their quiet period
-    let (mut wake_look, mut wake_owed) = ((0u64, String::new()), false);
+    // the seam to a consumer of the person's events (consumer.rs): what an adapter keeps for
+    // this pane, if one is installed. Marking the terminal tab and waking an idle session are
+    // the adapter's manners, not the pane's: the loop only hands it each frame
+    let mut consumer = crate::consumer::pane();
+    // whether the last frame had a session's activity to hand over (the frame after gets one
+    // more call, so the adapter can take down what it put up)
+    let mut consumer_on = false;
     // keyed by the source image's content id and the slot, so an edited PNG gets a fresh fit
     let mut fitted: std::collections::HashMap<(u32, u16, u16), vellum::image::Image> = Default::default();
     let mut size = term::size();
@@ -1769,61 +1786,25 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         if sent_wait {
             wake.at(t + 0.5);
         }
-        // the tab mark and the phone push: a wake only for a look that is owed (attention.rs);
-        // an idle Claude with nothing else pending asks for none. Across every tab's sessions
+        // the board's consumer, for every tab's sessions: a pane none of whose boards a session
+        // keeps has no activity and takes none of this path
         let acts = pn.activity();
-        if let Some(at) = attn.step(&acts, t, &cfg, || host.is_visible()) {
-            wake.at(at);
-        }
-        // wake an idle Claude once sulin is done in the pane; at most one look a second
-        let idle = crate::attention::need(&acts).filter(|a| cfg.wake != "off" && a.state == "idle").map(|a| a.session.clone());
-        let last_seq = pn.tabs.iter().map(|l| l.last_seq).max().unwrap_or(0);
-        let look = (last_seq, idle.clone().unwrap_or_default());
-        if t - wake_check < 1.0 {
-            // an action (or the turn's end) landed inside that second, or actions are waiting
-            // out their quiet period: come back for the look. Nothing new and nothing waiting
-            // asks for nothing, so an idle pane sleeps
-            if idle.is_some() && (wake_owed || look != wake_look) {
-                wake.at(wake_check + 1.0);
-            }
-        } else {
-            wake_check = t;
-            wake_look = look;
-            wake_owed = false;
-            if let Some(sess) = idle {
-                let wall_now = epoch_now();
-                let st = &pn.tabs[0].st;
-                let all = st.events();
-                let (net, _) = crate::hook::pending(&all, st.delivered(&sess), wall_now, 0.0);
-                // a wake-up covers the batch's newest action. Not the cursor: that moves past
-                // actions that net to nothing, and a tick taken back sent a second wake-up
-                let top = crate::wake::top(&net);
-                // a store that started over hands out low seqs again: an old mark covers nothing
-                let mut woke = crate::wake::woke(&sess);
-                if woke > all.last().map(|e| e.seq).unwrap_or(0) {
-                    crate::wake::forget(&sess);
-                    woke = 0;
-                }
-                let mut owed = top > woke;
-                // review mode or a half-answered question set in any tab holds the wake-up back
-                let review = pn.tabs.iter().any(|l| l.review);
-                let open = pn.tabs.iter().any(|l| crate::wake::open_sets(&l.doc, &l.state, &net));
-                if owed && crate::wake::done(&net, wall_now, review, open) {
-                    let send = || crate::wake::send(&sess, &crate::wake::message(&net));
-                    match crate::wake::pane_wake(&sess, top, &cfg.wake, wall_now, send) {
-                        // the rewake hook's watcher will wake Claude; keep looking in case it dies
-                        crate::wake::Pane::Watcher => {}
-                        crate::wake::Pane::Sent(Err(e)) => {
-                            select::log_line(&format!("wake {sess}: {e}"));
-                            owed = false; // claimed: no retry every second
-                        }
-                        _ => owed = false,
-                    }
-                }
-                if owed {
-                    wake_owed = true;
-                    wake.at(t + 1.0);
-                }
+        if let Some(c) = consumer.as_mut().filter(|_| !acts.is_empty() || consumer_on) {
+            consumer_on = !acts.is_empty();
+            let boards: Vec<(&crate::doc::Doc, &crate::store::State)> = pn.tabs.iter().map(|l| (&l.doc, &l.state)).collect();
+            let tick = crate::consumer::Tick {
+                activity: &acts,
+                t,
+                wall: epoch_now(),
+                cfg: &cfg,
+                store: &pn.tabs[0].st,
+                last_seq: pn.tabs.iter().map(|l| l.last_seq).max().unwrap_or(0),
+                review: pn.tabs.iter().any(|l| l.review),
+                boards: &boards,
+                visible: &|| host.is_visible(),
+            };
+            if let Some(at) = c.step(&tick) {
+                wake.at(at);
             }
         }
         let lv = pn.lv();
@@ -2103,8 +2084,8 @@ mod pane_tests {
         assert_eq!((e.artifact.as_str(), e.id.as_str(), e.by.as_str(), e.via.as_str()), ("a", "", "you", "pane"));
         // passive: no decision, no action, nothing for a Claude session's hooks
         assert!(evs.iter().all(|e| !crate::store::is_decision(e) && !crate::store::is_action(e)));
-        assert!(crate::hook::unread(&st, "sess").is_empty());
-        assert!(crate::hook::actions_for_session(&st, "a", 0).is_empty() && crate::hook::actions_for_session(&st, "b", 0).is_empty());
+        assert!(crate::claude::hook::unread(&st, "sess").is_empty());
+        assert!(crate::claude::hook::actions_for_session(&st, "a", 0).is_empty() && crate::claude::hook::actions_for_session(&st, "b", 0).is_empty());
         std::fs::remove_dir_all(&st.home).ok();
     }
 
@@ -2329,6 +2310,67 @@ mod action_tests {
         data_frame(&mut pn, &mut pace, 40.0);
         assert!(pn.lv().scene.retained.get("note").unwrap().unseen && pn.lv().doc.rev == rev + 1);
         assert_eq!(ids(&mut pn), ["pr-14", "pr-15"], "and the rows are still there after a reload");
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// An owner's rows are content, kept in the owner's own file: its write leaves the board's
+    /// rev (the layout's) where it was, and the pane still reconciles the rows by id and flags
+    /// them as it always did: a change bar and an unseen mark on what changed or appeared, the
+    /// row that went collapsing where it was, the count in the title bar and on the tab. The
+    /// reload reads the one file that changed and nothing else.
+    #[test]
+    fn an_owners_write_marks_its_changed_rows_and_the_title_counts_them() {
+        let st = crate::store::tests::temp_store();
+        let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "ci", "title": "CI", "blocks": [
+            {"type": "table", "id": "jobs", "columns": [{"key": "name", "title": "Job"}]},
+            {"type": "text", "id": "note", "text": "a note of the layout"}]}))
+        .unwrap();
+        st.put(doc, None).unwrap();
+        st.add_owner(crate::owner::Owner { name: "queue".into(), board: "ci".into(), owns: "run".into(), expect_every: None, added: now_rfc3339(), last_write: String::new() }).unwrap();
+        let row = |id: &str, name: &str| crate::doc::parse_line(&json!({"type": "tr", "id": id, "parent": "jobs", "cells": {"name": name}}).to_string()).unwrap();
+        st.apply_as("ci", "queue", &[row("run-1", "build"), row("run-2", "test")].concat()).unwrap();
+        let mut pn = Pane::open(&st, "ci", &[], &Config::default(), "tty", false, true).unwrap();
+        pn.on_screen(80);
+        pn.reload(0.0);
+        let mut pace = crate::data::Pace::new();
+        let t = data_frame(&mut pn, &mut pace, 1.0);
+        assert!(t.contains("build") && t.contains("test") && !t.lines().next().unwrap().contains(" new "), "{t}");
+        let rev = pn.lv().doc.rev;
+        // nothing changed: a reload reads no file again
+        let r0 = crate::store::file_reads();
+        pn.reload(2.0);
+        assert_eq!(crate::store::file_reads(), r0, "an unchanged board is not read again");
+        // the owner writes: one row changed, one new, one gone
+        let mut ops = [row("run-2", "test (retried)"), row("run-3", "deploy")].concat();
+        ops.push(crate::doc::Op::Rm { id: "run-1".into() });
+        assert_eq!(st.apply_as("ci", "queue", &ops).unwrap(), rev, "the board's rev did not move");
+        let r1 = crate::store::file_reads();
+        pn.reload(10.0);
+        let (reads, bytes) = crate::store::file_reads();
+        let file = std::fs::metadata(st.art("ci").join("owned/owner.queue.json")).unwrap().len();
+        assert_eq!((reads - r1.0, bytes - r1.1), (1, file), "the reload reads the owner's file, and only it");
+        data_frame(&mut pn, &mut pace, 10.0);
+        // a moment later: the new row has opened, the one that went has closed
+        let t = data_frame(&mut pn, &mut pace, 12.0);
+        let lv = pn.lv();
+        assert_eq!((lv.doc.rev, lv.raw.owned["owner:queue"].rev), (rev, 2));
+        assert!(t.contains("test (retried)") && t.contains("deploy"), "{t}");
+        for id in ["run-2", "run-3"] {
+            let n = lv.scene.retained.get(id).unwrap();
+            assert!(n.unseen && n.change.is_some(), "{id} is flagged as changed");
+        }
+        assert!(lv.scene.retained.get("run-1").map(|n| n.leaving).unwrap_or(true) && !t.contains("build"), "run-1 animated out: {t}");
+        assert!(!lv.scene.retained.get("note").unwrap().unseen && !lv.scene.retained.get("jobs").unwrap().unseen, "the layout did not change");
+        assert_eq!(lv.scene.unseen_count(), 2);
+        // unseen for a while (nobody looked): the title bar says how many
+        let t = data_frame(&mut pn, &mut pace, 30.0);
+        assert!(t.lines().next().unwrap().contains(" 2 new "), "the title bar counts them: {t}");
+        assert_eq!(pn.infos()[0].unseen, 0, "the tab on screen has no badge");
+        let lv = pn.lv();
+        // the same state again is no change: nothing new is flagged
+        st.apply_as("ci", "queue", &row("run-3", "deploy")).unwrap();
+        lv.reload(40.0);
+        assert_eq!(lv.scene.unseen_count(), 2);
         std::fs::remove_dir_all(&st.home).ok();
     }
 
@@ -2650,7 +2692,7 @@ mod action_tests {
         lv.asked_note(9.0);
         assert!(lv.asked.is_none() && !frame(lv, 120).0.contains(crate::detail::ASKED));
         assert!(!st.wants_daemon("ci.detail") && !st.wants_daemon("ci.shown"));
-        assert!(crate::hook::unread(&st, "sess").is_empty() && crate::hook::actions_for_session(&st, "ci", 0).is_empty());
+        assert!(crate::claude::hook::unread(&st, "sess").is_empty() && crate::claude::hook::actions_for_session(&st, "ci", 0).is_empty());
         std::fs::remove_dir_all(&st.home).ok();
     }
 
@@ -2705,19 +2747,23 @@ mod action_tests {
         std::fs::remove_dir_all(&st.home).ok();
     }
 
-    /// A board no Claude session keeps says nothing about Claude; one that is linked does.
+    /// A board no Claude session keeps says nothing about Claude, whatever another session in
+    /// the project is doing; one that is linked does.
     #[test]
     fn claude_is_named_only_on_a_board_a_session_keeps() {
+        crate::claude::install();
         let (st, mut pn) = board();
+        st.set_activity(&crate::store::Activity { session: "elsewhere".into(), state: "running".into(), text: "Build the thing".into(), since: crate::util::now_rfc3339(), ..Default::default() });
         let lv = pn.lv();
+        lv.reload(0.5);
         lv.scene.help_open = true;
         let text = frame(lv, 140).0;
-        assert!(!text.contains("Claude"), "no session is linked:
+        assert!(!text.contains("Claude") && !text.contains("Build the thing") && lv.activity.is_empty(), "no session is linked:
 {text}");
-        crate::link::set(&st, "sess-1", "ci", "explicit");
+        crate::claude::link::set(&st, "sess-1", "ci", "explicit");
         lv.reload(1.0);
         let text = frame(lv, 200).0;
-        assert!(text.contains("Claude is current"), "{:?} {text}", crate::link::all(&st).len());
+        assert!(text.contains("Claude is current"), "{:?} {text}", crate::claude::link::all(&st).len());
         assert!(text.contains("stop Claude"), "{text}");
         std::fs::remove_dir_all(&st.home).ok();
     }

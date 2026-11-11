@@ -79,7 +79,7 @@ pub fn newest(st: &Store, sessions: &[String]) -> Option<Recap> {
 /// What a pane on `art` shows: the newest recap of its linked sessions while it's under six hours
 /// old, as (text, local time).
 pub fn for_pane(st: &Store, art: &str) -> Option<(String, String)> {
-    let mine: Vec<String> = crate::link::all(st).into_iter().filter(|l| l.art == art).map(|l| l.session).collect();
+    let mine: Vec<String> = super::link::all(st).into_iter().filter(|l| l.art == art).map(|l| l.session).collect();
     let r = newest(st, &mine)?;
     let t = crate::util::parse_rfc3339(&r.at).filter(|t| crate::util::epoch_now() - t < 6.0 * 3600.0)?;
     Some((r.text, crate::util::local_hm(t)))

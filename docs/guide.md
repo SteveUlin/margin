@@ -2,17 +2,17 @@
 
 *A hands-on guide, checked against the debug build on 2026-11-06; the walkthrough commands, their output and the screenshots were re-run on 2026-11-10. Headings marked (fold) are reference sections you can skip on a first read; numbered `[ ]` steps are a checklist.*
 
-margin is a folder of JSON files plus programs that write and draw it. You, Claude and small scripts all write into one board, and a pane draws it live. Your ticks and picks flow back to Claude on its next turn. Learn the model below, then type the four walkthroughs: about 30 minutes, no Claude needed until the third.
+margin is a folder of JSON files plus programs that write and draw it. You, your scripts and any other program write into one board, and a pane draws it live. What you do in the pane (a tick, a pick, a key on a row) is appended to an event log that handlers and other programs read. Nothing in that needs an AI. One consumer of it is Claude Code: a session keeps a plan in the pane and your ticks and picks flow back to it on its next turn; [With Claude Code](#with-claude-code) is the one section about that. Learn the model below, then type the walkthroughs: about 30 minutes, no Claude needed until the third.
 
 ## The model
 
 ![Diagram: Claude and scripts write ops into doc.json; margin view watches the store and draws the pane; you act with a key or an mg: token, which writes state.json and events.jsonl; the hooks read unread events and hand them to Claude as margin: lines](img/guide/model.png "One loop: writers change content, the renderer draws it, your decisions go to their own file, and the hooks carry them back to Claude.")
 
 - **The store is the truth.** Each board is a folder under `~/.local/state/margin/<project>/`. `doc.json` holds content, `state.json` your decisions, `view/<pane>.json` each pane's folds and scroll, and the project's `events.jsonl` logs everything you did.
-- **Writers send ops, never files.** Claude runs `margin add/set/rm …` through its Bash tool. A handler's script prints the same ops as JSON lines, and the daemon applies them. You write only decisions: a key in the pane, or a double-clicked `mg:` token.
+- **Writers send ops, never files.** Whoever authors a board (you at a shell, a script, an assistant through its shell tool) runs `margin add/set/rm …`. A handler's script prints the same ops as JSON lines, and the daemon applies them. In the pane you write only decisions: a key, or a double-clicked `mg:` token.
 - **The view only reads.** `margin view` watches the store and redraws. Nothing ever talks to the pane, so a hundred writes cost no pane churn.
-- **The return path is the hooks.** Claude Code runs `margin hook prompt` before each of your messages and `margin hook post-tool` after each tool call. Each prints your unread events as `margin:` lines, once per session.[^hook]
-- **The Host decides where the pane lives.** It's a split or float in Claude's Zellij tab, or (`plain`) any terminal you run `margin view` in.
+- **The return path is the event log.** Every decision and every action's key is one line in `events.jsonl`. A handler registered for an event is run with it; any program can follow the log from its own cursor (`margin events --follow --cursor NAME`). With Claude Code, hooks read the same log and hand a session your decisions ([With Claude Code](#with-claude-code)).
+- **The Host decides where the pane lives.** It's a split or float in the Zellij tab `margin open` was run from, or (`plain`) any terminal you run `margin view` in.
 
 ## Words you'll meet
 
@@ -23,7 +23,7 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 | component | a typed block with an `id`: `{"type":"todo","id":"t1","text":"…"}` |
 | op | one change to content: `add` `set` `rm` `move` `title` `replace` |
 | rev | the board's revision; every content write bumps it |
-| owner | who may write a field: Claude, you, the pane, or whoever keeps rows current (a handler, an outside program) |
+| owner | who may write a field: the board's author, you, the pane, or whoever keeps rows current (a handler, an outside program) |
 | event | one line in `events.jsonl`: what you did, when, through what |
 | token | `mg:verb/id=value`: text that acts when selected |
 | handler | a registered command the daemon runs when an event it asked for is appended; its stdout keeps part of a board current |
@@ -53,12 +53,12 @@ An unknown `type` draws as a red "unknown component" line instead of failing, so
 
 Four owners, enforced by the store on every write (`store.rs` `check_owner`):
 
-- **Claude** (any `margin` CLI write, whoever types it) owns content in `doc.json`.
+- **The author** (any `margin` CLI write, whoever types it: you, a script, an assistant) owns content in `doc.json`.
 - **You** own decisions in `state.json`: ticks, picks, strikes, verdicts, pins. The CLI can't write them.
 - **The pane** owns `view/<pane>.json`: folds, focus, scroll. A content rewrite never resets them, because the renderer matches components by id.
-- **Whoever keeps rows current** (a handler, or an outside program registered with `margin owner add`) owns the ids `P` and `P-…` for its `--owns` prefix `P` on its board (`ci` owns `ci-1`, not `city`). Claude's writes there fail, and its writes elsewhere fail.
+- **Whoever keeps rows current** (a handler, or an outside program registered with `margin owner add`) owns the ids `P` and `P-…` for its `--owns` prefix `P` on its board (`ci` owns `ci-1`, not `city`). The author's writes there fail, and the owner's writes elsewhere fail.
 
-Todo `status` is the one shared field: Claude's `margin set plan t1 status done` and your space bar both land in `state.json`, and the latest wins. Both use one vocabulary: `todo doing done blocked skipped next` (and `clear` drops your mark).
+Todo `status` is the one shared field: the author's `margin set plan t1 status done` and your space bar both land in `state.json`, and the latest wins. Both use one vocabulary: `todo doing done blocked skipped next` (and `clear` drops your mark).
 
 The ops, as JSON. `margin apply` reads them on stdin, and a handler's script prints them, one value per line:
 
@@ -91,11 +91,11 @@ A token is `mg:<verb>/[<board>.]<id>[=<value>]`. The pane prints the short form 
 | `mg:pin/x` | toggles a pin |
 | `mg:open/L1` | opens a link's URL or runs its token; a board name opens its pane |
 
-Each one appends an event. Passive kinds (`view`, `fold`, `seen`, `open`) are logged but never handed to Claude; `margin events --all` shows them.
+Each one appends an event. Passive kinds (`view`, `fold`, `seen`, `open`) are logged but never handed to a session's hooks; `margin events --all` shows them.
 
 ## Walkthrough 1: a board by hand
 
-No Claude, no Zellij. You need two terminals.
+No AI, no Zellij. You need two terminals.
 
 1. [ ] **Put `margin` on PATH and make a scratch project.** [install.md](install.md) covers installing it; for a dev build, alias it for this shell from the repo's root:
 
@@ -139,9 +139,9 @@ No Claude, no Zellij. You need two terminals.
 
 5. [ ] **Tick t3 and pick an option with keys.** `j`/`k` move focus, and the help line at the bottom shows what the focused component takes: `space` on a todo, `1`–`9` on a question, `x` on a claim. With the plain host the mouse is on, so a click on a token works too.
 
-   ![The same pane after the keys: all three steps show, progress at 2/3, and the card reads "you picked services · sent"](img/guide/a-ticked.png "After ticking t3 and pressing 2 on Q1. \"sent\" means it's waiting for Claude's next hook. Real render through pyte, not Ghostty.")
+   ![The same pane after the keys: all three steps show, progress at 2/3, and the card reads "you picked services · sent"](img/guide/a-ticked.png "After ticking t3 and pressing 2 on Q1. \"sent\" means the event is in the log, for whoever reads it next. Real render through pyte, not Ghostty.")
 
-6. [ ] **Read what you did back.** This is exactly what Claude gets:
+6. [ ] **Read what you did back.** This is the event log, in the words a Claude session is handed:
 
    ```text
    $ margin events
@@ -149,7 +149,7 @@ No Claude, no Zellij. You need two terminals.
       2 11:34:28 the user picked services for tour.Q1 “Which script do you write first?”
    ```
 
-   "the user" becomes your name once `user_name` is set in the config (`margin init --user-name <you>`).
+   "the user" becomes your name once `user_name` is set in the config (`margin claude init --user-name <you>`).
 
    `margin show tour` prints the content with your decisions merged in, and `--json` gives both files raw. A token typed at the shell does the same as a key: `margin select mg:todo/t2`.
 
@@ -243,52 +243,6 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 
 `--timeout 60s` stops a handler run that hangs; a failed run is retried after 1, 2, 4 … s (`--retries 3`), then passed over with a `handler.failed` event. The scripts in `providers/` are worked examples; their header comments give the registration and the cron line.
 
-## Walkthrough 3: with Claude
-
-1. [ ] **Start a wired Zellij session.** Run `margin session` (or `margin session NAME`). It starts Zellij with a one-tab layout and session-only options: `copy_command "margin select"`, copy on select, and mouse click-through. Your own `config.kdl` stays untouched. Without these options a double-click on a token only copies it.
-
-2. [ ] **Run `claude`.** `margin init` ([install.md](install.md)) puts the hooks in `~/.claude/settings.json`, so every session gets your clicks back. Before `init`, only a project whose own `.claude/settings.json` carries the hooks does.
-
-3. [ ] **Ask for it in words.** The skill only acts on request: "start a margin for this", "track this", "keep a plan up", "watch the agents". On a long task Claude may offer once in one line. It then creates a plan with `margin new plan`, runs `margin open plan` (a split in its own tab; your focus doesn't move) and ticks steps as it works.
-
-4. [ ] **Act in the pane.** Double-click a token, or focus the pane and use keys. The card says "sent".
-
-5. [ ] **Watch it come back.** At your next message, or after Claude's next tool call mid-turn, the hook prints:
-
-   ```text
-   margin: the user acted in the margin pane since your last look (2 events).
-   Their decisions are binding; `margin show <board>` for context.
-   - the user marked tour.t3 “Tick a todo from the pane” done: they did it themselves, so don't redo it
-   - the user picked services for tour.Q1 “Which script do you write first?”
-   ```
-
-   It shows at most 8 lines, and each session gets each event once. When nothing happened it prints nothing.
-
-### What the skill tells Claude (fold)
-
-- **Content is Claude's, decisions are yours.** To change something you decided, it says so in chat.
-- **A question has no default.** It posts `margin ask … --suggest X --why "…"`, goes on with the work that does not depend on the answer, and takes your pick from the next `margin:` line. "Talk about this" on a card means it raises the question in chat and leaves the card open. To block on an answer from a script, follow the log: `margin events --follow --name pick --board plan --json` (see `margin help integrate`).
-- **A struck claim gets an answer:** re-check, then `margin set <board> <id> ack "…"`.
-- **Address by id, base on a rev** (`--base-rev`), and treat `margin:` lines as your input.
-- **Owned ids are read-only,** and anything you want kept current becomes a handler on a refresh event, not a poll each turn.
-
-## Walkthrough 4: a handler and Claude in one board
-
-Walkthrough 2 already did this: `tour` holds your steps and the handler's `svc` rows. The prefix is the whole contract.
-
-1. [ ] **Give the handler a prefix nothing else uses.** `--owns svc` gives it the ids `svc` and `svc-…`. One prefix has one owner: a second registration that overlaps it is refused.
-2. [ ] **Keep Claude's ids outside it.** `margin show tour` starts with `(handler services-refresh owns the ids svc and svc-…: read-only for you)`, and a write inside fails with the way out:
-
-   ```text
-   $ margin set tour svc-web text hello
-   margin set: "svc-web" belongs to handler `services-refresh`, which owns
-   the ids svc and svc-… here and writes it when its events arrive; write
-   outside that prefix, or remove the handler first (`margin handler rm
-   services-refresh`)
-   ```
-
-3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the handler's section; a whole-document `apply` must carry the handler's components through unchanged.
-
 ## Cheat sheet
 
 ### Content (fold)
@@ -308,14 +262,14 @@ Walkthrough 2 already did this: `tour` holds your steps and the handler's `svc` 
 | `margin show A [--json]` | content + your decisions |
 | `margin ls` / `margin gc [--days N]` | list; archive untouched ones (30 days) |
 
-Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project NAME` and `--by you|claude|NAME`, before or after the command (who the write is logged as; default claude inside Claude Code, you elsewhere), and `margin CMD --help` (or `-h`, or `margin help CMD`) prints its usage without acting. A flag a command doesn't take is refused before it runs.
+Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project NAME` and `--by you|NAME`, before or after the command (who the write is logged as; default you, or `claude` for a write made from inside a Claude Code session), and `margin CMD --help` (or `-h`, or `margin help CMD`) prints its usage without acting. A flag a command doesn't take is refused before it runs.
 
-### Return channel and screen (fold)
+### Events and screen (fold)
 
 | command | does |
 |---|---|
-| `margin events` | your actions; `--unread --session S`, `--board`, `--since N`, `--kind K`, `--all`, `--json` |
-| `margin hook prompt\|post-tool` | the hooks (JSON on stdin) |
+| `margin events` | your actions; `--board`, `--since N`, `--cursor NAME`, `--follow`, `--kind K`, `--name GLOB`, `--all`, `--json` |
+| `margin emit NAME [JSON]` / `margin act A ID ACTION` | append a named event; do what an action's key does |
 | `margin open A [--float\|--split\|--stacked] [--tab-id N]` | place the pane (Zellij) or print the view command (plain; an absolute path when `margin` isn't on PATH) |
 | `margin panes A` / `margin close A` | where it shows / close it |
 | `margin view A` | the renderer itself |
@@ -366,26 +320,8 @@ A half-typed count or sequence shows in yellow at the help row's right and drops
 ### Steps that rest on a claim (fold)
 
 A todo with `rests_on: ["A1"]` carries a dim `A1` tag. Strike A1 and every open step resting on
-it turns red (its glyph or graph node, its lines, a `✗ A1` tag); Claude's line about the strike
+it turns red (its glyph or graph node, its lines, a `✗ A1` tag); the line a session is handed about the strike
 lists those steps. Unstrike it and they go back.
-
-### Recap and read-back (fold)
-
-Claude Code writes a session recap when you return to a terminal you left (`/recap` asks for one;
-`/config` turns it off). The hooks pick the newest one out of the transcript and the pane shows it
-as its first row, `↺`, for six hours. After a compaction or a resume, the session-start hook asks
-Claude for a read-back instead: 2–3 claims in a `readback` section at the top, which you strike if
-they're wrong.
-
-### When a question is open (fold)
-
-A question has no default, so nothing is taken for you. The card shows the options as buttons,
-Claude's recommendation (`suggest`) and its reason (`why`) as lines, and no option is highlighted
-until you pick. While it is open Claude works on what does not depend on the answer; your pick
-(a click, `1`–`9`, or `mg:pick/Q1=<opt>`) reaches it as a `margin:` line at its next hook. **talk
-about this** tells Claude to raise the question in chat and leave the card open. Claude changes a
-card with `margin set` and adds work with `margin add` or `margin apply`; it never rewrites the
-board to move past a question.
 
 ### Toasts (fold)
 
@@ -397,32 +333,15 @@ a click; a click dismisses any. `--at` names the row it's about (shown on its ri
 one with a line `{"toast": "…", "level": "ok", "at": "<id>"}`. Stored in the project's `toasts/`,
 not in the doc.
 
-### Waking Claude (fold)
-
-When Claude is idle and you finish in the pane (quiet 5 s, no question set half answered, review
-mode off; or a minute of quiet regardless), margin wakes it. The `Stop` hook `margin hook rewake`
-does it: Claude Code runs it in the background as a turn ends (`"asyncRewake": true`), it waits for
-you to finish, then exits 2 with your decisions on stderr, and Claude Code hands those to Claude
-as a system reminder and starts a turn. It leaves quietly when you send a message first, and
-after 58 minutes.
-
-Without a live watcher (hooks installed before it existed, the hour passed, a Claude Code without
-`asyncRewake`) the pane falls back to one line written into the session's inbox, the Unix socket
-Claude Code gives every session for messages between sessions; your actions then arrive through
-the hooks. Claude Code presents that line as another session's message and, in some permission
-modes, holds it for your approval (`"crossSessionInbound": "accept"` in its settings lets it
-through). The hook keeps the socket and token in `$XDG_RUNTIME_DIR/margin/` (0600, memory-backed).
-`"wake"` in the config picks the route: `auto` (the default), `hook`, `inbox`, or `off`.
-
 ### Config and files (fold)
 
 `~/.config/margin/config.json` (or `$MARGIN_CONFIG`); every key is optional.
 
 | key | default | what |
 |---|---|---|
-| `user_name` | the user | your name in what margin tells Claude ("sulin picked cli") |
+| `user_name` | the user | your name in what margin tells a session ("<name> picked cli") |
 | `graph_glyphs` | box | box (box-drawing, any font) or flog (Flog symbols, U+F5D0–U+F60D; the font needs them) |
-| `wake` | auto | wake an idle Claude when you finish in the pane: auto (the rewake hook, else the inbox message), hook, inbox, off |
+| `wake` | auto | with Claude Code, wake an idle session when you finish in the pane: auto (the rewake hook, else the inbox message), hook, inbox, off |
 | `host` | auto | zellij, plain, auto (Zellij when `$ZELLIJ_SESSION_NAME` is set) |
 | `pane` | split | default shape for `open`; or float |
 | `motion` | on | off stops every animation |
@@ -449,6 +368,105 @@ Environment: `MARGIN_DIFFT` names difftastic outright; `MARGIN_HOST`, `MARGIN_MO
   select.log   (at the top: every selection)
 ```
 
+## With Claude Code
+
+Everything above works with no AI in it: boards, the event log, handlers, owners, datasets and the pane are the whole core. Claude Code is one consumer of that core, and everything for it sits in one command group, `margin claude …`. A board a Claude session keeps says so in its status bar ("Claude is current") and shows what the session is doing; a board no session keeps shows nothing of Claude.
+
+- **Set it up once per machine:** `margin claude init --user-name "<you>"` ([install.md](install.md)). It installs the skill and merges nine hooks into `~/.claude/settings.json`; re-run it after moving the binary.
+- **The hooks are the return path.** Claude Code runs `margin claude hook prompt` before each of your messages and `margin claude hook post-tool` after each tool call. Each prints your unread events as `margin:` lines, once per session.[^hook] `pre-tool` refuses a tool call while the stop flag is up, `stop`, `permission`, `notify` and `end` tell the pane what the session is doing, `start` links a session to its board, and `rewake` wakes an idle session once you are done in the pane.
+- **The skill is the session's manual.** `margin claude skill` prints it; `margin help <topic>` has the reference it points to.
+
+| command | does |
+|---|---|
+| `margin claude init [--user-name N] [--claude-dir D] [--dry-run]` | install the skill and the hooks |
+| `margin claude skill` | the skill, rendered for this machine |
+| `margin claude link [A]` / `margin claude unlink` | the board this session keeps: show it, set it, drop it |
+| `margin claude unread [--session S]` | your decisions a session has not been handed yet |
+| `margin claude stop [A]` | refuse the linked session's tool calls until your next message (the pane's `S`) |
+| `margin claude propose A ID VERB [VALUE] [--why W]` | offer a change to one of your decisions; you accept or decline on the row |
+| `margin claude hook EVENT` | a Claude Code hook (JSON on stdin) |
+
+### Walkthrough 3: a session keeps a board
+
+1. [ ] **Start a wired Zellij session.** Run `margin session` (or `margin session NAME`). It starts Zellij with a one-tab layout and session-only options: `copy_command "margin select"`, copy on select, and mouse click-through. Your own `config.kdl` stays untouched. Without these options a double-click on a token only copies it.
+
+2. [ ] **Run `claude`.** `margin claude init` ([install.md](install.md)) puts the hooks in `~/.claude/settings.json`, so every session gets your clicks back. Before `init`, only a project whose own `.claude/settings.json` carries the hooks does.
+
+3. [ ] **Ask for it in words.** The skill only acts on request: "start a margin for this", "track this", "keep a plan up", "watch the agents". On a long task Claude may offer once in one line. It then creates a plan with `margin new plan`, runs `margin open plan` (a split in its own tab; your focus doesn't move) and ticks steps as it works.
+
+4. [ ] **Act in the pane.** Double-click a token, or focus the pane and use keys. The card says "sent".
+
+5. [ ] **Watch it come back.** At your next message, or after Claude's next tool call mid-turn, the hook prints:
+
+   ```text
+   margin: the user acted in the margin pane since your last look (2 events).
+   Their decisions are binding; `margin show <board>` for context.
+   - the user marked tour.t3 “Tick a todo from the pane” done: they did it themselves, so don't redo it
+   - the user picked services for tour.Q1 “Which script do you write first?”
+   ```
+
+   It shows at most 8 lines, and each session gets each event once. When nothing happened it prints nothing.
+
+### What the skill tells Claude (fold)
+
+- **Content is Claude's, decisions are yours.** To change something you decided, it says so in chat.
+- **A question has no default.** It posts `margin ask … --suggest X --why "…"`, goes on with the work that does not depend on the answer, and takes your pick from the next `margin:` line. "Talk about this" on a card means it raises the question in chat and leaves the card open. To block on an answer from a script, follow the log: `margin events --follow --name pick --board plan --json` (see `margin help integrate`).
+- **A struck claim gets an answer:** re-check, then `margin set <board> <id> ack "…"`.
+- **Address by id, base on a rev** (`--base-rev`), and treat `margin:` lines as your input.
+- **Owned ids are read-only,** and anything you want kept current becomes a handler on a refresh event, not a poll each turn.
+
+### Walkthrough 4: a handler and Claude in one board
+
+Walkthrough 2 already did this: `tour` holds your steps and the handler's `svc` rows. The prefix is the whole contract.
+
+1. [ ] **Give the handler a prefix nothing else uses.** `--owns svc` gives it the ids `svc` and `svc-…`. One prefix has one owner: a second registration that overlaps it is refused.
+2. [ ] **Keep Claude's ids outside it.** `margin show tour` starts with `(handler services-refresh owns the ids svc and svc-…: read-only for you)`, and a write inside fails with the way out:
+
+   ```text
+   $ margin set tour svc-web text hello
+   margin set: "svc-web" belongs to handler `services-refresh`, which owns
+   the ids svc and svc-… here and writes it when its events arrive; write
+   outside that prefix, or remove the handler first (`margin handler rm
+   services-refresh`)
+   ```
+
+3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the handler's section; a whole-document `apply` must carry the handler's components through unchanged.
+
+### When a question is open (fold)
+
+A question has no default, so nothing is taken for you. The card shows the options as buttons,
+Claude's recommendation (`suggest`) and its reason (`why`) as lines, and no option is highlighted
+until you pick. While it is open Claude works on what does not depend on the answer; your pick
+(a click, `1`–`9`, or `mg:pick/Q1=<opt>`) reaches it as a `margin:` line at its next hook. **talk
+about this** tells Claude to raise the question in chat and leave the card open. Claude changes a
+card with `margin set` and adds work with `margin add` or `margin apply`; it never rewrites the
+board to move past a question.
+
+### Recap and read-back (fold)
+
+Claude Code writes a session recap when you return to a terminal you left (`/recap` asks for one;
+`/config` turns it off). The hooks pick the newest one out of the transcript and the pane shows it
+as its first row, `↺`, for six hours. After a compaction or a resume, the session-start hook asks
+Claude for a read-back instead: 2–3 claims in a `readback` section at the top, which you strike if
+they're wrong.
+
+### Waking an idle session (fold)
+
+When Claude is idle and you finish in the pane (quiet 5 s, no question set half answered, review
+mode off; or a minute of quiet regardless), margin wakes it. The `Stop` hook `margin claude hook rewake`
+does it: Claude Code runs it in the background as a turn ends (`"asyncRewake": true`), it waits for
+you to finish, then exits 2 with your decisions on stderr, and Claude Code hands those to Claude
+as a system reminder and starts a turn. It leaves quietly when you send a message first, and
+after 58 minutes.
+
+Without a live watcher (hooks installed before it existed, the hour passed, a Claude Code without
+`asyncRewake`) the pane falls back to one line written into the session's inbox, the Unix socket
+Claude Code gives every session for messages between sessions; your actions then arrive through
+the hooks. Claude Code presents that line as another session's message and, in some permission
+modes, holds it for your approval (`"crossSessionInbound": "accept"` in its settings lets it
+through). The hook keeps the socket and token in `$XDG_RUNTIME_DIR/margin/` (0600, memory-backed).
+`"wake"` in the config picks the route: `auto` (the default), `hook`, `inbox`, or `off`.
+
 ## Extending it
 
 ### A new component type (fold)
@@ -460,7 +478,7 @@ Everything lives in `crates/margin/src`. A type is a row in `doc.rs` `SCHEMA` (i
 3. [ ] **Make it focusable or not** in `scene.rs` (the `focusable` match), and list its keys in the scene's help line.
 4. [ ] **Give it keys** in `app.rs` `key`, calling `self.decide(id, kind, value)` so the decision lands in `state.json` with an event.
 5. [ ] **Give it a token** if you want double-click: a verb in `select.rs` `VERBS` and an arm in `apply_token`.
-6. [ ] **Teach Claude to read it:** a line in `main.rs` `show_text` and, for a new event kind, `hook.rs` `describe`.
+6. [ ] **Make it readable as text:** a line in `main.rs` `show_text` and, for a new event kind, `claude/hook.rs` `describe` (the line a session is handed).
 7. [ ] **Test it headless:** `margin render` plus a snapshot test like the ones at the bottom of `scene.rs`.
 
 ### A new Host (fold)
@@ -473,14 +491,14 @@ The daemon runs argv with no shell, in the directory you registered it from, wit
 
 ## Limits today
 
-- **A dev build of `margin` is on PATH only inside the repo** (through direnv) until you install it. `margin init` writes absolute paths into the hooks and the skill, so nothing depends on PATH; `margin open` under the plain host prints the absolute path when `margin` isn't on PATH.
-- **Hooks need `margin init`.** It installs them for every project ([install.md](install.md)). A session without them writes boards fine, but your clicks reach it only through `margin events`.
+- **A dev build of `margin` is on PATH only inside the repo** (through direnv) until you install it. `margin claude init` writes absolute paths into the hooks and the skill, so nothing depends on PATH; `margin open` under the plain host prints the absolute path when `margin` isn't on PATH.
+- **Hooks need `margin claude init`.** It installs them for every project ([install.md](install.md)). A session without them writes boards fine, but your clicks reach it only through `margin events`.
 - **Double-click tokens need `margin session`.** In a plain Zellij session the selection is only copied. In the plain host, keys and mouse clicks in the pane work.
 - **`margin demo` needs difftastic.** The nix build wraps it in; a dev build looks in `$MARGIN_DIFFT`, then PATH, then config `difft`, then the nix profile dirs, and names those fixes when it finds none.
 - **Nothing is checked in Ghostty yet.** Every render here went through pyte, a fake terminal: kitty images, colours and the feel of double-click need your eyes.
 - **The agents script (`providers/agents`) can't see permission prompts.** A tool call pending over a minute shows "running or waiting on permission"; a Notification hook would make it exact.[^agents]
-- **The design doc runs ahead of the build.** `margin propose`, `p` to pin, and `n`/`N` across diff hunks are designed but not built; design.md marks them so.
+- **The design doc runs ahead of the build.** `p` to pin and `n`/`N` across diff hunks are designed but not built; design.md marks them so.
 - **A todo `status` write doesn't bump `rev`.** It lands in `state.json`, so `--base-rev` doesn't guard it (api-review.md §3).
 
-[^hook]: [research.md](research.md) §7 (PostToolUse `additionalContext` reaches the model on its next call) and design.md §7b: with a script writing 20 revisions a second, `margin hook prompt` took a median 2.2 ms, max 8.9 ms.
+[^hook]: [research.md](research.md) §7 (PostToolUse `additionalContext` reaches the model on its next call) and design.md §7b: with a script writing 20 revisions a second, `margin claude hook prompt` took a median 2.2 ms, max 8.9 ms.
 [^agents]: [design.md](design.md) §7 and the header of `providers/agents`: "the transcript can't tell those apart".

@@ -58,14 +58,14 @@ pub struct Config {
     /// overrides it and PATH. The nix build wraps difft in; a dev build outside `nix develop`
     /// needs this, PATH, or one of the usual nix profile dirs.
     pub difft: String,
-    /// Wake an idle Claude when sulin finishes in the pane (quiet 5 s, no half-answered question
-    /// set, out of review mode). "auto": the `Stop` hook `margin hook rewake` does it when its
+    /// Wake an idle session of the board's consumer when sulin finishes in the pane (quiet 5 s, no half-answered question
+    /// set, out of review mode). "auto": the adapter's waiting `Stop` hook does it when its
     /// watcher is alive, else the pane writes one labelled message into the session's inbox
     /// (wake.rs); "hook": only the watcher; "inbox": only the message; "off". `true` and `false`
     /// (the key's first form) read as "auto" and "off".
     #[serde(deserialize_with = "wake_mode")]
     pub wake: String,
-    /// The person's name in what margin tells Claude ("sulin picked cli"); default "the user".
+    /// The person's name in what margin tells a consumer ("sulin picked cli"); default "the user".
     pub user_name: String,
     /// The dependency graph's glyphs: "box" (box-drawing, any font) or "flog" (Flog symbols,
     /// rbong/flog-symbols, U+F5D0–U+F60D: rounder, but the font must have them).

@@ -29,7 +29,7 @@ pub struct Input<'a> {
     pub state: &'a State,
     pub view: &'a View,
     pub delivered: u64,
-    /// sulin's events Claude hasn't been handed yet, for this artifact.
+    /// sulin's events the board's consumer hasn't been handed yet, for this artifact.
     pub unread: usize,
     pub now: f64,
     pub wall: f64,
@@ -41,7 +41,7 @@ pub struct Input<'a> {
     pub project: &'a str,
     pub w: u16,
     pub h: u16,
-    /// What Claude sessions in this project are doing, newest first (the tool hooks write it).
+    /// What the sessions keeping this board are doing, newest first (`consumer::Presence`).
     pub activity: &'a [crate::store::Activity],
 }
 
@@ -73,7 +73,7 @@ enum Kind {
     Block { depth: usize, folded: bool, level: usize, gap: bool },
     Ghost(usize),
     OrphanHead(usize),
-    /// Claude Code's latest session recap, the pane's first row (recap.rs).
+    /// The consumer's latest recap of the work, the pane's first row.
     Recap,
     /// The work overview's subagents (agents.rs): a header, a fan-out's progress line, a row each.
     AgentsHead,
@@ -225,7 +225,7 @@ struct HeadLine {
 
 /// The head's lines: what the pane is for (the document's `purpose`; a pane written before
 /// there was one falls back to the first text in its section `goal` or `overview`), then two
-/// derived from what the doc already holds so Claude maintains nothing new: the step that is
+/// derived from what the doc already holds so the author maintains nothing new: the step that is
 /// `doing`, and what waits on sulin (open questions, diffs without a verdict, his own open
 /// steps). A line with nothing to say is left out.
 fn head_lines(inp: &Input) -> Vec<HeadLine> {
@@ -335,10 +335,12 @@ pub struct Scene {
     pub review: bool,
     /// `i`: every row shows its id, dim at its right edge, so any row can be named.
     pub show_ids: bool,
-    /// A Claude session keeps this board (the app and `margin render` set it from the links).
-    /// Without one the pane says nothing about Claude: no "Claude is current", no "stop Claude".
+    /// A consumer's live session keeps this board (`present` sets it, from `consumer::on_board`).
+    /// Without one the pane names no consumer: no "<name> is current", no stop control.
     pub linked: bool,
-    /// The board is linked to a Claude session that has ended, and to none that is live: when
+    /// The consumer's display name, as the pane writes it; empty when nobody keeps the board.
+    pub consumer: String,
+    /// The board is kept by a session that has ended, and by none that is live: when
     /// it ended (local HH:MM), for one quiet line where the live strip was.
     pub ended: Option<String>,
     /// Overdue writers of this board (owner.rs): (the id prefix they own, why). Their rows get a
@@ -355,13 +357,14 @@ pub struct Scene {
     /// What an action on a row came to, by block id: (the note, whether it is a warning). The
     /// app sets it after an action's key and clears it (app.rs `Sent`).
     pub sent: HashMap<String, (String, bool)>,
-    /// Claude Code's latest recap for this pane's sessions: (text, local time it was written).
+    /// The consumer's latest recap for this pane's sessions: (text, local time it was written).
     pub recap: Option<(String, String)>,
-    /// The stop flag is up (sulin pressed stop; Claude's tool calls are refused).
+    /// The stop flag is up (sulin pressed stop; the consumer's sessions are held).
     pub stopped: bool,
-    /// This pane's sessions' subagents, grouped per fan-out (agents.rs), and whether sulin folded
-    /// the section (None: open while any runs).
-    pub agents: Vec<crate::agents::Group>,
+    /// The workers on this board, grouped per fan-out (`consumer::Worker`), the heading over
+    /// them, and whether sulin folded the section (None: open while any runs).
+    pub agents: Vec<crate::consumer::Group>,
+    pub agents_title: String,
     pub agents_folded: Option<bool>,
     /// Finished subagents sulin opened again (a finished tracker collapses to its result).
     pub agents_open: HashSet<String>,
@@ -446,6 +449,7 @@ impl Scene {
             review: false,
             show_ids: false,
             linked: false,
+            consumer: String::new(),
             ended: None,
             stale: Vec::new(),
             stale_data: HashMap::new(),
@@ -455,6 +459,7 @@ impl Scene {
             recap: None,
             stopped: false,
             agents: Vec::new(),
+            agents_title: String::new(),
             agents_folded: None,
             agents_open: HashSet::new(),
             toasts: Vec::new(),
@@ -571,6 +576,20 @@ impl Scene {
     }
 
     /// Restore the pane's own view (folds come from View directly; focus and anchor here).
+    /// Take who is working on the board from the seam (`consumer::on_board`): the name the pane
+    /// writes, the recap row, the workers' block. Returns their activity, which each frame's
+    /// `Input` carries. Nobody (`Presence::default()`) clears all of it: the pane then draws no
+    /// consumer's name, no live strip and no stop control.
+    pub fn present(&mut self, who: crate::consumer::Presence) -> Vec<crate::store::Activity> {
+        self.linked = who.linked;
+        self.consumer = who.name;
+        self.ended = who.ended;
+        self.recap = who.recap;
+        self.agents = who.workers;
+        self.agents_title = who.workers_title;
+        who.activity
+    }
+
     pub fn restore(&mut self, v: &View) {
         self.focus = v.focus.clone();
         self.anchor = v.anchor.clone().map(|a| (a, v.anchor_off));
@@ -668,7 +687,7 @@ impl Scene {
         // how many blocks still carry a change bar since sulin last looked, shown as a count in
         // the header (a divider row made the content jump). Latched: it appears only once a
         // change has gone unseen for UNSEEN_TAG seconds, so a change that lands while he is
-        // watching (a feed every 5 s) never blinks it; then it stays until the bars have faded
+        // watching (a handler every 5 s) never blinks it; then it stays until the bars have faded
         let bars = if view.seen_at.is_empty() {
             0
         } else {
@@ -686,9 +705,9 @@ impl Scene {
             self.tag_on = false;
         }
         self.unseen_n = if self.tag_on { bars } else { 0 };
-        // decisions whose component Claude removed stay visible until acknowledged
+        // decisions whose component its author removed stay visible until acknowledged
         let ids: HashSet<String> = doc.ids().into_iter().collect();
-        // only sulin's: Claude's own status on a row it removed is nothing he decided
+        // only sulin's: the author's own status on a row it removed is nothing he decided
         let orphans: Vec<String> =
             state.decisions.iter().filter(|(k, d)| !ids.contains(*k) && !k.is_empty() && !k.contains('#') && crate::who::is_human(&d.by) && d.seq > delivered).map(|(k, _)| k.clone()).collect();
         // the work overview's subagents, after the recap: a header, and unless folded a row each
@@ -955,7 +974,7 @@ impl Scene {
                     components::draw(&cx, &gh.block, iw, gh.depth, false)
                 }
                 Kind::Recap => {
-                    // the recap Claude Code wrote when he came back: grey, wrapped, with its time
+                    // the recap the consumer wrote when he came back: grey, wrapped, with its time
                     let (text, when) = self.recap.clone().unwrap_or_default();
                     let lines = vellum::text::wrap(&text, iw.saturating_sub(4) as usize);
                     let mut gg = Grid::new(iw, lines.len() as u16 + 1);
@@ -978,8 +997,8 @@ impl Scene {
                     let (mut run, mut wait, mut done) = (0usize, 0usize, 0usize);
                     for ag in self.agents.iter().flat_map(|g| &g.agents) {
                         match ag.phase(inp.wall) {
-                            crate::agents::Phase::Done => done += 1,
-                            crate::agents::Phase::Waiting => wait += 1,
+                            crate::consumer::Phase::Done => done += 1,
+                            crate::consumer::Phase::Waiting => wait += 1,
                             _ => run += 1,
                         }
                     }
@@ -991,7 +1010,7 @@ impl Scene {
                     let (ch, chc) = if folded { (icon::RIGHT, p.grey1) } else { (icon::DOWN, p.purple) };
                     gg.put(1, 1, ch, Style::fg(chc).on(p.bg0).bold());
                     gg.put(3, 1, icon::ROBOT, Style::fg(p.blue).on(p.bg0).bold());
-                    let x = gg.put(3 + components::TX, 1, "Agents", Style::fg(p.green).on(p.bg0).bold());
+                    let x = gg.put(3 + components::TX, 1, if self.agents_title.is_empty() { "Workers" } else { &self.agents_title }, Style::fg(p.green).on(p.bg0).bold());
                     let counts: Vec<String> = [(run, "running"), (wait, "waiting"), (done, "done")].into_iter().filter(|(n, _)| *n > 0).map(|(n, l)| format!("{n} {l}")).collect();
                     gg.put(x + 2, 1, &counts.join(" · "), Style::fg(p.grey1).on(p.bg0));
                     components::Drawn { grid: Some(gg), buttons: vec![(0, 1, iw, "mg:agents".into())], ..Default::default() }
@@ -1010,23 +1029,23 @@ impl Scene {
                     components::Drawn { grid: Some(gg), ..Default::default() }
                 }
                 Kind::AgentRow(gi, ai) => {
-                    // one subagent in one line of aligned columns: glyph, who, phase, plan
+                    // one worker in one line of aligned columns: glyph, who, phase, plan
                     // progress, elapsed. What it said along the way and its plan's step in hand
                     // show only when the row is opened (a click): the line says how far along it
                     // is, not what it is running
-                    use crate::agents::Phase;
+                    use crate::consumer::Phase;
                     let g = &self.agents[*gi];
                     let ag = &g.agents[*ai];
                     let ind: u16 = if g.agents.len() > 1 { 5 } else { 3 };
                     let cols = agent_cols(&self.agents, iw, inp.mouse);
-                    // the phase is read from what the transcript already gave (no file is touched):
+                    // the phase is read from what the worker already carries (no file is touched):
                     // waiting begins with time passing, which no reload announces
                     let phase = ag.phase(inp.wall);
                     let wait = ag.waiting_for(inp.wall);
                     let open = self.agents_open.contains(&ag.id);
                     let tx = ind + components::TX;
                     let text_w = iw.saturating_sub(tx + 1).max(1) as usize;
-                    let who = ag.who();
+                    let who = ag.name.clone();
                     let who_room = cols.phase_x.saturating_sub(tx + 2) as usize;
                     // opened: the lines under the row, each (node glyph, its color, text, text color)
                     let mut more: Vec<(Option<char>, Rgb, String, Rgb)> = Vec::new();
@@ -1055,7 +1074,7 @@ impl Scene {
                         }
                         // its own words along the way (the high level), or one line of what kind
                         // of work it did; a finished agent's last note is its result
-                        let mut chain: Vec<String> = if ag.notes.is_empty() { vec![ag.summary()].into_iter().filter(|x| !x.is_empty()).collect() } else { ag.notes.clone() };
+                        let mut chain: Vec<String> = if ag.notes.is_empty() { vec![ag.summary.clone()].into_iter().filter(|x| !x.is_empty()).collect() } else { ag.notes.clone() };
                         let result = if ag.finished && !ag.notes.is_empty() { chain.pop().unwrap_or_default() } else { String::new() };
                         let hidden = chain.len().saturating_sub(SHOW);
                         if hidden > 0 {
@@ -1093,7 +1112,7 @@ impl Scene {
                     // changes; a running agent is looked at every half minute at least, so the
                     // turn to waiting shows without a reload
                     if !ag.finished {
-                        let ran = parse_rfc3339(&ag.started).map(|s| inp.wall - s).unwrap_or(0.0);
+                        let ran = ag.started.map(|s| inp.wall - s).unwrap_or(0.0);
                         wake.every(now, age_pace(wait.unwrap_or(ran).min(ran)).min(if wait.is_some() { 60.0 } else { 30.0 }));
                     }
                     let right = ag.took(inp.wall);
@@ -1123,7 +1142,7 @@ impl Scene {
                         Phase::Waiting => (format!("waiting {}", components::age_short(wait.unwrap_or(0.0))), p.grey1),
                         Phase::Done => (phase.label().to_string(), p.green),
                     };
-                    // why it waits, when the transcript says (`waiting 2m · retrying tests`): after
+                    // why it waits, when the worker says (`waiting 2m · retrying tests`): after
                     // the word on a row with no plan, after the plan's count on a row with one
                     // (the columns stay where they are), and only where the row has the room
                     let why = ag.waiting_why(inp.wall).map(|r| format!(" · {r}")).unwrap_or_default();
@@ -1162,7 +1181,7 @@ impl Scene {
                     let mut gg = Grid::new(iw, 2);
                     gg.fill(gg.area(), Style::default().on(p.bg0));
                     let x = gg.put(1, 1, icon::WARN, Style::fg(p.yellow).on(p.bg0));
-                    gg.put(x + 1, 1, &format!("Orphaned decisions ({n}): Claude removed what you decided on"), Style::fg(p.grey2).on(p.bg0).bold());
+                    gg.put(x + 1, 1, &format!("Orphaned decisions ({n}): what you decided on was removed"), Style::fg(p.grey2).on(p.bg0).bold());
                     components::Drawn { grid: Some(gg), ..Default::default() }
                 }
                 Kind::Orphan(id) => {
@@ -1492,9 +1511,9 @@ impl Scene {
             parts::pill(&mut g, 2, 0, &title, pb, pf, p.bg0, a)
         };
         // since-you-looked badge beside the title: how many blocks carry a live change bar, readable
-        // from across the tab. The count comes latched from flatten (unseen_n), so a feed writing
+        // from across the tab. The count comes latched from flatten (unseen_n), so a handler writing
         // while sulin watches never blinks it
-        // Claude blocked on sulin (a permission prompt): said in the top edge, where it can't be
+        // a session blocked on sulin (a prompt it cannot answer itself): said in the top edge, where it can't be
         // missed and moves nothing
         let mut tx = tx;
         if inp.activity.iter().find(|x| x.agent.is_empty()).map(|x| x.state == "waiting").unwrap_or(false) {
@@ -1506,7 +1525,7 @@ impl Scene {
         // the stop flag, while it is up: a filled red pill. Stopping itself is a key (`S`), the
         // CLI, or esc in the chat; the bar holds no button for it (the line is the tabs')
         let room0 = w.saturating_sub(mw + 2);
-        if self.stopped {
+        if self.stopped && self.linked {
             let pill = " ⏹ STOPPED ";
             if tx + width(pill) as u16 + 2 < room0 {
                 tx = parts::pill(&mut g, tx + 1, 0, pill, p.red, p.bg0, p.bg0, a);
@@ -1540,14 +1559,14 @@ impl Scene {
             }
         }
 
-        // the live strip: what Claude is doing right now, from the tool hooks. It takes the help
+        // the live strip: what the board's consumer is doing right now. It takes the help
         // line's row; the keys come back while sulin has the pane focused
         let live = live_activity(inp.activity, inp.wall);
         if h >= 12 && (!focus_on || self.help_open || glance) {
             if let Some((act, agents)) = &live {
                 // a cell of padding inside each cap
                 let r = Rect::new(3, help_y, w.saturating_sub(6), 1);
-                // its own band: a faint blue (Claude's colour) across the row, so what's happening
+                // its own band: a faint blue (the author's colour) across the row, so what's happening
                 // now reads apart from the content above (sulin, 2026-11-08)
                 let band = p.blue.mix(p.bg0, 0.84);
                 g.fill(Rect::new(1, help_y, w.saturating_sub(2), 1), Style::default().on(band));
@@ -1624,6 +1643,7 @@ impl Scene {
             parts::help_line(&mut g, 2, help_y, &keys, p, p.bg0, Rect::new(2, help_y, w.saturating_sub(3), 1));
         }
         if h >= 12 && self.prompt.is_none() && !self.review && !glance && !ended_show && (live.is_none() || (focus_on && !self.help_open)) {
+            let stop_label = format!("stop {}", self.consumer);
             let mut keys: Vec<(&str, &str)> = vec![("j/k", "move")];
             match self.focus_kind.as_str() {
                 "section" => keys.push(("za", "fold")),
@@ -1661,7 +1681,7 @@ impl Scene {
             if self.help_open {
                 keys.extend([("gg/G", "top/end"), ("zh", "fold head"), ("]]/[[", "sections"), ("]c/[c", "changes"), ("/", "find"), ("c", "review"), ("i", "ids")]);
                 if self.linked {
-                    keys.push(("S", "stop Claude"));
+                    keys.push(("S", &stop_label));
                 }
                 keys.extend([("zM/zR", "fold all"), ("m", if inp.mouse { "mouse off" } else { "mouse on" }), ("q", "quit")]);
             } else {
@@ -1726,11 +1746,11 @@ impl Scene {
         if open_q > 0 {
             nuggets.push((format!("{} {open_q} open", icon::QUESTION), LIPGLOSS_STATUS.nugget_a));
         }
-        // only on a board a Claude session keeps: a dashboard nobody's session is linked to
-        // has no Claude to be current
+        // only on a board a consumer's session keeps: a dashboard nobody is linked to has no
+        // one to be current
         if self.linked {
             nuggets.push((
-                if inp.unread > 0 { format!("{} {} for Claude", icon::SEND, inp.unread) } else { format!("{} Claude is current", icon::CHECK) },
+                if inp.unread > 0 { format!("{} {} for {}", icon::SEND, inp.unread, self.consumer) } else { format!("{} {} is current", icon::CHECK, self.consumer) },
                 LIPGLOSS_STATUS.nugget_b,
             ));
         }
@@ -1746,6 +1766,7 @@ impl Scene {
     fn ctx<'a>(&'a self, inp: &'a Input, p: &'a vellum::color::Palette, flash: &'a HashMap<String, f32>, prog: &'a HashMap<String, f32>) -> Ctx<'a> {
         Ctx {
             linked: self.linked,
+            consumer: &self.consumer,
             doc: inp.doc,
             state: inp.state,
             p,
@@ -1882,7 +1903,7 @@ impl Scene {
                 }
                 continue;
             }
-            // authored text wraps, at every width (sulin, 2026-11-10: only what feeds pull in may
+            // authored text wraps, at every width (sulin, 2026-11-10: only what handlers pull in may
             // be cut): up to HEAD_WRAP rows a line. The elapsed time stays on the first row, and
             // the text wraps clear of it there
             let rw = width(&l.right) as u16;
@@ -2099,6 +2120,7 @@ fn components_resolved(inp: &Input, b: &Block) -> bool {
     let pulse = HashMap::new();
     let cx = Ctx {
         linked: true,
+        consumer: "",
         doc: inp.doc,
         state: inp.state,
         p: &EVERFOREST,
@@ -2254,14 +2276,14 @@ struct AgentCols {
 
 /// The agents' columns for an item grid `iw` wide. The name column is as wide as the longest
 /// name when the row has the room, and never under 12 cells.
-fn agent_cols(groups: &[crate::agents::Group], iw: u16, mouse: bool) -> AgentCols {
+fn agent_cols(groups: &[crate::consumer::Group], iw: u16, mouse: bool) -> AgentCols {
     let all = || groups.iter().flat_map(|g| &g.agents);
     let count_w = all().filter_map(|a| a.progress.as_ref()).map(|p| format!("{}/{}", p.done, p.total).len() as u16).max().unwrap_or(0);
     let plan_w = if count_w > 0 { AGENT_BAR_W + 1 + count_w + 2 } else { 0 };
     // a fan-out's rows sit two cells in; the columns are measured from there for every row
     let who_x = 5 + components::TX;
     let fixed = who_x + 2 + AGENT_PHASE_W + 1 + plan_w + if mouse { 9 } else { 0 } + 6;
-    let widest = all().map(|a| width(&a.who()) as u16).max().unwrap_or(0);
+    let widest = all().map(|a| width(&a.name) as u16).max().unwrap_or(0);
     let who_w = widest.min(iw.saturating_sub(fixed).max(12));
     let phase_x = who_x + who_w + 2;
     let bar_x = phase_x + AGENT_PHASE_W + 1;
@@ -2346,7 +2368,7 @@ mod tests {
             sc.frame(&inp).grid.to_text().lines().next().unwrap_or("").to_string()
         };
         assert!(!top(&d1, 0.0).contains(" new "));
-        // a change seen within UNSEEN_TAG never shows the badge (a feed writing while he watches);
+        // a change seen within UNSEEN_TAG never shows the badge (a handler writing while he watches);
         // one that stays unseen does
         let t = top(&d2, 5.0);
         assert!(!t.contains(" new "), "{t}");
@@ -2354,8 +2376,8 @@ mod tests {
         assert!(t.contains(" 2 new "), "{t}");
     }
 
-    /// A removed section and its child collapse and leave (a feed rewrites structure often, so a
-    /// lingering ghost showed up as soon as feeds did), and while they collapse they keep their
+    /// A removed section and its child collapse and leave (a handler rewrites structure often, so a
+    /// lingering ghost showed up as soon as handlers did), and while they collapse they keep their
     /// old order.
     #[test]
     fn removed_section_and_children_leave() {
@@ -2419,7 +2441,7 @@ mod tests {
 
     /// Rows removed inside a folded section were never on screen, so they leave without a ghost.
     /// (Each got one, placed at the top of the pane because its predecessor wasn't listed;
-    /// finished sections fold themselves and feeds rewrite them.)
+    /// finished sections fold themselves and handlers rewrite them.)
     #[test]
     fn rows_removed_inside_a_fold_are_never_drawn() {
         let with: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [
@@ -2493,7 +2515,7 @@ mod tests {
             {"type": "status", "id": "st", "text": "cargo test", "state": "pass", "result": "ok", "spark": [1, 2, 3, 4, 5], "target": "https://x"},
             {"type": "question", "id": "q", "text": "which?", "options": ["a", "b"], "default": "a", "why": "why"},
             {"type": "claim", "id": "c", "text": "claim"},
-            {"type": "decided", "id": "d", "text": "dec", "by": "claude"},
+            {"type": "decided", "id": "d", "text": "dec", "by": "author"},
             {"type": "link", "id": "l", "text": "link", "target": "https://example.com"},
             {"type": "image", "id": "im", "path": "/nonexistent.png", "alt": "alt"},
             {"type": "row", "id": "r", "text": "row", "glyph": "spin", "tag": "t", "detail": "d"}]}]})).unwrap();
@@ -2540,7 +2562,7 @@ mod tests {
         let text = sc.frame(&inp).grid.to_text();
         let toks: Vec<&str> = sc.hits.iter().map(|h| h.3.as_str()).collect();
         // the open step's circle cycles to next; the running step has one stop pill; the finished
-        // step has nothing: done is Claude's to set, never sulin's
+        // step has nothing: done is the author's to set, never sulin's
         assert_eq!(toks, ["mg:todo/o=next", "mg:todo/r=skipped"], "{text}");
         assert!(text.contains(" stop ") && !text.contains(" done ") && !text.contains(" skip "), "{text}");
         let (x, y, _, _) = sc.hits[0].clone();
@@ -2668,7 +2690,7 @@ mod tests {
     }
 
     /// A question card's status line stays inside its ring at the pane widths where it ran into
-    /// the border (56-62): "you picked X · sent · Claude reads it next turn" and "default X
+    /// the border (56-62): "you picked X · sent · <name> reads it next turn" and "default X
     /// applies …" wrap or truncate instead of overwriting it.
     #[test]
     fn question_card_stays_inside_its_ring() {
@@ -2684,6 +2706,7 @@ mod tests {
             for w in 56..=62u16 {
                 let mut sc = Scene::new(&cfg);
                 sc.linked = true;
+                sc.consumer = "Otto".into();
                 let inp = Input {
                     doc: &doc, state: &state, view: &view, delivered: 0, unread: 0, now: 0.0, wall: 0.0, cfg: &cfg, kitty: false,
                     cell: (10, 20), focused_pane: false, mouse: false, project: "p", w, h: 30, activity: &[],
@@ -2743,13 +2766,13 @@ mod tests {
         assert!(row.starts_with('−'), "the less glyph in the gutter: {row:?}");
         assert!(!lines.iter().find(|l| l.contains("another")).unwrap().starts_with('−'));
         assert!(!sc.hits.iter().any(|h| h.3 == "mg:review" || h.3 == "mg:stop") && !lines[0].contains("stop"), "the bar says the mode and holds no buttons: {}", lines[0]);
-        // delivered: no longer a draft, the mark stays until Claude revises the row
+        // delivered: no longer a draft, the mark stays until the author revises the row
         let text = sc.frame(&Input { delivered: 5, ..inp }).grid.to_text();
         assert!(!text.lines().next().unwrap().contains("note"), "{text}");
     }
 
     #[test]
-    fn ids_claude_names_are_on_screen() {
+    fn ids_the_author_names_are_on_screen() {
         let doc: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [
             {"type": "todo", "id": "r1", "text": "short id"},
             {"type": "todo", "id": "write-up-the-cause", "text": "slug id"},
@@ -2795,7 +2818,7 @@ mod tests {
     fn a_step_in_a_chain_wraps_and_its_lanes_stay_joined() {
         let doc: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [{"type": "section", "id": "s", "title": "S", "children": [
             {"type": "todo", "id": "c1", "text": "Rename the thing to board in every help text and hint", "status": "done"},
-            {"type": "todo", "id": "c2", "text": "Retire the feed runner from the main path", "status": "done", "after": ["c1"], "note": "the note drops below when it does not fit"},
+            {"type": "todo", "id": "c2", "text": "Retire the poll runner from the main path", "status": "done", "after": ["c1"], "note": "the note drops below when it does not fit"},
             {"type": "todo", "id": "c3", "text": "Wrap the steps of a chain so the lanes stay joined", "status": "done", "after": ["c1"]},
             {"type": "todo", "id": "c4", "text": "Ship it", "after": ["c2", "c3"]}]}]})).unwrap();
         let t = frame_text_w(&mut Scene::new(&Config::default()), &doc, 0.0, 44);
@@ -2805,7 +2828,7 @@ mod tests {
             [
                 "    ●─╮ c1 Rename the thing to board in",
                 "    │ │    every help text and hint",
-                "    ● │ c2 Retire the feed runner from",
+                "    ● │ c2 Retire the poll runner from",
                 "    │ │    the main path",
                 "    │ │    the note drops below when it",
                 "    │ │    does not fit",
@@ -2903,7 +2926,7 @@ mod tests {
     }
 
     #[test]
-    fn a_question_says_when_claude_goes_ahead() {
+    fn a_question_says_when_its_default_is_taken() {
         let mk = |t4: &str, q: serde_json::Value| -> Doc {
             let mut qq = json!({"type": "question", "id": "Q1", "text": "mcp or cli?", "options": ["cli", "mcp"], "default": "cli"});
             for (k, v) in q.as_object().unwrap() {
@@ -2931,21 +2954,65 @@ mod tests {
         assert!(t.contains("t4 started: taking the default now"), "{t}");
         let held: State = serde_json::from_value(json!({"decisions": {"Q1": {"kind": "hold", "value": true, "by": "sulin", "at": ""}}})).unwrap();
         let (t, _) = run(&mk("todo", json!({"applies": "t4"})), &held, 0.0);
-        assert!(t.contains("you asked Claude to wait") && t.contains("stops at t4"), "{t}");
+        assert!(t.contains("you asked for a wait") && t.contains("stops at t4"), "{t}");
         let (t, _) = run(&mk("todo", json!({"takes_at": "2026-11-08T10:05:00Z"})), &open, crate::util::parse_rfc3339("2026-11-08T10:00:00Z").unwrap());
         assert!(t.contains("taken in 5m"), "{t}");
         let (t, _) = run(&mk("done", json!({"applied": true, "applied_at": "2026-11-08T10:00:00Z"})), &open, 0.0);
         assert!(t.contains("Q1") && t.contains("cli") && !t.contains("wait for me"), "resolved: {t}");
     }
 
+    /// Who is on the board comes through the seam (`present`). Nobody: no consumer's name, no
+    /// stop control, no stopped pill, no recap, no workers' block, and no activity for a live
+    /// strip. Somebody: their name in the status bar and on the stop key, and what they are doing.
     #[test]
-    fn agents_section_groups_a_fan_out_with_progress_and_stops() {
-        let doc: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [{"type": "text", "id": "x", "text": "body"}]})).unwrap();
-        let mk = |id: &str, fin: bool, said: &str| crate::agents::Agent { id: id.into(), description: format!("review {id}"), finished: fin, prompt: "p1".into(), said: said.into(), notes: vec!["reading the auth module".into(), said.into()], ..Default::default() };
+    fn a_board_nobody_keeps_draws_no_consumer() {
+        let doc: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "title": "Services", "blocks": [{"type": "row", "id": "x", "text": "web is up"}]})).unwrap();
         let cfg = Config::default();
         let (state, view) = (State::default(), View::default());
         let mut sc = Scene::new(&cfg);
-        sc.agents = vec![crate::agents::Group { prompt: "p1".into(), agents: vec![mk("sec", true, "found 2 bugs"), mk("perf", false, "now profiling")] }];
+        sc.help_open = true;
+        sc.stopped = true; // the project's flag, up for some other board's session
+        let acts = sc.present(crate::consumer::Presence::default());
+        assert!(acts.is_empty() && !sc.linked && sc.consumer.is_empty() && sc.agents.is_empty() && sc.recap.is_none());
+        let mut text = |sc: &mut Scene, acts: &[crate::store::Activity], help: bool| {
+            sc.help_open = help;
+            let inp = Input {
+                doc: &doc, state: &state, view: &view, delivered: 0, unread: 0, now: 0.0, wall: parse_rfc3339("2026-11-08T10:00:05Z").unwrap(), cfg: &cfg, kitty: false,
+                cell: (10, 20), focused_pane: true, mouse: true, project: "p", w: 200, h: 24, activity: acts,
+            };
+            sc.frame(&inp).grid.to_text()
+        };
+        let t = text(&mut sc, &acts, true);
+        for gone in ["is current", "stop ", "STOPPED", "Otto", "Agents", "Workers", "your turn", "Build the pane"] {
+            assert!(!t.contains(gone), "{gone:?} on a board nobody keeps: {t}");
+        }
+        assert!(t.contains("web is up") && t.contains("quit"), "{t}");
+        // somebody keeps it
+        let act = crate::store::Activity { session: "s".into(), agent: String::new(), state: "running".into(), tool: "Bash".into(), text: "Build the pane".into(), since: "2026-11-08T10:00:00Z".into() };
+        let who = crate::consumer::Presence { name: "Otto".into(), linked: true, activity: vec![act], recap: Some(("The goal is X.".into(), "10:00".into())), workers_title: "Helpers".into(), workers: vec![crate::consumer::Group { agents: vec![worker("w", "Survey the terminals")] }], ..Default::default() };
+        let acts = sc.present(who);
+        let t = text(&mut sc, &acts, true);
+        for must in ["Otto is current", "STOPPED", "Build the pane", "The goal is X.", "Helpers", "Survey the terminals"] {
+            assert!(t.contains(must), "{must:?}: {t}");
+        }
+        // the live strip sits on the keys' row; with the session quiet the keys name whom S stops
+        let t = text(&mut sc, &[], true);
+        assert!(t.contains("stop Otto") && !t.contains("Build the pane"), "{t}");
+        // and gone again once nobody does
+        let acts = sc.present(crate::consumer::Presence::default());
+        let t = text(&mut sc, &acts, true);
+        assert!(!t.contains("Otto") && !t.contains("Helpers") && !t.contains("Build the pane") && !t.contains("The goal is X."), "{t}");
+    }
+
+    #[test]
+    fn agents_section_groups_a_fan_out_with_progress_and_stops() {
+        let doc: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [{"type": "text", "id": "x", "text": "body"}]})).unwrap();
+        let mk = |id: &str, fin: bool, said: &str| crate::consumer::Worker { id: id.into(), name: format!("review {id}"), description: format!("review {id}"), finished: fin, notes: vec!["reading the auth module".into(), said.into()], ..Default::default() };
+        let cfg = Config::default();
+        let (state, view) = (State::default(), View::default());
+        let mut sc = Scene::new(&cfg);
+        sc.agents = vec![crate::consumer::Group { agents: vec![mk("sec", true, "found 2 bugs"), mk("perf", false, "now profiling")] }];
+        sc.agents_title = "Agents".into();
         let inp = Input {
             doc: &doc, state: &state, view: &view, delivered: 0, unread: 0, now: 0.0, wall: 0.0, cfg: &cfg, kitty: false,
             cell: (10, 20), focused_pane: false, mouse: true, project: "p", w: 70, h: 24, activity: &[],
@@ -2968,18 +3035,10 @@ mod tests {
         assert!(!t.contains("Bash") && !t.contains("tools"), "no tool-level detail: {t}");
     }
 
-    /// Transcript lines for an agent that started at 18:00:00 and made `calls`: (seconds in,
-    /// tool, input, whether its result came back).
-    fn agent_lines(calls: &[(u32, &str, serde_json::Value, bool)]) -> String {
-        let at = |s: u32| format!("2026-11-10T18:{:02}:{:02}Z", s / 60, s % 60);
-        let mut out = vec![json!({"type": "user", "promptId": "p", "timestamp": at(0), "message": {"content": "go"}}).to_string()];
-        for (i, (secs, tool, input, back)) in calls.iter().enumerate() {
-            out.push(json!({"type": "assistant", "timestamp": at(*secs), "message": {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": format!("tu{i}"), "name": tool, "input": input}]}}).to_string());
-            if *back {
-                out.push(json!({"type": "user", "timestamp": at(secs + 1), "message": {"content": [{"type": "tool_result", "tool_use_id": format!("tu{i}"), "content": "ok"}]}}).to_string());
-            }
-        }
-        out.join("\n")
+    /// A worker that started at 18:00:00 on 2026-11-10 and is coding.
+    fn worker(id: &str, name: &str) -> crate::consumer::Worker {
+        let t0 = parse_rfc3339("2026-11-10T18:00:00Z").unwrap();
+        crate::consumer::Worker { id: id.into(), name: name.into(), description: name.into(), phase: crate::consumer::Phase::Coding, started: Some(t0), ..Default::default() }
     }
 
     fn agents_frame(sc: &mut Scene, now: f64, wall: f64, w: u16) -> Frame {
@@ -2996,12 +3055,10 @@ mod tests {
     #[test]
     fn an_opened_running_agent_has_no_empty_result_row() {
         let t0 = parse_rfc3339("2026-11-10T18:00:00Z").unwrap();
-        let edits: Vec<(u32, &str, serde_json::Value, bool)> = (0..4).map(|i| (10 + i * 5, "Edit", json!({"file_path": "/r/src/a.rs"}), true)).collect();
-        let mut a = crate::agents::parsed_for_test("Build the thing", &agent_lines(&edits));
-        a.id = "w".into();
+        let mut a = worker("w", "Build the thing");
         a.notes = vec!["one".into(), "two".into(), "three".into()];
         let mut sc = Scene::new(&Config::default());
-        sc.agents = vec![crate::agents::Group { prompt: "p".into(), agents: vec![a] }];
+        sc.agents = vec![crate::consumer::Group { agents: vec![a] }];
         sc.agents_open.insert("w".into());
         let t = agents_frame(&mut sc, 0.0, t0 + 40.0, 60).grid.to_text();
         // its three notes and nothing after them: a result row belongs to a finished agent
@@ -3013,15 +3070,11 @@ mod tests {
     #[test]
     fn an_agent_is_one_line_of_who_phase_plan_and_elapsed() {
         let t0 = parse_rfc3339("2026-11-10T18:00:00Z").unwrap();
-        let edits: Vec<(u32, &str, serde_json::Value, bool)> = (0..4).map(|i| (10 + i * 5, "Edit", json!({"file_path": "/r/src/a.rs"}), true)).collect();
-        let mut coding = crate::agents::parsed_for_test("Add dashboard widgets", &agent_lines(&edits));
-        coding.id = "w".into();
-        coding.plan = Some(("a".into(), "ag-widgets".into()));
-        coding.progress = Some(crate::agents::Progress { done: 3, total: 5, current: "Draw the run strip".into() });
-        let mut bare = crate::agents::parsed_for_test("Survey the terminals", &agent_lines(&edits));
-        bare.id = "s".into();
+        let mut coding = worker("w", "Add dashboard widgets");
+        coding.progress = Some(crate::consumer::Progress { done: 3, total: 5, current: "Draw the run strip".into() });
+        let bare = worker("s", "Survey the terminals");
         let mut sc = Scene::new(&Config::default());
-        sc.agents = vec![crate::agents::Group { prompt: "p".into(), agents: vec![coding] }, crate::agents::Group { prompt: "q".into(), agents: vec![bare] }];
+        sc.agents = vec![crate::consumer::Group { agents: vec![coding] }, crate::consumer::Group { agents: vec![bare] }];
         // twelve minutes in, its last call half a minute old
         let wall = t0 + 40.0;
         let f = agents_frame(&mut sc, 0.0, wall, 80);
@@ -3049,11 +3102,16 @@ mod tests {
     #[test]
     fn a_waiting_agent_is_still_and_says_how_long() {
         let t0 = parse_rfc3339("2026-11-10T18:00:00Z").unwrap();
-        let mut a = crate::agents::parsed_for_test("Add tabs", &agent_lines(&[(10, "Edit", json!({"file_path": "/r/a.rs"}), true), (20, "Bash", json!({"command": "sleep 600"}), false)]));
-        a.id = "t".into();
-        a.progress = Some(crate::agents::Progress { done: 2, total: 4, current: String::new() });
+        // blocked since 18:00:20 on a call that says why; half a minute of that makes it a wait
+        let mut a = worker("t", "Add tabs");
+        a.turns = vec![(t0 + 50.0, crate::consumer::Phase::Waiting)];
+        a.blocked_since = t0 + 20.0;
+        a.blocked_on = "sleep".into();
+        a.progress = Some(crate::consumer::Progress { done: 2, total: 4, current: String::new() });
+        let b = crate::consumer::Worker { blocked_on: String::new(), progress: None, ..a.clone() };
         let mut sc = Scene::new(&Config::default());
-        sc.agents = vec![crate::agents::Group { prompt: "p".into(), agents: vec![a] }];
+        sc.agents_title = "Agents".into();
+        sc.agents = vec![crate::consumer::Group { agents: vec![a] }];
         let wall = t0 + 20.0 + 125.0;
         let t = agents_frame(&mut sc, 0.0, wall, 80).grid.to_text();
         let row = t.lines().find(|l| l.contains("Add tabs")).unwrap_or_else(|| panic!("{t}"));
@@ -3071,9 +3129,7 @@ mod tests {
         let rows: Vec<String> = (24..80).map(|w| row_of(&mut sc, w)).collect();
         assert!(rows.iter().all(|r| !r.contains('·') || r.contains("waiting 2m · sleep")), "{rows:#?}");
         assert!(rows.iter().any(|r| r.contains("waiting 2m") && !r.contains("sleep")), "{rows:#?}");
-        let mut b = crate::agents::parsed_for_test("Add tabs", &agent_lines(&[(10, "Edit", json!({"file_path": "/r/a.rs"}), true), (20, "Bash", json!({"command": "rsync -a big/ copy/"}), false)]));
-        b.id = "t".into();
-        sc.agents = vec![crate::agents::Group { prompt: "p".into(), agents: vec![b] }];
+        sc.agents = vec![crate::consumer::Group { agents: vec![b] }];
         let plain = row_of(&mut sc, 80);
         assert!(plain.contains("waiting 2m") && !plain.contains("·"), "{plain}");
         // motion is on, and still nothing asks for a sub-second frame: its glyph does not spin
@@ -3087,14 +3143,14 @@ mod tests {
     fn your_steps_are_pink_and_yours_to_finish() {
         let doc: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [
             {"type": "todo", "id": "t1", "text": "try it on the laptop", "owner": "you"},
-            {"type": "todo", "id": "t2", "text": "claude's step"}]})).unwrap();
+            {"type": "todo", "id": "t2", "text": "the author's step"}]})).unwrap();
         let cfg = Config::default();
         let view = View::default();
         let open = State::default();
         let (t1, t2) = (doc.find("t1").unwrap(), doc.find("t2").unwrap());
         assert!(components::yours(&open, t1) && !components::yours(&open, t2));
         assert_eq!(components::cycle_for(&open, t1), Some("done"), "his own step: he finishes it");
-        assert_eq!(components::cycle_for(&open, t2), Some("next"), "Claude's: next, never done");
+        assert_eq!(components::cycle_for(&open, t2), Some("next"), "the author's: next, never done");
         // he hands t1 back: his claim wins over the owner field
         let handed: State = serde_json::from_value(json!({"decisions": {"t1#own": {"kind": "own", "value": false, "by": "sulin", "at": ""}}})).unwrap();
         assert!(!components::yours(&handed, t1));
@@ -3121,7 +3177,7 @@ mod tests {
         sc.toasts = vec![
             (tt("x0", "", "oldest, not shown", "info", "2026-11-08T10:00:00Z"), 1.0),
             (tt("x1", "t1", "132 passed", "ok", "2026-11-08T10:00:01Z"), 0.5),
-            (tt("x2", "", "feed jj crashed", "error", "2026-11-08T10:00:02Z"), 1.0),
+            (tt("x2", "", "handler jj failed", "error", "2026-11-08T10:00:02Z"), 1.0),
         ];
         let inp = Input {
             doc: &doc, state: &state, view: &view, delivered: 0, unread: 0, now: 0.0, wall: 0.0, cfg: &cfg, kitty: false,
@@ -3130,7 +3186,7 @@ mod tests {
         let text = sc.frame(&inp).grid.to_text();
         let rows: Vec<&str> = text.lines().collect();
         let a = rows.iter().position(|l| l.contains("132 passed")).expect("the older of the two, lowest");
-        let b = rows.iter().position(|l| l.contains("feed jj crashed")).expect("the newest, above it");
+        let b = rows.iter().position(|l| l.contains("handler jj failed")).expect("the newest, above it");
         assert_eq!(a, b + 3, "stacked: the oldest lowest, the newer one a box (3 rows) above: {text}");
         assert!(rows[a].contains("on t1"), "it names its row: {text}");
         assert!(!text.contains("oldest, not shown"), "two at most: {text}");
@@ -3149,14 +3205,14 @@ mod tests {
         let cfg = Config::default();
         let (state, view) = (State::default(), View::default());
         let mut sc = Scene::new(&cfg);
-        sc.toasts = vec![(crate::toast::Toast { id: "x1".into(), text: "feed jj crashed".into(), level: "error".into(), ttl: 8.0, sent: "2026-11-08T10:00:00Z".into(), ..Default::default() }, 1.0)];
+        sc.toasts = vec![(crate::toast::Toast { id: "x1".into(), text: "handler jj failed".into(), level: "error".into(), ttl: 8.0, sent: "2026-11-08T10:00:00Z".into(), ..Default::default() }, 1.0)];
         let inp = Input {
             doc: &doc, state: &state, view: &view, delivered: 0, unread: 0, now: 0.0, wall: 0.0, cfg: &cfg, kitty: false,
             cell: (10, 20), focused_pane: false, mouse: true, project: "p", w: 60, h: 16, activity: &[],
         };
         let text = sc.frame(&inp).grid.to_text();
         let rows: Vec<&str> = text.lines().collect();
-        let ty = rows.iter().position(|l| l.contains("feed jj crashed")).expect("the toast") as u16;
+        let ty = rows.iter().position(|l| l.contains("handler jj failed")).expect("the toast") as u16;
         let under: Vec<(u16, u16, u16, String)> = sc.hits.iter().filter(|h| h.3.starts_with("mg:strike/") && h.1 + 1 >= ty && h.1 <= ty + 1).cloned().collect();
         assert_eq!(under.iter().map(|h| h.1).collect::<HashSet<_>>().len(), 3, "claims lie under all three rows of the box: {text}");
         // every cell of the box, border and padding included
@@ -3208,11 +3264,11 @@ mod tests {
         let mut dec = |k: &str, kind: &str, by: &str, at: &str, v: serde_json::Value| {
             state.decisions.insert(k.into(), serde_json::from_value(json!({"kind": kind, "value": v, "by": by, "at": at})).unwrap());
         };
-        dec("d#time", "time", "claude", "", json!({"started": "2026-11-10T10:00:00Z", "done": "2026-11-10T10:12:30Z"}));
-        dec("r#time", "time", "claude", "", json!({"started": "2026-11-10T10:20:00Z"}));
-        dec("w#time", "time", "claude", "", json!({"started": "2026-11-10T09:00:00Z", "done": "2026-11-10T09:00:45Z"}));
-        dec("o#time", "time", "claude", "", json!({"started": "2026-11-10T09:00:00Z"}));
-        dec("y#time", "time", "claude", "", json!({"started": "2026-11-10T10:00:00Z"}));
+        dec("d#time", "time", "author", "", json!({"started": "2026-11-10T10:00:00Z", "done": "2026-11-10T10:12:30Z"}));
+        dec("r#time", "time", "author", "", json!({"started": "2026-11-10T10:20:00Z"}));
+        dec("w#time", "time", "author", "", json!({"started": "2026-11-10T09:00:00Z", "done": "2026-11-10T09:00:45Z"}));
+        dec("o#time", "time", "author", "", json!({"started": "2026-11-10T09:00:00Z"}));
+        dec("y#time", "time", "author", "", json!({"started": "2026-11-10T10:00:00Z"}));
         dec("y", "status", crate::who::HUMAN, "2026-11-10T10:07:00Z", json!("done"));
         let wall = crate::util::parse_rfc3339("2026-11-10T11:24:10Z").unwrap();
         let inp = |mouse| Input {
@@ -3407,10 +3463,10 @@ mod tests {
         sc.move_focus(1);
         assert!(!frame_text(&mut sc, &doc, 1.0).contains("⏎ open"), "r2 has none");
         sc.move_focus(1);
-        assert!(frame_text(&mut sc, &doc, 2.0).contains("⏎ open"), "a feed row with a target");
+        assert!(frame_text(&mut sc, &doc, 2.0).contains("⏎ open"), "an owned row with a target");
     }
 
-    /// The focused row is never cut: a table row's long title and a feed row's long text end in
+    /// The focused row is never cut: a table row's long title and a plain row's long text end in
     /// `…` until the row has the focus, then wrap; moving on restores the line. The rows above
     /// don't move, and the row the focus moves to keeps its screen row.
     #[test]
@@ -3453,7 +3509,7 @@ mod tests {
         let col = l2.find("Retry").unwrap();
         assert_eq!(t.lines().nth(y2 + 1).unwrap().find(|c: char| !c.is_whitespace() && c != '▌'), Some(col), "the wrapped rows sit in the title's column:\n{t}");
         assert!(row_of(&t, "Third: Retry") > y2 + 1 && t.lines().nth(row_of(&t, "Third: Retry")).unwrap().contains('…'), "{t}");
-        // focus a feed row: it wraps, and the table row it left is one cut line again
+        // focus a plain row: it wraps, and the table row it left is one cut line again
         sc.move_focus(2);
         let t = frame(&mut sc);
         assert_eq!(sc.focus.as_deref(), Some("w1"));

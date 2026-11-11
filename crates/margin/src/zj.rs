@@ -1,7 +1,7 @@
 //! Pane management through `zellij action`, no plugin (design §6). This is `ZellijHost`'s
 //! implementation (host.rs); nothing else calls it directly.
 //!
-//! `margin open` finds the home tab from `$ZELLIJ_PANE_ID` (the pane Claude Code runs in), reuses a
+//! `margin open` finds the home tab from `$ZELLIJ_PANE_ID` (the pane the command was run from), reuses a
 //! pane titled `margin:<artifact>` in that tab if one exists, and otherwise creates one with
 //! `--tab-id T --no-focus`: a pinned float by default (visible with the floating layer hidden, and
 //! keystrokes still reach the chat), or a split in the biggest free space. Neither steals focus

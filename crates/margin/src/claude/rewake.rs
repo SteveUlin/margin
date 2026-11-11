@@ -1,4 +1,4 @@
-//! `margin hook rewake`: the `Stop` hook that waits. Claude Code runs a command hook marked
+//! `margin claude hook rewake`: the `Stop` hook that waits. Claude Code runs a command hook marked
 //! `"asyncRewake": true` in the background and, when it exits with code 2, wakes the session (idle
 //! or not) with the hook's stderr as a system reminder. So this process starts as a turn ends,
 //! waits until sulin is done in the pane, prints his decisions as the `margin:` lines the prompt
@@ -17,7 +17,7 @@
 //! that mark and leaves the wake-up to it.
 
 use crate::store::{Event, Store};
-use crate::{hook, link, wake};
+use super::{hook, link, wake};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::time::SystemTime;

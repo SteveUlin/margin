@@ -2,7 +2,7 @@
 //!
 //! Every decision the person makes in the pane is stored with `by` = `HUMAN` ("you", the word the
 //! decided rows already use). State written before that says "sulin" (margin's first user), so
-//! `is_human` accepts both. What Claude reads names the person by `user_name` from the config
+//! `is_human` accepts both. What a consumer of the pane's events reads names the person by `user_name` from the config
 //! (default "the user"): the messages are written with the word "sulin" and `say` swaps in the
 //! configured name on the way out, so no one's name is baked into the source's behaviour.
 
@@ -14,7 +14,7 @@ pub fn is_human(by: &str) -> bool {
     by == HUMAN || by == "sulin"
 }
 
-/// The person's name in messages to Claude: the config's `user_name`, else "the user".
+/// The person's name in messages to a consumer: the config's `user_name`, else "the user".
 pub fn name() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {
@@ -23,7 +23,7 @@ pub fn name() -> &'static str {
     })
 }
 
-/// A message to Claude with the person's configured name in it.
+/// A message to a consumer with the person's configured name in it.
 pub fn say(text: &str) -> String {
     if name() == "sulin" {
         return text.to_string();
@@ -36,6 +36,6 @@ mod tests {
     use super::*;
     #[test]
     fn old_state_still_counts_as_the_person() {
-        assert!(is_human("you") && is_human("sulin") && !is_human("claude"));
+        assert!(is_human("you") && is_human("sulin") && !is_human("author"));
     }
 }

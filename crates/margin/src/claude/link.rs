@@ -6,7 +6,7 @@
 //! - **auto**: at SessionStart, the margin pane in the chat's own Zellij tab (the one beside you);
 //! - **open**: `margin open <art>` links a session that has no link yet (stacking the showcase on
 //!   top doesn't take the link over);
-//! - **explicit**: `margin link <art>` sets or switches it.
+//! - **explicit**: `margin claude link <art>` sets or switches it.
 //!
 //! A link is keyed by session id and remembers the chat pane, because the hooks docs don't say
 //! whether a resumed session keeps its id: a new id in the same chat pane inherits the link.
@@ -90,7 +90,7 @@ pub fn remove(st: &Store, session: &str) -> bool {
 
 /// Is `art` some live Claude session's pane, and if only ended sessions are linked to it, when
 /// did the last one end (local HH:MM)? A session is over once its SessionEnd hook said so
-/// (`margin hook end`). (linked to a live session, when the last linked session ended)
+/// (`margin claude hook end`). (linked to a live session, when the last linked session ended)
 pub fn liveness(st: &Store, art: &str) -> (bool, Option<String>) {
     let links: Vec<Link> = all(st).into_iter().filter(|l| l.art == art).collect();
     if links.is_empty() {
@@ -160,7 +160,8 @@ pub fn is_pane_write(tool: &str, input: &serde_json::Value) -> bool {
         .any(|w| {
             // the binary by name or path, or a shell variable holding it (`M=…/margin; $M set …`)
             let bin = |t: &str| t.rsplit('/').next() == Some("margin") || (t.starts_with('$') && cmd.contains("margin"));
-            w.windows(2).any(|p| bin(p[0]) && VERBS.contains(&p[1]))
+            // `margin claude link|propose` are the group's writes; `margin link` is the spelling from before it
+            w.windows(2).any(|p| bin(p[0]) && VERBS.contains(&p[1])) || w.windows(3).any(|p| bin(p[0]) && p[1] == "claude" && matches!(p[2], "link" | "propose"))
         })
 }
 
@@ -292,7 +293,8 @@ mod tests {
         assert!(b("margin set plan t1 status done"));
         assert!(b("cd ~/src/margin && nix develop -c cargo build && ./target/debug/margin set margin pl8 status doing"));
         assert!(b("M=./target/debug/margin; $M add margin pol todo x \"y\""), "a variable holding the binary");
-        assert!(!b("margin show plan"), "reads don't count");
+        assert!(b("margin claude link plan") && b("./target/debug/margin claude propose plan t1 tick done") && b("margin link plan"));
+        assert!(!b("margin show plan") && !b("margin claude unread") && !b("margin claude skill"), "reads don't count");
         assert!(!b("grep -n margin src/main.rs"));
         assert!(!is_pane_write("Read", &json!({"file_path": "margin"})));
     }

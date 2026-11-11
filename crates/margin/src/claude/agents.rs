@@ -172,10 +172,15 @@ pub fn groups(dir: &Path, now: f64, keep: f64) -> Vec<Group> {
     out
 }
 
+/// What the scene draws of them: each fan-out as a group of `consumer::Worker` rows.
+pub fn workers(groups: &[Group]) -> Vec<crate::consumer::Group> {
+    groups.iter().map(|g| crate::consumer::Group { agents: g.agents.iter().map(Agent::worker).collect() }).collect()
+}
+
 /// The groups a pane on `art` shows: the subagents of its linked sessions.
 pub fn for_pane(st: &crate::store::Store, art: &str) -> Vec<Group> {
     let now = crate::util::epoch_now();
-    let mut out: Vec<Group> = crate::link::all(st)
+    let mut out: Vec<Group> = super::link::all(st)
         .into_iter()
         .filter(|l| l.art == art && !l.transcript.is_empty())
         .flat_map(|l| groups(&dir_for(Path::new(&l.transcript)), now, KEEP_FINISHED))
@@ -220,6 +225,7 @@ impl Agent {
     }
 
     /// How long it has run (or ran), as `2m`.
+    #[cfg(test)]
     pub fn took(&self, now: f64) -> String {
         let s = crate::util::parse_rfc3339(&self.started);
         let e = if self.finished { crate::util::parse_rfc3339(&self.ended) } else { Some(now) };
@@ -273,7 +279,7 @@ impl Agent {
                         called = true;
                         let name = c["name"].as_str().unwrap_or("?").to_string();
                         *self.tools.entry(name.clone()).or_default() += 1;
-                        let label = crate::hook::label(&name, &c["input"]);
+                        let label = super::hook::label(&name, &c["input"]);
                         match self.steps.last_mut() {
                             // a run of one tool is one step: `Read ×4`, keeping the latest label
                             Some(last) if last.tool == name => {
@@ -315,7 +321,10 @@ impl Agent {
         d.contains("review") || d.contains("audit")
     }
 
-    /// What kind of work it is doing now. See `Track` for how flicker is kept out.
+    /// What kind of work it is doing now. See `Track` for how flicker is kept out. The pane
+    /// reads this through `worker`, which carries the same rule as data; this is the rule as
+    /// written, kept for the tests that pin it (and that `worker` agrees with it).
+    #[cfg(test)]
     pub fn phase(&self, now: f64) -> Phase {
         if self.finished {
             return Phase::Done;
@@ -342,6 +351,7 @@ impl Agent {
     }
 
     /// How long it has been waiting, in seconds, when `phase` is `Waiting`.
+    #[cfg(test)]
     pub fn waiting_for(&self, now: f64) -> Option<f64> {
         if self.phase(now) != Phase::Waiting {
             return None;
@@ -356,6 +366,7 @@ impl Agent {
     /// run past `TEST_SECS` (`long build`, `long tests`); with nothing in flight, a turn that
     /// ended (`turn ended`). `None` for anything else (a permission prompt and a slow plain
     /// command look the same from here).
+    #[cfg(test)]
     pub fn waiting_why(&self, now: f64) -> Option<&'static str> {
         if self.phase(now) != Phase::Waiting {
             return None;
@@ -366,6 +377,50 @@ impl Agent {
             Some(p) if p.test => Some(p.long),
             Some(_) => None,
             None => t.idle_turn.then_some("turn ended"),
+        }
+    }
+
+    /// The agent as the scene draws it (`consumer::Worker`): its phase now, and what the passing
+    /// of time alone will make of it, so the pane can turn a quiet agent to waiting without
+    /// reading the transcript again. Agrees with `phase`, `waiting_for` and `waiting_why`.
+    pub fn worker(&self) -> crate::consumer::Worker {
+        let t = &self.track;
+        let oldest = t.pending.iter().min_by(|a, b| a.at.total_cmp(&b.at));
+        let mut turns = Vec::new();
+        let (mut since, mut on) = (t.last, "");
+        match oldest {
+            Some(p) => {
+                since = p.at;
+                if p.test && !p.waits {
+                    turns.push((p.at + WAIT_SECS, Phase::Testing));
+                    turns.push((p.at + TEST_SECS, Phase::Waiting));
+                } else {
+                    turns.push((p.at + WAIT_SECS, Phase::Waiting));
+                }
+                on = if !p.why.is_empty() { p.why } else if p.test { p.long } else { "" };
+            }
+            None if t.last > 0.0 => {
+                turns.push((t.last + if t.idle_turn { WAIT_SECS } else { STALL_SECS }, Phase::Waiting));
+                if t.idle_turn {
+                    on = "turn ended";
+                }
+            }
+            None => {}
+        }
+        crate::consumer::Worker {
+            id: self.id.clone(),
+            name: self.who(),
+            description: self.description.clone(),
+            finished: self.finished,
+            started: crate::util::parse_rfc3339(&self.started),
+            ended: crate::util::parse_rfc3339(&self.ended),
+            phase: t.phase,
+            turns,
+            blocked_since: since,
+            blocked_on: on.into(),
+            progress: self.progress.clone(),
+            notes: self.notes.clone(),
+            summary: self.summary(),
         }
     }
 
@@ -418,61 +473,7 @@ impl Agent {
     }
 }
 
-/// How far through a plan: `done` of `total` steps, and the step in hand (the one marked doing,
-/// else the first not done; empty once all are).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Progress {
-    pub done: usize,
-    pub total: usize,
-    pub current: String,
-}
-
-impl Progress {
-    /// A bar `width` cells wide, `▰▰▰▱▱`: a started plan shows at least one filled cell, and
-    /// only a finished one fills the last.
-    pub fn bar(&self, width: usize) -> String {
-        let full = if self.total == 0 || width == 0 {
-            0
-        } else if self.done >= self.total {
-            width
-        } else {
-            let n = (self.done * width + self.total / 2) / self.total;
-            n.clamp((self.done > 0) as usize, width.saturating_sub(1))
-        };
-        "▰".repeat(full) + &"▱".repeat(width - full)
-    }
-}
-
-/// The kind of work a subagent is doing, at the level sulin asked for (2026-11-10): not which
-/// command, but whether it is still finding its way, writing, checking, or waiting.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Phase {
-    /// Reading and searching: before its first change, or finding its way to the next one.
-    #[default]
-    Planning,
-    /// Changing files.
-    Coding,
-    /// Building and running tests.
-    Testing,
-    /// Reading diffs, or reading back what it changed; all of a review agent's reading.
-    Reviewing,
-    /// Blocked: a long command, a sleep, a nested agent, a permission prompt, a background job.
-    Waiting,
-    Done,
-}
-
-impl Phase {
-    pub fn label(self) -> &'static str {
-        match self {
-            Phase::Planning => "planning",
-            Phase::Coding => "coding",
-            Phase::Testing => "testing",
-            Phase::Reviewing => "reviewing",
-            Phase::Waiting => "waiting",
-            Phase::Done => "done",
-        }
-    }
-}
+pub use crate::consumer::{Phase, Progress};
 
 /// A call in flight longer than this is something the agent is waiting on.
 pub const WAIT_SECS: f64 = 30.0;
@@ -974,6 +975,37 @@ mod tests {
         assert_eq!(parsed("x", &p).waiting_why(now(15)), None);
         let quiet = parsed("x", &numbered(|i, s| edit(i, s, "/r/src/a.rs"), 1, 3));
         assert_eq!((quiet.phase(now(3 + 700)), quiet.waiting_why(now(3 + 700))), (Phase::Waiting, None));
+    }
+
+    /// What the scene draws (`worker`) says what the rule says, at every moment: the phase, how
+    /// long it has waited and why, and the elapsed time, for a call in flight (plain, a sleep, a
+    /// test run), a parked turn, plain silence and a finished agent.
+    #[test]
+    fn the_worker_the_scene_draws_agrees_with_the_rule() {
+        let with = |tool: &str, input: serde_json::Value| {
+            let mut l = numbered(|i, s| edit(i, s, "/r/src/a.rs"), 1, 3);
+            l.push(call(4, 10, tool, input, true));
+            parsed("Add tabs", &l)
+        };
+        let sh = |cmd: &str| with("Bash", serde_json::json!({"command": cmd}));
+        let mut parked = numbered(|i, s| edit(i, s, "/r/src/a.rs"), 1, 3);
+        parked.push(serde_json::json!({"type": "assistant", "timestamp": at(10), "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Waiting for the suite."}]}}).to_string());
+        let mut done = sh("sleep 600");
+        done.finished = true;
+        let agents = [sh("sleep 600"), sh("rsync -a big/ copy/"), sh("cargo test --workspace"), sh("until cargo test; do sleep 30; done"), with("Agent", serde_json::json!({"description": "review", "prompt": "…"})), parsed("x", &parked), parsed("x", &numbered(|i, s| edit(i, s, "/r/src/a.rs"), 1, 3)), done];
+        for a in &agents {
+            let w = a.worker();
+            assert_eq!((w.name.as_str(), w.finished), (a.who().as_str(), a.finished));
+            for secs in [11, 20, 39, 41, 45, 120, 309, 312, 400, 609, 615, 700, 4000] {
+                let t = now(secs);
+                assert_eq!(w.phase(t), a.phase(t), "{} at {secs}s", a.description);
+                assert_eq!(w.waiting_for(t), a.waiting_for(t), "{} at {secs}s", a.description);
+                assert_eq!(w.waiting_why(t), a.waiting_why(t), "{} at {secs}s", a.description);
+                assert_eq!(w.took(t), a.took(t), "{} at {secs}s", a.description);
+            }
+        }
+        // a sleep says why, a slow plain command cannot
+        assert_eq!((agents[0].worker().waiting_why(now(135)), agents[1].worker().waiting_why(now(135))), (Some("sleep"), None));
     }
 
     #[test]

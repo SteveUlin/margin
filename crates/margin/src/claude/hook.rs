@@ -5,7 +5,7 @@
 //! Lines start with `margin:` so they explain themselves: research found the model ignores
 //! unexplained injected text.
 
-use crate::link;
+use super::link;
 use crate::store::{Activity, Event, Store};
 use crate::util::project_store_for;
 use serde_json::{json, Value};
@@ -210,7 +210,7 @@ pub fn brief(st: &Store, evs: &[Event]) -> String {
         lines.push(format!("- {}", describe(st, e)));
     }
     if evs.len() > MAX_LINES {
-        lines.push(format!("- … and {} more: `margin events --unread`", evs.len() - MAX_LINES));
+        lines.push(format!("- … and {} more: `margin claude unread`", evs.len() - MAX_LINES));
     }
     lines.join("\n")
 }
@@ -265,7 +265,7 @@ pub fn record(st: &Store, kind: &str, session: &str, v: &Value) {
     st.set_activity(&Activity { session: session.into(), agent, state: state.into(), tool, text, since: crate::util::now_rfc3339() });
 }
 
-/// `margin hook start|prompt|pre-tool|post-tool|stop`: record what Claude is doing for the pane,
+/// `margin claude hook start|prompt|pre-tool|post-tool|stop`: record what Claude is doing for the pane,
 /// keep the session's link to its pane (link.rs), and hand Claude what it needs: sulin's unread
 /// events (prompt, post-tool), the one-line pane status (start, prompt), and a nudge when the
 /// session has gone link::STALE tool calls without writing to its pane (post-tool).
@@ -292,19 +292,19 @@ pub fn run(kind: &str) -> Result<(), String> {
     if kind == "end" {
         // what only a live session needs goes; the board, its events, the session's link and
         // its cursor stay (a resume of this session, or the next one, picks them up)
-        crate::wake::end_session(&session);
+        super::wake::end_session(&session);
         return Ok(());
     }
     // from its first hook on, a session's unread is measured from its own cursor
     st.first_seen(&session);
     // the session's inbox, so the pane can wake it when sulin finishes (wake.rs); not a subagent's
     if v["agent_id"].as_str().unwrap_or("").is_empty() {
-        crate::wake::save_inbox(&session);
+        super::wake::save_inbox(&session);
         // Claude Code's recap, kept for the pane (recap.rs); it's written as he comes back, so the
         // prompt that follows finds it
         if matches!(kind, "prompt" | "start") {
             if let Some(t) = v["transcript_path"].as_str() {
-                crate::recap::save(&st, &session, std::path::Path::new(t));
+                super::recap::save(&st, &session, std::path::Path::new(t));
             }
         }
     }
@@ -345,7 +345,7 @@ pub fn run(kind: &str) -> Result<(), String> {
     match (kind, link.as_mut()) {
         ("start", Some(l)) => {
             lines.push(link::status_line(&st, l));
-            lines.push(format!("margin: it's linked to this session ({}); keep it current as you work (`margin show {}` for the plan, `margin link <art>` to switch)", l.how, l.art));
+            lines.push(format!("margin: it's linked to this session ({}); keep it current as you work (`margin show {}` for the plan, `margin claude link <art>` to switch)", l.how, l.art));
             // after a compaction or a resume Claude's picture of the work was rebuilt from a
             // summary: say it back where sulin can strike what's wrong (r6; I-PASS read-back)
             if matches!(v["source"].as_str(), Some("compact") | Some("resume")) {
@@ -362,7 +362,7 @@ pub fn run(kind: &str) -> Result<(), String> {
             let docs = st.list();
             if !docs.is_empty() {
                 let names: Vec<String> = docs.iter().take(4).map(|d| format!("{} (“{}”, rev {}, updated {})", d.id, vellum::text::truncate(&d.title, 40), d.rev, d.updated)).collect();
-                lines.push(format!("margin: this project already has {} board{}: {}{}. If one is this work's pane, keep using it: `margin link <art>` (then `margin show <art>`); don't start a second one for the same work.", docs.len(), if docs.len() == 1 { "" } else { "s" }, names.join("; "), if docs.len() > 4 { "; …" } else { "" }));
+                lines.push(format!("margin: this project already has {} board{}: {}{}. If one is this work's pane, keep using it: `margin claude link <art>` (then `margin show <art>`); don't start a second one for the same work.", docs.len(), if docs.len() == 1 { "" } else { "s" }, names.join("; "), if docs.len() > 4 { "; …" } else { "" }));
             }
         }
         // a subagent shares its parent's session id but owns no pane: its calls neither count

@@ -1,12 +1,12 @@
 {
-  "_comment": "Example only, not installed. Merge into a project's .claude/settings.json (or ~/.claude/settings.json) to hand your margin actions to Claude. UserPromptSubmit delivers them at the start of the next turn; PostToolUse delivers them mid-turn after a tool call (research.md \u00a77: additionalContext reaches the model on its next call). Both mark events delivered per session, so nothing arrives twice. Both print nothing when nothing happened. The second Stop hook, `margin hook rewake`, waits in the background (asyncRewake) for you to finish in the pane while Claude is idle, then exits 2 with those same lines on stderr, which wakes Claude.",
+  "_comment": "Example only, not installed. Merge into a project's .claude/settings.json (or ~/.claude/settings.json) to hand your margin actions to Claude. UserPromptSubmit delivers them at the start of the next turn; PostToolUse delivers them mid-turn after a tool call (research.md \u00a77: additionalContext reaches the model on its next call). Both mark events delivered per session, so nothing arrives twice. Both print nothing when nothing happened. The second Stop hook, `margin claude hook rewake`, waits in the background (asyncRewake) for you to finish in the pane while Claude is idle, then exits 2 with those same lines on stderr, which wakes Claude.",
   "hooks": {
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook prompt",
+            "command": "margin claude hook prompt",
             "timeout": 5
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook post-tool",
+            "command": "margin claude hook post-tool",
             "timeout": 5
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook pre-tool",
+            "command": "margin claude hook pre-tool",
             "timeout": 5
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook stop",
+            "command": "margin claude hook stop",
             "timeout": 5
           }
         ]
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook rewake",
+            "command": "margin claude hook rewake",
             "asyncRewake": true,
             "timeout": 3600
           }
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook start",
+            "command": "margin claude hook start",
             "timeout": 5
           }
         ]
@@ -74,7 +74,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook permission",
+            "command": "margin claude hook permission",
             "timeout": 5
           }
         ]
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook notify",
+            "command": "margin claude hook notify",
             "timeout": 5
           }
         ]
@@ -96,7 +96,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "margin hook end",
+            "command": "margin claude hook end",
             "timeout": 5
           }
         ]

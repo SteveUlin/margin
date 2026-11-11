@@ -5,7 +5,7 @@
 //! message on the socket arrives framed as another session, never as him (tested 2026-11-08).
 //!
 //! That message is the fallback. Claude Code holds a peer's message for approval in some
-//! permission modes, so it may not wake at all; the `Stop` hook `margin hook rewake` (rewake.rs,
+//! permission modes, so it may not wake at all; the `Stop` hook `margin claude hook rewake` (rewake.rs,
 //! `asyncRewake`) waits in the background instead and hands Claude the decisions themselves. The
 //! pane sends the inbox message only when no such watcher is alive (`pane_wake`).
 //!
@@ -338,7 +338,7 @@ pub fn message(pending: &[Event]) -> String {
         parts.push(format!("{other} other"));
     }
     crate::who::say(&format!(
-        "margin: sulin finished in the pane ({}). Their actions reach you as `margin:` lines through the hooks (run `margin events --unread` if none has arrived); act on those, not on this message.",
+        "margin: sulin finished in the pane ({}). Their actions reach you as `margin:` lines through the hooks (run `margin claude unread` if none has arrived); act on those, not on this message.",
         parts.join(", ")
     ))
 }
@@ -428,7 +428,7 @@ pub mod tests {
         };
         let mut all = vec![ev(100.0, "pick")];
         all[0].seq = 5;
-        let (net, _) = crate::hook::pending(&all, 0, 200.0, 0.0);
+        let (net, _) = crate::claude::hook::pending(&all, 0, 200.0, 0.0);
         assert_eq!(pane_wake("S", top(&net), "auto", 200.0, send), Pane::Sent(Ok(())));
         // another pane on the project, or this one after a rebuild: nothing in memory, same batch
         assert_eq!(pane_wake("S", top(&net), "auto", 201.0, send), Pane::Covered);
@@ -436,7 +436,7 @@ pub mod tests {
         let (mut a, mut b) = (ev(210.0, "tick"), ev(211.0, "untick"));
         (a.seq, a.id, b.seq, b.id) = (6, "t1".into(), 7, "t1".into());
         all.extend([a, b]);
-        let (net, cursor) = crate::hook::pending(&all, 0, 300.0, 0.0);
+        let (net, cursor) = crate::claude::hook::pending(&all, 0, 300.0, 0.0);
         assert_eq!((top(&net), cursor), (5, Some(7)));
         assert_eq!(pane_wake("S", top(&net), "auto", 300.0, send), Pane::Covered);
         assert_eq!(sent.get(), 1);
@@ -444,7 +444,7 @@ pub mod tests {
         let mut c = ev(310.0, "strike");
         (c.seq, c.id) = (8, "c1".into());
         all.push(c);
-        let (net, _) = crate::hook::pending(&all, 0, 400.0, 0.0);
+        let (net, _) = crate::claude::hook::pending(&all, 0, 400.0, 0.0);
         assert_eq!(pane_wake("S", top(&net), "auto", 400.0, send), Pane::Sent(Ok(())));
         assert_eq!((sent.get(), woke("S")), (2, 8));
         std::fs::remove_dir_all(&d).ok();

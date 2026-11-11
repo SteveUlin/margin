@@ -1,14 +1,14 @@
-//! The skill and its on-demand topics, embedded in the binary.
+//! The reference topics, embedded in the binary, and the template renderer.
 //!
-//! `skill/SKILL.md` is the always-loaded part (what the pane is for, its shape, the turn loop, the
-//! rules); `skill/topics/*.md` is reference Claude reads when it first needs a feature
-//! (`margin help <topic>`). Both are templates: no one's name or paths are in them, and `render`
+//! `skill/topics/*.md` is reference read when a feature is first needed (`margin help <topic>`):
+//! most of it is about the core (dashboards, handlers, datasets, the contract for outside tools),
+//! and the topics in `WITH_CLAUDE` are about Claude Code sessions. `skill/SKILL.md`, the
+//! always-loaded part a Claude session reads, belongs to the adapter (`claude::SKILL`); its
+//! consistency with the topics is checked in this file's tests. Both are templates: no one's name or paths are in them, and `render`
 //! fills `{{user}}` (the config's `user_name`), `{{bin}}` (this binary) and `{{providers}}` (the
 //! shipped provider scripts) on the way out, so one source serves any machine and any user.
 
 use std::path::{Path, PathBuf};
-
-pub const SKILL: &str = include_str!("../../../skill/SKILL.md");
 
 /// Topic name and its text. A topic's first line is `# name: what it covers`.
 pub const TOPICS: &[(&str, &str)] = &[
@@ -23,6 +23,9 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("proposals", include_str!("../../../skill/topics/proposals.md")),
     ("subagents", include_str!("../../../skill/topics/subagents.md")),
 ];
+
+/// The topics about Claude Code sessions: listed under their own heading, after the core's.
+pub const WITH_CLAUDE: &[&str] = &["proposals", "subagents"];
 
 /// What the templates' placeholders stand for on this machine.
 pub struct Ctx {
@@ -91,18 +94,22 @@ pub fn topic(name: &str) -> Option<&'static str> {
 
 /// One line per topic, from each topic's heading.
 pub fn topic_list(c: &Ctx) -> String {
-    let mut out = String::from("topics (margin help <topic>): reference the skill leaves out until it's needed\n");
-    for (name, text) in TOPICS {
+    let mut out = String::from("topics (margin help <topic>): reference, read when a feature is first needed\n");
+    let line = |(name, text): &(&str, &str)| {
         let head = text.lines().next().unwrap_or("");
         let what = head.split_once(": ").map(|(_, w)| w).unwrap_or(head);
-        out += &format!("  {name:<10} {}\n", render(what, c));
-    }
+        format!("  {name:<10} {}\n", render(what, c))
+    };
+    out.extend(TOPICS.iter().filter(|(n, _)| !WITH_CLAUDE.contains(n)).map(line));
+    out += "with Claude Code:\n";
+    out.extend(TOPICS.iter().filter(|(n, _)| WITH_CLAUDE.contains(n)).map(line));
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::SKILL;
 
     fn ctx(user: &str) -> Ctx {
         Ctx::new(user, Path::new("/opt/margin/bin/margin"))
@@ -170,7 +177,12 @@ mod tests {
             assert!(SKILL.contains(&format!("- `{name}`:")), "the skill doesn't name topic {name}");
             assert!(text.starts_with(&format!("# {name}: ")), "{name}'s heading");
         }
-        assert_eq!(topic_list(&ctx("")).lines().count(), TOPICS.len() + 1);
+        assert_eq!(topic_list(&ctx("")).lines().count(), TOPICS.len() + 2);
+        // the topics about sessions come last, under their own heading; the core's name no session
+        let list = topic_list(&ctx(""));
+        let (core, with) = list.split_once("with Claude Code:\n").expect("the heading");
+        assert!(with.contains("  proposals ") && with.contains("  subagents ") && with.lines().count() == WITH_CLAUDE.len(), "{with}");
+        assert!(core.contains("  handlers ") && !core.contains("Claude"), "{core}");
         assert!(topic("handlers").is_some() && topic("nope").is_none());
     }
 

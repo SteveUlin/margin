@@ -1,4 +1,4 @@
-//! `margin init`: make a machine ready in one command.
+//! `margin claude init`: make a machine ready for Claude Code in one command.
 //!
 //! Three things have to be true before Claude Code and a pane talk to each other, and each used to
 //! be a hand edit: margin knows the person's name (`user_name` in the config), Claude has the
@@ -9,11 +9,11 @@
 
 use crate::help;
 #[cfg(test)]
-use crate::rewake;
+use super::rewake;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
-/// One hook `init` installs: the Claude Code event, the `margin hook <kind>` it runs, whether its
+/// One hook `init` installs: the Claude Code event, the `margin claude hook <kind>` it runs, whether its
 /// group carries `"matcher": "*"` (the tool events do), its timeout in seconds, and whether it is
 /// an `asyncRewake` hook (run in the background; exit code 2 wakes Claude with its stderr). The
 /// shape Claude Code reads:
@@ -100,23 +100,48 @@ pub struct Plan {
 fn hook_command(bin: &str, kind: &str) -> String {
     let plain = bin.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@:,".contains(c));
     let bin = if plain { bin.to_string() } else { format!("'{}'", bin.replace('\'', "'\\''")) };
-    format!("{bin} hook {kind}")
+    format!("{bin} claude hook {kind}")
 }
 
-/// Is this command some margin binary's `hook <kind>`? Whatever path it has: that is how a
-/// re-run finds the entry an earlier install (or a hand edit) left, and updates it in place.
-fn is_margin_hook(command: &str, kind: &str) -> bool {
-    let Some(prog) = command.trim().strip_suffix(kind).map(str::trim_end).and_then(|c| c.strip_suffix("hook")) else { return false };
-    if !prog.ends_with(' ') {
-        return false;
+/// The program of a command that is some margin binary's hook for `kind`, and whether it is
+/// written the way hooks were before the `claude` group (`margin hook <kind>`, which the binary
+/// still runs) rather than today's `margin claude hook <kind>`. None: not a margin hook.
+fn margin_hook<'a>(command: &'a str, kind: &str) -> Option<(&'a str, bool)> {
+    let rest = command.trim().strip_suffix(kind).map(str::trim_end)?.strip_suffix("hook")?;
+    if !rest.ends_with(' ') {
+        return None;
     }
-    let prog = prog.trim().trim_matches(['\'', '"']);
-    matches!(Path::new(prog).file_name().and_then(|n| n.to_str()), Some("margin") | Some(".margin-wrapped"))
+    let rest = rest.trim_end();
+    let (prog, old) = match rest.strip_suffix("claude").filter(|p| p.ends_with(' ')) {
+        Some(p) => (p.trim(), false),
+        None => (rest.trim(), true),
+    };
+    let prog = prog.trim_matches(['\'', '"']);
+    matches!(Path::new(prog).file_name().and_then(|n| n.to_str()), Some("margin") | Some(".margin-wrapped")).then_some((prog, old))
 }
 
-/// Merge margin's hooks into a settings document. Touches only entries that run `margin hook …`:
-/// updates the first one per event to `bin`, drops any further copies, appends a group when there
-/// is none. Returns (added, updated) event names; both empty means nothing changed.
+/// Is this command some margin binary's hook for `kind`, in either spelling? Whatever path it
+/// has: that is how a re-run finds the entry an earlier install (or a hand edit) left, and
+/// updates it in place instead of adding a second one.
+fn is_margin_hook(command: &str, kind: &str) -> bool {
+    margin_hook(command, kind).is_some()
+}
+
+/// How many hook entries in a settings document are written the old way (`margin hook <kind>`).
+fn old_spellings(settings: &Value) -> usize {
+    HOOKS
+        .iter()
+        .map(|Hook { event, kind, .. }| {
+            let hooks = settings["hooks"][event].as_array().into_iter().flatten().flat_map(|g| g["hooks"].as_array().into_iter().flatten());
+            hooks.filter(|h| h["command"].as_str().and_then(|c| margin_hook(c, kind)).map(|(_, old)| old).unwrap_or(false)).count()
+        })
+        .sum()
+}
+
+/// Merge margin's hooks into a settings document. Touches only entries that run a margin hook
+/// (`margin claude hook …`, or `margin hook …` as an earlier version wrote it): updates the first
+/// one per event to `bin` and today's spelling, drops any further copies, appends a group when
+/// there is none. Returns (added, updated) event names; both empty means nothing changed.
 pub fn merge_hooks(settings: &mut Value, bin: &str) -> Result<(Vec<String>, Vec<String>), String> {
     let root = settings.as_object_mut().ok_or("settings.json isn't a JSON object")?;
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
@@ -211,7 +236,7 @@ pub fn plan(o: &Opts) -> Result<Plan, String> {
 
     // 2. the skill
     let skill_path = o.claude_dir.join("skills/margin/SKILL.md");
-    let skill = help::render(help::SKILL, &help::Ctx::new(&p.user, &o.bin));
+    let skill = help::render(super::SKILL, &help::Ctx::new(&p.user, &o.bin));
     let is_link = std::fs::symlink_metadata(&skill_path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
     let n = skill.lines().count();
     match read(&skill_path) {
@@ -234,6 +259,7 @@ pub fn plan(o: &Opts) -> Result<Plan, String> {
         Some(t) if !t.trim().is_empty() => serde_json::from_str(t).map_err(|e| format!("{}: not JSON ({e}); nothing was changed", settings_path.display()))?,
         _ => json!({}),
     };
+    let respelled = old_spellings(&settings);
     let (added, updated) = merge_hooks(&mut settings, &o.bin.display().to_string()).map_err(|e| format!("{}: {e}; nothing was changed", settings_path.display()))?;
     if added.is_empty() && updated.is_empty() {
         p.lines.push(format!("hooks    {}: up to date ({} hooks run {})", settings_path.display(), HOOKS.len(), o.bin.display()));
@@ -249,6 +275,9 @@ pub fn plan(o: &Opts) -> Result<Plan, String> {
             what.push(format!("updated {} to this binary ({})", updated.len(), updated.join(", ")));
         }
         p.lines.push(format!("hooks    {}: {}", settings_path.display(), what.join("; ")));
+        if respelled > 0 {
+            p.lines.push(format!("         {respelled} {} written as `margin hook …`: now `margin claude hook …`", if respelled == 1 { "entry was" } else { "entries were" }));
+        }
         if let Some(b) = &backup {
             p.lines.push(format!("         backup of the file as it was: {}", b.display()));
         }
@@ -259,7 +288,7 @@ pub fn plan(o: &Opts) -> Result<Plan, String> {
     // warnings
     let bin = o.bin.display().to_string();
     if bin.contains("/target/debug/") {
-        p.warnings.push("this is a debug build: the hooks run on every prompt and tool call. Build with `cargo build --release` and run `target/release/margin init` to point them at the fast one.".into());
+        p.warnings.push("this is a debug build: the hooks run on every prompt and tool call. Build with `cargo build --release` and run `target/release/margin claude init` to point them at the fast one.".into());
     }
     if bin.starts_with("/nix/store/") {
         p.warnings.push("this binary is in the nix store: its path changes with every rebuild. Run init through a stable path (e.g. ~/.nix-profile/bin/margin, or --bin PATH).".into());
@@ -324,7 +353,7 @@ fn next_steps(o: &Opts) -> Vec<String> {
 /// Plan, report, and (unless it's a dry run) write. Returns what to print.
 pub fn run(o: &Opts) -> Result<String, String> {
     let p = plan(o)?;
-    let mut out = vec![if o.dry_run { "margin init (dry run: nothing is written; a real run would do this)".to_string() } else { "margin init".to_string() }];
+    let mut out = vec![if o.dry_run { "margin claude init (dry run: nothing is written; a real run would do this)".to_string() } else { "margin claude init".to_string() }];
     out.extend(p.lines.iter().map(|l| format!("  {l}")));
     if !o.dry_run {
         for w in &p.writes {
@@ -378,17 +407,17 @@ mod tests {
         // the shape Claude Code reads, the same as the hand-written one it replaces
         let v = settings(&o);
         assert_eq!(v["hooks"].as_object().unwrap().len(), 8, "eight events; Stop has two hooks");
-        assert_eq!(v["hooks"]["PostToolUse"], json!([{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/margin/bin/margin hook post-tool", "timeout": 5}]}]));
-        assert_eq!(v["hooks"]["SessionStart"], json!([{"hooks": [{"type": "command", "command": "/opt/margin/bin/margin hook start", "timeout": 5}]}]));
+        assert_eq!(v["hooks"]["PostToolUse"], json!([{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/margin/bin/margin claude hook post-tool", "timeout": 5}]}]));
+        assert_eq!(v["hooks"]["SessionStart"], json!([{"hooks": [{"type": "command", "command": "/opt/margin/bin/margin claude hook start", "timeout": 5}]}]));
         for h in HOOKS {
             let g = group(&v, h);
-            assert_eq!(g["hooks"][0]["command"], json!(format!("/opt/margin/bin/margin hook {}", h.kind)));
+            assert_eq!(g["hooks"][0]["command"], json!(format!("/opt/margin/bin/margin claude hook {}", h.kind)));
             assert_eq!(g.get("matcher").is_some(), h.matcher, "{}", h.event);
         }
         // the hook that waits sits beside `stop`, in the background, with an hour to wait
         assert_eq!(v["hooks"]["Stop"], json!([
-            {"hooks": [{"type": "command", "command": "/opt/margin/bin/margin hook stop", "timeout": 5}]},
-            {"hooks": [{"type": "command", "command": "/opt/margin/bin/margin hook rewake", "asyncRewake": true, "timeout": 3600}]}]));
+            {"hooks": [{"type": "command", "command": "/opt/margin/bin/margin claude hook stop", "timeout": 5}]},
+            {"hooks": [{"type": "command", "command": "/opt/margin/bin/margin claude hook rewake", "asyncRewake": true, "timeout": 3600}]}]));
         assert!(rewake::DEADLINE < 3600.0, "the watcher leaves before Claude Code would kill it");
         assert!(!o.claude_dir.join("settings.json.bak").exists(), "nothing to back up on a fresh machine");
         done(&o);
@@ -432,13 +461,13 @@ mod tests {
     #[test]
     fn a_rewake_entry_gets_its_background_flag_and_timeout() {
         let mut v = json!({"hooks": {"Stop": [{"hooks": [
-            {"type": "command", "command": "/x/margin hook stop", "timeout": 7},
-            {"type": "command", "command": "/x/margin hook rewake", "timeout": 5}]}]}});
+            {"type": "command", "command": "/x/margin claude hook stop", "timeout": 7},
+            {"type": "command", "command": "/x/margin claude hook rewake", "timeout": 5}]}]}});
         let (added, updated) = merge_hooks(&mut v, "/x/margin").unwrap();
         assert_eq!((added.len(), updated), (7, vec!["Stop rewake".to_string()]));
         assert_eq!(v["hooks"]["Stop"], json!([{"hooks": [
-            {"type": "command", "command": "/x/margin hook stop", "timeout": 7},
-            {"type": "command", "command": "/x/margin hook rewake", "timeout": 3600, "asyncRewake": true}]}]));
+            {"type": "command", "command": "/x/margin claude hook stop", "timeout": 7},
+            {"type": "command", "command": "/x/margin claude hook rewake", "timeout": 3600, "asyncRewake": true}]}]));
         assert_eq!(merge_hooks(&mut v, "/x/margin").unwrap(), (vec![], vec![]), "a second run changes nothing");
         assert!(is_margin_hook("/x/margin hook rewake", "rewake") && !is_margin_hook("/x/margin hook rewake", "stop") && !is_margin_hook("/x/margin hook stop", "rewake"));
     }
@@ -466,6 +495,7 @@ mod tests {
         std::fs::write(o.claude_dir.join("settings.json"), &text).unwrap();
         let out = run(&o).unwrap();
         assert!(out.contains("added 7") && out.contains("Stop rewake") && out.contains("updated 2 to this binary (Stop, SessionStart)"), "{out}");
+        assert!(out.contains("3 entries were written as `margin hook …`: now `margin claude hook …`"), "{out}");
         let v = settings(&o);
         for k in ["model", "permissions", "statusLine"] {
             assert_eq!(v[k], before[k], "{k}");
@@ -473,12 +503,12 @@ mod tests {
         assert_eq!(v["hooks"]["PreCompact"], before["hooks"]["PreCompact"], "another tool's hook, even one named like ours");
         // the person's own hooks keep their place; ours join them
         assert_eq!(v["hooks"]["UserPromptSubmit"][0], before["hooks"]["UserPromptSubmit"][0]);
-        assert_eq!(v["hooks"]["UserPromptSubmit"][1]["hooks"][0]["command"], json!("/opt/margin/bin/margin hook prompt"));
+        assert_eq!(v["hooks"]["UserPromptSubmit"][1]["hooks"][0]["command"], json!("/opt/margin/bin/margin claude hook prompt"));
         assert_eq!(v["hooks"]["SessionStart"][0]["hooks"], json!([
             {"type": "command", "command": "/opt/mine/role.sh", "timeout": 10},
-            {"type": "command", "command": "/opt/margin/bin/margin hook start", "timeout": 9}]));
+            {"type": "command", "command": "/opt/margin/bin/margin claude hook start", "timeout": 9}]));
         // two old copies of one hook become one
-        assert_eq!(v["hooks"]["Stop"][0], json!({"hooks": [{"type": "command", "command": "/opt/margin/bin/margin hook stop", "timeout": 5}]}));
+        assert_eq!(v["hooks"]["Stop"][0], json!({"hooks": [{"type": "command", "command": "/opt/margin/bin/margin claude hook stop", "timeout": 5}]}));
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2, "and the hook that waits joins it");
         // key order is kept, so the file's diff is only what changed
         assert_eq!(v.as_object().unwrap().keys().collect::<Vec<_>>(), ["model", "permissions", "hooks", "statusLine"]);
@@ -555,6 +585,56 @@ mod tests {
         assert!(!is_margin_hook("/a/b/margin hook pre-tool", "tool"));
         assert!(!is_margin_hook("/a/b/not-margin hook start", "start"));
         assert!(!is_margin_hook("/a/b/margin-hook start", "start"));
-        assert_eq!(hook_command("/a b/margin", "stop"), "'/a b/margin' hook stop");
+        assert_eq!(hook_command("/a b/margin", "stop"), "'/a b/margin' claude hook stop");
+        // both spellings are ours; a program merely named claude, or one whose name ends in it, is not
+        assert_eq!(margin_hook("/a/b/margin claude hook start", "start"), Some(("/a/b/margin", false)));
+        assert_eq!(margin_hook("/a/b/margin hook start", "start"), Some(("/a/b/margin", true)));
+        assert_eq!(margin_hook("'/a b/margin' claude hook stop", "stop"), Some(("/a b/margin", false)));
+        assert!(!is_margin_hook("/a/b/claude hook start", "start") && !is_margin_hook("/a/b/margin-claude hook start", "start"));
+        assert!(!is_margin_hook("/a/b/margin claude hook start", "stop") && !is_margin_hook("/a/b/margin claudehook start", "start"));
+    }
+
+    /// The settings an earlier version's `init` wrote hold `margin hook <kind>`. A run of today's
+    /// init turns each into `margin claude hook <kind>` in place: the same nine entries, none
+    /// added beside them, the person's timeout kept; and a second run changes nothing.
+    #[test]
+    fn hooks_in_the_old_spelling_are_rewritten_in_place_once() {
+        let o = opts("respell");
+        std::fs::create_dir_all(&o.claude_dir).unwrap();
+        // what yesterday's init wrote, with one timeout changed by hand
+        let mut before = json!({"model": "opus", "hooks": {}});
+        for h in HOOKS {
+            let mut e = json!({"type": "command", "command": format!("/opt/margin/bin/margin hook {}", h.kind), "timeout": h.timeout});
+            if h.rewake {
+                e["asyncRewake"] = json!(true);
+            }
+            let mut g = Map::new();
+            if h.matcher {
+                g.insert("matcher".into(), json!("*"));
+            }
+            g.insert("hooks".into(), json!([e]));
+            before["hooks"][h.event].as_array_mut().map(|a| a.push(Value::Object(g.clone()))).unwrap_or_else(|| before["hooks"][h.event] = json!([g]));
+        }
+        before["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] = json!(11);
+        assert_eq!(old_spellings(&before), 9);
+        std::fs::write(o.claude_dir.join("settings.json"), serde_json::to_string_pretty(&before).unwrap()).unwrap();
+        let out = run(&o).unwrap();
+        assert!(out.contains("updated 9 to this binary") && !out.contains("added") && out.contains("9 entries were written as `margin hook …`: now `margin claude hook …`"), "{out}");
+        let v = settings(&o);
+        assert_eq!(old_spellings(&v), 0);
+        for h in HOOKS {
+            let groups = v["hooks"][h.event].as_array().unwrap();
+            assert_eq!(groups.len(), HOOKS.iter().filter(|x| x.event == h.event).count(), "{}: nothing added beside it", h.event);
+            assert_eq!(group(&v, h)["hooks"][0]["command"], json!(format!("/opt/margin/bin/margin claude hook {}", h.kind)));
+            assert_eq!(group(&v, h).get("matcher"), group(&before, h).get("matcher"), "{}", h.event);
+        }
+        assert_eq!(v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"], json!(11), "a timeout set by hand stays");
+        assert_eq!(v["model"], json!("opus"));
+        // idempotent from here
+        let text = std::fs::read_to_string(o.claude_dir.join("settings.json")).unwrap();
+        let out = run(&o).unwrap();
+        assert!(out.contains("hooks    ") && out.contains("up to date (9 hooks run") && !out.contains("written as"), "{out}");
+        assert_eq!(std::fs::read_to_string(o.claude_dir.join("settings.json")).unwrap(), text);
+        done(&o);
     }
 }

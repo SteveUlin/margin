@@ -1,12 +1,16 @@
-//! margin: live artifacts beside the chat. One binary, four roles: the CLI Claude calls through
-//! its Bash tool, the renderer in a pane (`margin view`), the selection dispatcher Zellij pipes
-//! copies into (`margin select`), and the event dispatcher (`margin daemon`).
+//! margin: live boards in a terminal pane. One binary, four roles: the CLI a person, a script or
+//! an assistant calls, the renderer in a pane (`margin view`), the selection dispatcher Zellij
+//! pipes copies into (`margin select`), and the event dispatcher (`margin daemon`).
+//!
+//! The core is generic: boards, an event log with cursors, handlers, owners, datasets, the pane.
+//! `claude` is one consumer of it, the Claude Code adapter: this file dispatches `margin claude …`
+//! to it and plugs it into the core's seam (`consumer.rs`) at start-up. No core module names it.
 
-mod agents;
 mod app;
-mod attention;
+mod claude;
 mod components;
 mod config;
+mod consumer;
 mod daemon;
 mod data;
 mod demo;
@@ -18,14 +22,9 @@ mod example;
 mod graph;
 mod handler;
 mod help;
-mod hook;
 mod host;
-mod init;
-mod link;
 mod mdoc;
 mod owner;
-mod recap;
-mod rewake;
 mod scene;
 mod select;
 mod store;
@@ -33,19 +32,23 @@ mod tabs;
 mod theme;
 mod toast;
 mod util;
-mod wake;
 mod who;
 mod zj;
 
+// The adapter's modules under their old top-level names, for the two core files that still reach
+// into it by those paths (store.rs: `link::all` in `stop`, `hook::describe` in its tests;
+// doctor.rs: `wake`'s leftover marks). They go when those calls move behind `consumer`.
+#[allow(unused_imports)]
+use claude::{hook, link, wake};
 use config::Config;
 use doc::{Block, Doc, Op};
 use serde_json::{json, Value};
 use std::io::Read;
 use store::Store;
 
-const HELP: &str = "margin: live boards beside the chat
+const HELP: &str = "margin: live boards in a terminal pane
 
-content (Claude): creating and changing are different commands, for a board and inside one
+boards: creating and changing are different commands, for a board and inside one
   create   margin new (a board)    margin add, margin ask (a component; an id that exists is refused)
   change   margin set, move, rm, title, purpose, hints (what they name must exist)
   state from a script   margin apply (components upsert by id; the board must exist)
@@ -61,17 +64,14 @@ content (Claude): creating and changing are different commands, for a board and 
   margin hints <board> [text...]                         reminders at the pane's bottom (none: clear)
   margin purpose <board> [\"text\"]                        the pane's one line of orientation (none: clear)
   margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W]
-  margin propose <board> <id> <verb> [value] [--why W]   offer a change to one of the person's decisions
   margin doc <board> <id> [--title T] < notes.md         long-form markdown as a section
   margin toast <board> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
   margin show <board> [<id>] [--json]    margin ls [--json]    margin gc    margin doctor [--fix]
 
-return channel:
+events (what the person does in the pane, and anything a program appends):
   margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--follow] [--json]   the event log
   margin emit <name> [JSON|-] [--board B] [--id ID]                 append a named event (prints its seq)
   margin act <board> <id> <action> [VALUE]                          what an action's key does, from the CLI
-  margin hook start|prompt|pre-tool|post-tool|stop|permission|notify              Claude Code hook (stdin JSON)
-  margin hook rewake [--timeout 58m]                              the Stop hook that waits: exit 2 wakes an idle Claude
 
 handlers and outside writers (margin runs a command only for an event; scheduling stays outside):
   margin handler add <name> --on <glob>... [--board B --owns PREFIX] [--timeout 60s] [--retries 3] -- <cmd...>
@@ -86,11 +86,10 @@ datasets (values a board displays, outside the document; the pane reads them whe
   margin data set <name> ... | append <name> <VALUE|JSON|-> | put <name> < records | show <name> [--last N] | ls [--json] | rm <name>
 
 panes and screen (host: zellij or plain; config key host):
-  margin open <board> [--float|--split|--stacked] [--tab-id N] [--session S]   anchored to Claude's tab, no focus change
-                                --stacked: onto the tab's margin pane (focus returns where it was)
+  margin open <board> [--float|--split|--stacked] [--tab-id N] [--session S]   beside the tab it is run from
+                                --stacked: onto the tab's margin pane
                                 plain host: prints the `margin view` command to run in a terminal
   margin close <board>          margin panes <board>   (where it's showing)
-  margin link [<board>]         the pane this Claude session keeps (margin unlink to drop it)
   margin view <board>...        the live renderer (what the pane runs); more boards are tabs (gt / gT)
   margin tab <board> [add|rm|show <tab-board>] [--pane P]   the tabs of the pane showing <board>
   margin render <board> [--width W] [--height H] [--section ID] [--focus ID] [--ansi]   one frame, no pane
@@ -98,9 +97,7 @@ panes and screen (host: zellij or plain; config key host):
   margin session [NAME]         start a Zellij session wired for margin (copy_command)
   margin demo                   write a sample plan board named plan
 
-setup and reference:
-  margin init [--user-name NAME] [--claude-dir DIR] [--dry-run]   name, skill and hooks: one command per machine
-  margin skill                  the skill Claude loads, rendered for this machine
+reference:
   margin example [<name> [--script|--data]]   complete dashboards to copy from: board, fetch script, sample data
   margin help [<command>|<topic>]
 
@@ -109,9 +106,39 @@ parked (not part of the documented set; may be removed):
   margin image <board> <id> <png> [--alt A] [--rows N]                  a PNG in the pane
   margin demo live [--speed X]                                          plays a turn into the demo board
 
-global, before or after the command: --home DIR  --project NAME  --by you|claude|NAME
+global, before or after the command: --home DIR  --project NAME  --by you|NAME
 margin <command> --help for each
+
+Claude Code (one consumer of the above; margin claude --help):
+  margin claude init [--user-name NAME] [--claude-dir DIR] [--dry-run]   install the skill and the hooks: once per machine
+  margin claude skill | link [<board>] | unlink | unread | stop [<board>] | propose <board> <id> <verb> | hook <event>
 ";
+
+/// `margin claude --help`: the group's own listing.
+const CLAUDE_HELP: &str = "margin claude: the Claude Code adapter
+  Hooks hand a Claude session what sulin decides in the pane and tell the pane what the session is
+  doing; the skill teaches a session to keep a board. Nothing in the core needs it: boards, events,
+  handlers, owners, datasets and the pane work without a session (margin --help).
+  margin claude init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]
+                                 install the skill and the hooks: one command per machine
+  margin claude skill            the skill a session loads, rendered for this machine
+  margin claude link [<board>]   the board this session keeps: show it, or set it
+  margin claude unlink           drop this session's link
+  margin claude unread [--session S] [--json]   sulin's decisions this session has not been handed yet
+  margin claude stop [<board>]   refuse the linked session's tool calls until sulin's next message
+  margin claude propose <board> <id> <verb> [value] [--why W]   offer a change to one of sulin's decisions
+  margin claude hook start|prompt|pre-tool|post-tool|stop|permission|notify|end   a Claude Code hook (stdin JSON)
+  margin claude hook rewake [--timeout 58m]     the Stop hook that waits: exit 2 wakes an idle session
+  margin claude <subcommand> --help for each. A write made from inside Claude Code ($CLAUDECODE or
+  $CLAUDE_CODE_ENTRYPOINT set) is logged as by claude unless --by says otherwise.
+";
+
+/// The subcommands of `margin claude`. Each is a `Cmd` of the same name; the spellings from
+/// before the group (`margin hook …`, `margin init`) reach the same `Cmd` at the top level,
+/// unlisted, for one release (settings.json files written by an earlier `init` hold them).
+const CLAUDE_CMDS: &[&str] = &["init", "skill", "link", "unlink", "unread", "stop", "propose", "hook"];
+/// Group subcommands that were never top-level commands: refused there.
+const CLAUDE_ONLY: &[&str] = &["unread"];
 
 /// One subcommand: its help, the flags it takes and how many positionals. Every flag outside
 /// `flags` (and the global ones) is refused before the command runs, so a typo or a `--help`
@@ -133,8 +160,8 @@ const GLOBAL_HELP: &str = "
 global flags (before or after the command):
   --home DIR       the store root (default $MARGIN_HOME, else ~/.local/state/margin)
   --project NAME   the project inside it (default $MARGIN_PROJECT, else from the working directory)
-  --by WHO         who a write is logged as: you, claude, or a name (default: claude when run
-                   from Claude Code, i.e. $CLAUDECODE or $CLAUDE_CODE_ENTRYPOINT is set; else you)
+  --by WHO         who a write is logged as: you, or a name (default: you; a consumer's adapter
+                   sets its own name for writes made from inside its session)
 ";
 
 const CMDS: &[Cmd] = &[
@@ -149,22 +176,23 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "hints", help: "margin hints <board> [text...] [--json]\n  change: the reminders of a board that exists, a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
     Cmd { name: "purpose", help: "margin purpose <board> [\"text\"] [--json]\n  change: what the pane of a board that exists is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ask", help: "margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  create: a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  An id that exists is refused (change it with margin set); the board must exist (margin new)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
-    Cmd { name: "propose", help: "margin propose <board> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
+    Cmd { name: "propose", help: "margin claude propose <board> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
     Cmd { name: "diff", help: "margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n  not part of the documented set; may be removed\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "image", help: "margin image <board> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n  a PNG in the pane (kitty graphics, else half-blocks); the document stores the file's path\n  not part of the documented set; may be removed\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "show", help: "margin show <board> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"v\":1, \"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <board> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such board,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ls", help: "margin ls [--json]\n  this project's boards (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
-    Cmd { name: "gc", help: "margin gc [--days N]\n  archive boards untouched for N days (default: config archive_days), and remove the cursors of\n  Claude sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
+    Cmd { name: "gc", help: "margin gc [--days N]\n  archive boards untouched for N days (default: config archive_days), and remove the cursors of\n  sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
     Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--board", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
     Cmd { name: "emit", help: "margin emit <name> [JSON | -] [--board B] [--id ID]\n  append a named event to the project's log and print its seq. Anything can call it: cron, CI,\n  a script, a job. <name> is letters, digits and . _ - : (deploy.finished, ci.red); the value is one\n  JSON value (- reads it from stdin; text that is not JSON is an error; none: null)\n  --board B   the board it is about (must exist); --id ID a block in it\n  The event is logged as by you (or --by NAME), via emit. margin events --name 'deploy.*' reads\n  them, and a job registered with --on 'deploy.*' is run for them (margin help jobs)\n  The project comes from the working directory: from cron or another directory pass --project NAME\n    margin emit deploy.finished '{\"sha\":\"abc123\",\"ok\":true}' --project boards\n    jq -c .summary report.json | margin emit ci.report - --board ci\n", flags: &["--board", "--id"], max_pos: Some(2) },
     Cmd { name: "act", help: "margin act <board> <id> <action> [VALUE]\n  what an action's key does in the pane, from the command line: append the event\n  <board>.<action> with id <id> and a snapshot of that block (a table row's cells, target and\n  detail; any other block's fields), and print its seq. <id> - is the board itself. VALUE (JSON,\n  or text) rides along as value.arg. A handler registered with --on '<board>.<action>' handles it\n  (margin help handlers). Works on rows someone else owns: it changes no content\n  refused, with exit 1 and the reason: a missing board or id, an action the block does not offer\n    margin act reviews pr-4812 open\n", flags: &["--json"], max_pos: Some(4) },
-    Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify|end\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
+    Cmd { name: "hook", help: "margin claude hook start|prompt|pre-tool|post-tool|stop|permission|notify|end\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin claude hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "doc", help: "margin doc <board> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
     Cmd { name: "toast", help: "margin toast <board> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
-    Cmd { name: "stop", help: "margin stop [<board>]\n  the stop signal: Claude's tool calls in this project are refused until sulin next sends a\n  message (the pane's S key does the same)\n", flags: &[], max_pos: Some(1) },
-    Cmd { name: "link", help: "margin link [<board>] [--session S]\n  the board this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
-    Cmd { name: "unlink", help: "margin unlink [--session S]\n  drop this session's link\n", flags: &["--session"], max_pos: Some(0) },
-    Cmd { name: "open", help: "margin open <board> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the board in a pane anchored to Claude's tab, without moving focus\n  --tabs B,C: with those boards as tabs beside it (added to the pane if it is already open)\n  --stacked: onto the tab's margin pane (focus returns where it was)\n  a board already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
+    Cmd { name: "stop", help: "margin claude stop [<board>]\n  the stop signal: Claude's tool calls in this project are refused until sulin next sends a\n  message (the pane's S key does the same)\n", flags: &[], max_pos: Some(1) },
+    Cmd { name: "link", help: "margin claude link [<board>] [--session S]\n  the board this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin claude unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
+    Cmd { name: "unlink", help: "margin claude unlink [--session S]\n  drop this session's link\n", flags: &["--session"], max_pos: Some(0) },
+    Cmd { name: "unread", help: "margin claude unread [--session S] [--json]\n  sulin's decisions in the pane that a Claude session has not been handed yet, one line each\n  (--json: one event per line, as margin events --json prints them). The hooks hand them over\n  at the next prompt or tool call and move the session's cursor; this reads without moving it\n  --session S  that session's (default: the one this runs in)\n", flags: &["--session", "--json"], max_pos: Some(0) },
+    Cmd { name: "open", help: "margin open <board> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the board in a pane beside the tab this is run from (Zellij: a split or a pinned float\n  there; focus stays where it was)\n  --tabs B,C: with those boards as tabs beside it (added to the pane if it is already open)\n  --stacked: onto the tab's margin pane\n  a board already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
     Cmd { name: "tab", help: "margin tab <board> [--pane P] [--session S]\n  the tabs of the pane whose own board is <board>\nmargin tab <board> add|rm|show <tab-board> [--pane P] [--session S]\n  add a board as a tab, remove one, or bring one on screen. The pane follows without a\n  restart: the set lives in its view file. --pane names the pane (zj-12, tty) when it can't be\n  found by its title. In the pane: click a tab, gt / gT, or 3gt for the third\n", flags: &["--pane", "--session"], max_pos: Some(3) },
     Cmd { name: "close", help: "margin close <board> [--session S]\n  close the panes showing it\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "panes", help: "margin panes <board> [--session S]\n  where it's showing (pane ids, or pids under the plain host)\n", flags: &["--session"], max_pos: Some(1) },
@@ -179,15 +207,14 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "data", help: DATA_HELP, flags: &["--cap", "--file", "--owner", "--expect-every", "--as", "--last", "--json"], max_pos: Some(3) },
     Cmd { name: "owner", help: OWNER_HELP, flags: &["--board", "--owns", "--expect-every", "--json"], max_pos: Some(2) },
     Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo board `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused)\nmargin demo live [--speed X]\n  plays a turn into the demo board: steps tick, a card resolves\n  live: not part of the documented set; may be removed\n", flags: &["--speed"], max_pos: Some(1) },
-    Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
+    Cmd { name: "init", help: "margin claude init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place (an entry\n  written as `margin hook …` by an earlier version becomes `margin claude hook …`), leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
     Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--script | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --script: the script that fetches its rows (a handler runs it); --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--script", "--data", "--tool"], max_pos: Some(1) },
-    Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
+    Cmd { name: "skill", help: "margin claude skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin claude init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
 
 const EVENTS_HELP: &str = "margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--kind K] [--board B]
               [--follow] [--all] [--json]
 margin events --cursor NAME --commit SEQ
-margin events --unread [--session S]
   the project's event log. Without a filter: sulin's decisions and actions, in local time (with
   the date when not today)
   --name GLOB    events whose kind matches (quote it: 'reviews.*'), whoever made them
@@ -214,7 +241,6 @@ margin events --unread [--session S]
       handle \"$e\" && margin events --cursor mine --commit \"$(jq .seq <<<\"$e\")\"; done
   A handler does the second for you (margin help handlers). The log rotates past a few MB and
   keeps two older generations; seq goes on counting, so a cursor stays valid across a rotation
-  --unread       what a Claude session has not been handed yet (--session S, default this one)
 ";
 
 const DAEMON_HELP: &str = "margin daemon [--stay]
@@ -383,16 +409,16 @@ fn check_args(name: &str, a: &Args, flags: &[&str], max_pos: Option<usize>) -> R
     Ok(())
 }
 
-/// Who a write is logged as: `--by`, else claude inside Claude Code (its Bash tool sets
-/// CLAUDECODE / CLAUDE_CODE_ENTRYPOINT), else the person (`who::HUMAN`). `you` (or the old
+/// Who a write is logged as: `--by`, else the adapter's name inside its session (`claude::here`),
+/// else the person (`who::HUMAN`). `you` (or the old
 /// `sulin`) is stored as `who::HUMAN`, so the pane and `margin show` treat it as theirs.
 fn author(a: &Args) -> Result<String, String> {
     match a.get("--by") {
         Some("you") | Some("sulin") => Ok(crate::who::HUMAN.into()),
         Some(n) if util::valid_id(n) => Ok(n.into()),
-        Some(n) => Err(format!("bad --by {n:?}: you, claude, or a name (letters, digits, - and _)")),
-        None if a.has("--by") => Err("--by needs a value: you, claude, or a name".into()),
-        None => Ok(if std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some() { "claude" } else { crate::who::HUMAN }.into()),
+        Some(n) => Err(format!("bad --by {n:?}: you, or a name (letters, digits, - and _)")),
+        None if a.has("--by") => Err("--by needs a value: you, or a name".into()),
+        None => Ok(if claude::here() { claude::AUTHOR } else { crate::who::HUMAN }.into()),
     }
 }
 
@@ -451,7 +477,7 @@ impl Args {
 fn store(a: &Args) -> Store {
     let mut st = Store::open_cwd();
     // check_args validated --by before any command ran
-    st.author = author(a).unwrap_or_else(|_| "claude".into());
+    st.author = author(a).unwrap_or_else(|_| who::HUMAN.into());
     if let Some(h) = a.get("--home") {
         st.home = h.into();
     }
@@ -718,6 +744,7 @@ fn main() {
         // `margin help <cmd>`, `margin help <topic>`
         match argv.get(1).map(String::as_str) {
             None => print!("{}", overview()),
+            Some("claude") => print!("{}", who::say(CLAUDE_HELP)),
             Some(n) => {
                 if let Some(c) = CMDS.iter().find(|c| c.name == n) {
                     print!("{}{GLOBAL_HELP}", who::say(c.help));
@@ -732,10 +759,28 @@ fn main() {
         }
         return;
     }
-    let Some(spec) = CMDS.iter().find(|c| c.name == cmd) else {
+    // `margin claude <subcommand> …`: the adapter's group. `shown` is the command as typed, for
+    // messages; `cmd` the `Cmd` it runs, which the spelling from before the group reaches too
+    let (cmd, argv, shown) = if cmd == "claude" {
+        match argv.get(1).map(String::as_str) {
+            None | Some("help") | Some("-h") | Some("--help") => {
+                print!("{}", who::say(CLAUDE_HELP));
+                return;
+            }
+            Some(sub) if CLAUDE_CMDS.contains(&sub) => (sub.to_string(), argv[1..].to_vec(), format!("claude {sub}")),
+            Some(sub) => {
+                eprintln!("margin claude: unknown subcommand {sub:?}; margin claude --help");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        (cmd.clone(), argv, cmd)
+    };
+    let Some(spec) = CMDS.iter().find(|c| c.name == cmd).filter(|_| shown != cmd || !CLAUDE_ONLY.contains(&cmd.as_str())) else {
         eprintln!("margin: unknown command {cmd:?}; margin --help");
         std::process::exit(1);
     };
+    claude::install();
     // everything after `--` is a handler's command, untouched by flag parsing
     let (mine, rest) = match argv.iter().position(|x| x == "--") {
         Some(i) => (&argv[1..i], argv[i + 1..].to_vec()),
@@ -758,10 +803,10 @@ fn main() {
     let r = if cmd == "handler" {
         handler_cmd(&a, rest)
     } else {
-        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for handler add/set".into()) }).and_then(|_| run(&cmd, &a))
+        check_args(&shown, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for handler add/set".into()) }).and_then(|_| run(&cmd, &a))
     };
     if let Err(e) = r {
-        eprintln!("margin {cmd}: {}", who::say(&e));
+        eprintln!("margin {shown}: {}", who::say(&e));
         std::process::exit(exit_code(&e));
     }
 }
@@ -1100,12 +1145,12 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             }
         }
         "hook" => match a.pos.first().map(|s| s.as_str()).unwrap_or("prompt") {
-            // the one hook that waits (asyncRewake): exit 2 wakes Claude with what it printed
+            // the one hook that waits (asyncRewake): exit 2 wakes the session with what it printed
             "rewake" => {
-                let timeout = a.get("--timeout").and_then(util::parse_duration).unwrap_or(rewake::DEADLINE);
-                std::process::exit(rewake::run(a.get("--home"), a.get("--project"), timeout))
+                let timeout = a.get("--timeout").and_then(util::parse_duration).unwrap_or(claude::rewake::DEADLINE);
+                std::process::exit(claude::rewake::run(a.get("--home"), a.get("--project"), timeout))
             }
-            kind => hook::run(kind)?,
+            kind => claude::hook::run(kind)?,
         },
         "doc" => {
             let st = store(a);
@@ -1156,11 +1201,11 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let st = store(a);
             let art = a.pos.first().cloned().or_else(|| st.list().into_iter().next().map(|d| d.id)).ok_or("no board to log the stop in")?;
             st.stop(&art, "cli")?;
-            println!("{}", who::say("stopped: Claude's tool calls are refused until sulin's next message"));
+            println!("{}", who::say(&format!("stopped: {}'s tool calls are refused until sulin's next message", claude::NAME)));
         }
         "link" | "unlink" => {
             let st = store(a);
-            let sess = a.get("--session").map(String::from).or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok()).ok_or("no Claude session here ($CLAUDE_CODE_SESSION_ID unset): pass --session")?;
+            let sess = a.get("--session").map(String::from).or_else(claude::session_here).ok_or("no Claude session here ($CLAUDE_CODE_SESSION_ID unset): pass --session")?;
             if cmd == "unlink" {
                 println!("{}", if link::remove(&st, &sess) { "unlinked" } else { "no link" });
             } else if let Some(art) = a.pos.first() {
@@ -1179,12 +1224,9 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "open" => {
             let st = store(a);
             let art = a.pos(0, "board")?;
-            // a session with no pane yet makes this one its own (a stack opened later doesn't take over)
-            if let Ok(sess) = std::env::var("CLAUDE_CODE_SESSION_ID") {
-                if !a.has("--stacked") && link::get(&st, &sess).is_none() {
-                    link::set(&st, &sess, art, "open");
-                }
-            }
+            // run from inside a consumer's session, the adapter may make this board that
+            // session's own; from anywhere else this does nothing
+            claude::opened(&st, art, a.has("--stacked"));
             let o = host::OpenOpts {
                 float: if a.has("--split") {
                     Some(false)
@@ -1351,13 +1393,12 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             }
             let mut sc = scene::Scene::new(&cfg);
             sc.restore(&v);
-            sc.recap = recap::for_pane(&st, art);
+            // who is working on the board, through the seam; nobody unless a session keeps it
+            let acts = sc.present(consumer::on_board(&st, art));
             sc.stale = owner::stale_on(&st, art, util::epoch_now());
             sc.data_gen = snap.gen;
             let overdue = snap.stale(util::epoch_now());
             sc.stale_data = data::bound_ids(&d).into_iter().filter_map(|(id, set)| overdue.get(&set).map(|why| (id, (set.clone(), why.clone())))).collect();
-            (sc.linked, sc.ended) = link::liveness(&st, art);
-            sc.agents = agents::for_pane(&st, art);
             sc.toasts = toast::load(&st, art).into_iter().map(|t| (t, 1.0)).collect();
             if set.len() > 1 {
                 let docs = set.iter().map(|x| st.load(x)).collect::<Result<Vec<_>, _>>()?;
@@ -1374,7 +1415,6 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                     .collect();
                 sc.tab = tab;
             }
-            let acts = link::activity_for(&st, art);
             let inp = scene::Input {
                 doc: &d,
                 state: &s,
@@ -1433,7 +1473,19 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 }
             }
         }
-        "skill" => print!("{}", help::render(help::SKILL, &help::Ctx::here())),
+        "skill" => print!("{}", claude::skill()),
+        "unread" => {
+            let st = store(a);
+            let sess = a.get("--session").map(String::from).or_else(claude::session_here).unwrap_or_else(|| "default".into());
+            let now = util::epoch_now();
+            for e in claude::hook::unread(&st, &sess) {
+                if a.has("--json") {
+                    println!("{}", serde_json::to_string(&e).unwrap());
+                } else {
+                    println!("{:>4} {} {}", e.seq, local_stamp(&e.at, now), who::say(&claude::hook::describe(&st, &e)));
+                }
+            }
+        }
         "example" => {
             // `--script`/`--data` are switches; written before the name they swallow it as a value
             let script = a.has("--script");
@@ -1476,7 +1528,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                     return Err(format!("{f} needs a value"));
                 }
             }
-            let o = init::Opts {
+            let o = claude::init::Opts {
                 claude_dir: match a.get("--claude-dir") {
                     Some(d) => abs(d)?,
                     None => home()?.join(".claude"),
@@ -1489,7 +1541,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 user_name: a.get("--user-name").map(String::from),
                 dry_run: a.has("--dry-run"),
             };
-            print!("{}", init::run(&o)?);
+            print!("{}", claude::init::run(&o)?);
         }
         c => return Err(format!("unknown command {c:?}; margin --help")),
     }
@@ -1534,7 +1586,7 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
     }
     let (unread, follow) = (a.has("--unread"), a.has("--follow"));
     if unread && (cursor.is_some() || follow) {
-        return Err("--unread reads a Claude session's own cursor: it takes neither --cursor nor --follow".into());
+        return Err("--unread reads a session's own cursor: it takes neither --cursor nor --follow".into());
     }
     if a.has("--no-commit") && cursor.is_none() {
         return Err("--no-commit goes with --cursor NAME".into());
@@ -1557,7 +1609,7 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
     let out = std::io::stdout();
     loop {
         let evs = if unread {
-            let sess = a.get("--session").map(String::from).or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok()).unwrap_or("default".into());
+            let sess = a.get("--session").map(String::from).or_else(claude::session_here).unwrap_or("default".into());
             hook::unread(st, &sess).into_iter().filter(|e| e.seq > from).collect()
         } else {
             st.events_since(from)
@@ -2228,7 +2280,7 @@ fn rm_artifact(st: &Store, art: &str, yes: bool, panes: &[String]) -> Result<Str
     Ok(format!("{out}removed {art}: archived as {}\n", dest.strip_prefix(st.dir()).unwrap_or(&dest).display()))
 }
 
-/// What sulin sees, as text for Claude: content merged with his decisions.
+/// What sulin sees, as text: content merged with his decisions.
 /// The live panes that show `art` as a tab of another artifact: (pane handle, the pane's own
 /// artifact). A view file outlives its pane, so each is checked against the host. `beside`: only
 /// panes in the caller's Zellij tab (where `margin open` would put a new one).
@@ -2573,13 +2625,49 @@ mod tests {
         assert_eq!(local_stamp("garbage", now), "garbage");
     }
 
+    /// `margin --help` is the core, then one short section for the Claude Code group; nothing
+    /// before that section, and no core command's own help, names Claude. Every subcommand of the
+    /// group is a command whose help is spelled `margin claude <name>`, and the group's listing
+    /// shows each.
+    #[test]
+    fn the_help_is_the_core_then_one_claude_section() {
+        let (core, group) = HELP.split_once("\nClaude Code (").expect("the section");
+        assert!(!core.to_lowercase().contains("claude"), "the core part of --help names Claude");
+        assert!(group.lines().count() <= 3 && group.trim_end().ends_with("hook <event>"), "one short section, last: {group}");
+        for must in ["boards:", "events (", "handlers and outside writers", "datasets (", "panes and screen"] {
+            assert!(core.contains(must), "{must}");
+        }
+        for name in CLAUDE_CMDS {
+            let c = CMDS.iter().find(|c| c.name == *name).unwrap_or_else(|| panic!("{name} is not a command"));
+            assert!(c.help.starts_with(&format!("margin claude {name}")), "{name}'s help is spelled the old way: {}", c.help.lines().next().unwrap());
+            assert!(CLAUDE_HELP.contains(&format!("margin claude {name}")), "margin claude --help doesn't list {name}");
+            assert!(group.contains(name), "the section of --help doesn't list {name}");
+            // and no line of it teaches the spelling from before the group
+            for old in ["margin hook ", "margin init", "margin skill", "margin link", "margin unlink", "margin stop", "margin propose"] {
+                // (init says which spelling it rewrites, in backticks with an ellipsis)
+                assert!(!c.help.replace("`margin hook …`", "").contains(old), "{name}'s help says {old:?}");
+            }
+        }
+        for c in CMDS.iter().filter(|c| !CLAUDE_CMDS.contains(&c.name)) {
+            assert!(!c.help.to_lowercase().contains("claude"), "margin {} --help names Claude: it is a core command", c.name);
+        }
+        for (what, text) in [("global flags", GLOBAL_HELP), ("handler", HANDLER_HELP)] {
+            assert!(!text.to_lowercase().contains("claude"), "{what}");
+        }
+        for sub in ["add", "ls", "rm", "pause", "logs", "run"] {
+            assert!(!handler_sub_help(sub).unwrap().to_lowercase().contains("claude"), "handler {sub}");
+        }
+        // the write's default author inside a session is the adapter's, and said in its help
+        assert!(CLAUDE_HELP.contains("logged as by claude") && CLAUDE_ONLY.iter().all(|c| CLAUDE_CMDS.contains(c)));
+    }
+
     /// The help Claude reads names no one: every command's help goes out through `who::say`.
     #[test]
     fn init_skill_and_help_are_commands() {
         for c in ["init", "skill"] {
             assert!(CMDS.iter().any(|x| x.name == c), "{c}");
         }
-        assert!(HELP.contains("margin init") && HELP.contains("margin help [<command>|<topic>]"));
+        assert!(HELP.contains("margin claude init") && HELP.contains("margin help [<command>|<topic>]"));
         assert!(args(&["--dry-run", "--claude-dir", "/x"]).has("--dry-run"), "--dry-run is a switch");
         assert_eq!(args(&["--dry-run", "--claude-dir", "/x"]).get("--claude-dir"), Some("/x"));
         // no topic shadows a command
@@ -2636,7 +2724,7 @@ mod tests {
         texts.push(("margin schema".into(), doc::schema_text(None).unwrap()));
         texts.push(("margin schema --json".into(), doc::schema_json(None).unwrap().to_string()));
         let c = help::Ctx::new("", std::path::Path::new("/opt/margin/bin/margin"));
-        texts.push(("margin skill".into(), help::render(help::SKILL, &c)));
+        texts.push(("margin skill".into(), help::render(claude::SKILL, &c)));
         texts.push(("margin help".into(), help::topic_list(&c)));
         texts.extend(help::TOPICS.iter().map(|(n, t)| (format!("margin help {n}"), help::render(t, &c))));
         texts.push(("margin example".into(), example::list()));
@@ -2669,7 +2757,7 @@ mod tests {
             texts.extend(handler_sub_help(sub).map(|h| (format!("margin handler {sub} --help"), h.to_string())));
         }
         let c = help::Ctx::new("", std::path::Path::new("/opt/margin/bin/margin"));
-        texts.push(("margin skill".into(), help::render(help::SKILL, &c)));
+        texts.push(("margin skill".into(), help::render(claude::SKILL, &c)));
         texts.push(("margin help".into(), help::topic_list(&c)));
         texts.extend(help::TOPICS.iter().map(|(n, t)| (format!("margin help {n}"), help::render(t, &c))));
         texts.push(("margin schema".into(), doc::schema_text(None).unwrap()));

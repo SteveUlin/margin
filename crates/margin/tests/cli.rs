@@ -122,7 +122,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("purpose", s(&["a", "walk the table"]), "", true),
         ("apply", s(&["a"]), r#"{"op":"set","id":"t3","fields":{"note":"n"}}"#, true),
         ("ask", s(&["a", "q2", "Again?", "x", "y"]), "", true),
-        ("propose", s(&["a", "t1", "tick", "done"]), "", true),
+        ("claude propose", s(&["a", "t1", "tick", "done"]), "", true),
         ("diff", s(&["a", "d1", "--old", "/nonexistent-a", "--new", "/nonexistent-b"]), "", false),
         ("image", s(&["a", "i1", "/nonexistent.png"]), "", false),
         ("show", s(&["a"]), "", true),
@@ -131,12 +131,13 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("events", s(&["--all"]), "", true),
         ("emit", s(&["walk.done", r#"{"n":1}"#, "--board", "a"]), "", true),
         ("act", s(&["a", "t1", "poke"]), "", true),
-        ("hook", s(&["prompt"]), &hook_in, true),
+        ("claude hook", s(&["prompt"]), &hook_in, true),
+        ("claude unread", s(&["--session", "walk"]), "", true),
         ("doc", s(&["a", "notes"]), "# Notes\n\nA line.\n", true),
         ("toast", s(&["a", "hello"]), "", true),
-        ("stop", s(&["a"]), "", true),
-        ("link", s(&["a"]), "", true),
-        ("unlink", s(&[]), "", true),
+        ("claude stop", s(&["a"]), "", true),
+        ("claude link", s(&["a"]), "", true),
+        ("claude unlink", s(&[]), "", true),
         ("open", s(&["a"]), "", true),
         ("tab", s(&["a", "--pane", "tty"]), "", true),
         ("close", s(&["a"]), "", true),
@@ -161,15 +162,16 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("data", s(&["rm", "nums"]), "", true),
         ("daemon", s(&["status"]), "", true),
         ("doctor", s(&[]), "", true),
-        ("init", s(&["--dry-run", "--claude-dir", &claude_dir]), "", true),
+        ("claude init", s(&["--dry-run", "--claude-dir", &claude_dir]), "", true),
         ("example", s(&[]), "", true),
-        ("skill", s(&[]), "", true),
+        ("claude skill", s(&[]), "", true),
         ("rm", s(&["b", "--yes"]), "", true),
     ];
     // `view` is the live pane: it needs a terminal
     let skipped = ["view"];
     for name in command_table() {
-        assert!(walk.iter().any(|w| w.0 == name) || skipped.contains(&name.as_str()), "margin {name} is not in the walk");
+        // the Claude Code group's commands are walked under their own spelling, `margin claude <name>`
+        assert!(walk.iter().any(|w| w.0 == name || w.0 == format!("claude {name}")) || skipped.contains(&name.as_str()), "margin {name} is not in the walk");
     }
     for (side, project) in [("before", "pb"), ("after", "pa")] {
         let globals = s(&["--home", &home.display().to_string(), "--project", project]);
@@ -179,7 +181,7 @@ fn every_command_honors_home_and_project_on_either_side() {
             if side == "before" {
                 argv.extend(globals.iter().cloned());
             }
-            argv.push(cmd.to_string());
+            argv.extend(cmd.split(' ').map(String::from));
             argv.extend(args[..cut].iter().cloned());
             if side == "after" {
                 argv.extend(globals.iter().cloned());
@@ -299,14 +301,16 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
         (vec!["title", "paln", "Plan"], ""),
         (vec!["purpose", "paln", "why"], ""),
         (vec!["hints", "paln", "k  key"], ""),
-        (vec!["propose", "paln", "t1", "tick", "done"], ""),
+        (vec!["claude", "propose", "paln", "t1", "tick", "done"], ""),
         (vec!["diff", "paln", "d1", "--old", "/nonexistent-a", "--new", "/nonexistent-b"], ""),
         (vec!["image", "paln", "i1", &png_s], ""),
         (vec!["toast", "paln", "hello"], ""),
     ];
     for (argv, stdin) in &walk {
         let (ok, out) = run(argv, stdin);
-        assert!(!ok && out.trim() == format!("margin {}: {want}", argv[0]), "margin {argv:?}: {out}");
+        // the message names the command as typed: `margin claude propose` for the group's
+        let typed = if argv[0] == "claude" { format!("claude {}", argv[1]) } else { argv[0].to_string() };
+        assert!(!ok && out.trim() == format!("margin {typed}: {want}"), "margin {argv:?}: {out}");
         assert_eq!(artifacts(&home), ["plan"], "margin {argv:?} created something");
     }
     let (_, out) = run(&["show", "plan"], "");
@@ -449,7 +453,7 @@ fn the_skills_worked_example_runs_end_to_end() {
     let decoy = temp("skill-decoy");
     let home = temp("skill-home");
     let _daemons = Daemons(home.clone());
-    let (ok, skill) = at(&decoy, &home, &["skill"], "");
+    let (ok, skill) = at(&decoy, &home, &["claude", "skill"], "");
     assert!(ok);
     let block = skill.split("```fish\n").nth(1).expect("the turn loop's block").split("```").next().unwrap().to_string();
     assert!(block.contains("margin new plan <<'EOF'") && !block.contains("margin apply plan"), "the example creates with new: {block}");
@@ -913,7 +917,8 @@ fn an_outside_owner_registers_writes_and_goes_stale() {
     // the owner writes; anyone else is refused; outside its prefix it is refused
     let row = r#"{"type":"row","id":"run-1","text":"sim A","parent":"run"}"#;
     let (code, out, err) = run(&["apply", "runs", "--as", "queue"], row);
-    assert!(code == 0 && out.trim() == "runs rev 2", "{out}{err}");
+    // the rev it prints is the board's (its layout's), which an owner's write does not move
+    assert!(code == 0 && out.trim() == "runs rev 1", "{out}{err}");
     let (code, _, err) = run(&["set", "runs", "run-1", "text=mine"], "");
     assert!(code == 1 && err.contains("belongs to owner `queue`") && err.contains("margin apply runs --as queue"), "{err}");
     let (code, _, err) = run(&["apply", "runs", "--as", "queue"], r#"{"op":"set","id":"note","fields":{"text":"theirs"}}"#);
@@ -922,7 +927,9 @@ fn an_outside_owner_registers_writes_and_goes_stale() {
     assert!(code == 1 && err.contains("not a whole document"), "{err}");
     assert_eq!(run(&["set", "runs", "note", "text=still mine"], "").0, 0);
     let v: serde_json::Value = serde_json::from_str(&run(&["show", "runs", "--json"], "").1).unwrap();
-    assert_eq!((v["doc"]["rev"].as_u64(), v["doc"]["blocks"][0]["children"][0]["text"].as_str()), (Some(3), Some("sim A")));
+    // the layout's write moved the board's rev; the owner's moved its own, and its row is composed in
+    assert_eq!((v["doc"]["rev"].as_u64(), v["doc"]["blocks"][0]["children"][0]["text"].as_str()), (Some(2), Some("sim A")));
+    assert!(v["doc"]["owned"]["owner:queue"]["rev"].as_u64() >= Some(1), "{}", v["doc"]["owned"]);
     // an action on the owned row is an event, snapshot and all
     let (code, out, _) = run(&["act", "runs", "run-1", "cancel"], "");
     assert_eq!(code, 0, "{out}");
@@ -943,7 +950,7 @@ fn an_outside_owner_registers_writes_and_goes_stale() {
     assert!(out.contains("stale") && out.contains("expected every 1s"), "{out}");
     // the same write again changes nothing and still counts as a write
     let (code, out, _) = run(&["apply", "runs", "--as", "queue"], row);
-    assert!(code == 0 && out.trim() == "runs rev 3", "{out}");
+    assert!(code == 0 && out.trim() == "runs rev 2", "{out}");
     assert!(!run(&["owner", "ls"], "").1.contains("STALE"));
     assert!(!run(&["render", "runs", "--width", "100"], "").1.contains("stale"));
     let (code, out, _) = run(&["owner", "rm", "queue"], "");
@@ -1004,7 +1011,10 @@ fn handlers_register_change_and_dry_run() {
     assert!(run(&["events", "--name", "board.done", "--json"], "").1.is_empty());
     // the same run for real: it commits, as the handler, and leaves the cursor (events came from a file)
     let (code, out, err) = run(&["handler", "run", "h", "--events", &evs.display().to_string()], "");
-    assert!(code == 0 && out.contains("board rev 2") && out.contains("emitted board.done"), "{out}{err}");
+    // (the board's rev is its layout's: the handler's write moves the handler's own)
+    assert!(code == 0 && out.contains("board") && out.contains("rev 1") && out.contains("emitted board.done"), "{out}{err}");
+    let shown: serde_json::Value = serde_json::from_str(&run(&["show", "board", "--json"], "").1).unwrap();
+    assert!(shown["doc"]["rev"] == 1 && shown["doc"]["owned"]["handler:h"]["rev"].as_u64() >= Some(1) && shown.to_string().contains("saw 2"), "{shown}");
     let e = &json_lines(&run(&["events", "--name", "board.done", "--json"], "").1)[0];
     assert_eq!((e["by"].as_str(), e["via"].as_str(), e["artifact"].as_str()), (Some("handler:h"), Some("handler"), Some("board")));
     assert_eq!(std::fs::read_to_string(home.join("p/cursors/handler.h")).unwrap(), "0");
@@ -1168,7 +1178,7 @@ fn a_row_is_opened_by_the_registered_handler_through_the_daemon() {
     let _ = std::fs::remove_dir_all(&decoy);
 }
 
-/// A Claude session ends (`margin hook end`, Claude Code's SessionEnd): its runtime files go and
+/// A Claude session ends (`margin claude hook end`, Claude Code's SessionEnd): its runtime files go and
 /// the pane stops speaking of Claude, saying once when the session ended; the board, its events,
 /// the session's cursor and its link stay. A new session started later, with nothing but the
 /// store left (as after a reboot), is told the board exists.
@@ -1182,9 +1192,9 @@ fn a_session_end_cleans_up_and_the_next_session_finds_the_board() {
         let o = ch.wait_with_output().unwrap();
         (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
     };
-    let hook = |kind: &str, session: &str, extra: &str| run(&["hook", kind], &format!(r#"{{"cwd":"{}","session_id":"{session}"{extra}}}"#, decoy.display()));
+    let hook = |kind: &str, session: &str, extra: &str| run(&["claude", "hook", kind], &format!(r#"{{"cwd":"{}","session_id":"{session}"{extra}}}"#, decoy.display()));
     assert_eq!(run(&["new", "plan"], DOC).0, 0);
-    assert_eq!(run(&["link", "plan", "--session", "S1"], "").0, 0);
+    assert_eq!(run(&["claude", "link", "plan", "--session", "S1"], "").0, 0);
     assert_eq!(run(&["select", "mg:todo/plan.t1=next"], "").0, 0);
     let (code, out, _) = hook("prompt", "S1", "");
     assert!(code == 0 && out.contains("margin:"), "{out}");
@@ -1209,7 +1219,7 @@ fn a_session_end_cleans_up_and_the_next_session_finds_the_board() {
     // everything durable is where it was
     assert!(home.join("p/plan/doc.json").exists() && home.join("p/delivered/S1").exists());
     assert_eq!(json_lines(&run(&["events", "--json"], "").1).len(), 1);
-    assert!(run(&["link", "--session", "S1"], "").1.starts_with("plan"), "the link stays: a resume takes it up");
+    assert!(run(&["claude", "link", "--session", "S1"], "").1.starts_with("plan"), "the link stays: a resume takes it up");
     // the pane: no Claude wording, and one line saying when
     let (_, frame, _) = run(&["render", "plan", "--width", "100"], "");
     assert!(!frame.contains("Claude") && frame.contains("the session that kept this board ended at "), "{frame}");
@@ -1220,8 +1230,8 @@ fn a_session_end_cleans_up_and_the_next_session_finds_the_board() {
     // a reboot: the runtime directory is gone, only the store remains; a new session starts
     std::fs::remove_dir_all(&rt).unwrap();
     let (code, out, _) = hook("start", "S2", r#","source":"startup""#);
-    assert!(code == 0 && out.contains("this project already has 1 board: plan") && out.contains("margin link <art>"), "{out}");
-    assert_eq!(run(&["link", "plan", "--session", "S2"], "").0, 0);
+    assert!(code == 0 && out.contains("this project already has 1 board: plan") && out.contains("margin claude link <art>"), "{out}");
+    assert_eq!(run(&["claude", "link", "plan", "--session", "S2"], "").0, 0);
     let (_, out, _) = hook("start", "S2", "");
     assert!(out.contains("plan") && out.contains("linked to this session"), "{out}");
     let (_, frame, _) = run(&["render", "plan", "--width", "100"], "");
@@ -1326,7 +1336,8 @@ fn the_runs_example_is_an_outside_tool_that_runs_submissions_one_at_a_time() {
     assert!(lines.windows(2).all(|w| w[0].2 <= w[1].2), "{lines:?}");
     let row = finished(&ids[0]).unwrap();
     assert!(row["aside"].as_str().unwrap().starts_with("ok · 0.") && row["glyph"] == "done" && row["detail"].as_str().unwrap().contains("out-of-a"), "{row}");
-    assert!(std::fs::read_to_string(home.join("p/runs/doc.json")).unwrap().contains("\"by\": \"owner:runs-tool\""), "the rows are written as the owner");
+    let shown: serde_json::Value = serde_json::from_str(&run(&["show", "runs", "--json"], "").1).unwrap();
+    assert!(shown["doc"]["owned"]["owner:runs-tool"]["rev"].as_u64() >= Some(1), "the rows are written as the owner: {}", shown["doc"]["owned"]);
 
     // cancel the running one, drop a waiting one
     let (long1, long2, never) = (submit("long1", "30"), submit("long2", "30"), submit("never", "0.1"));
@@ -1391,7 +1402,7 @@ fn no_feed_command_and_no_help_that_mentions_one() {
     let mut names: Vec<String> = std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skill/topics")).unwrap().flatten().filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".md").map(String::from)).collect();
     names.sort();
     assert!(names.len() >= 9 && !names.iter().any(|n| n == "feeds"), "{names:?}");
-    let mut texts = vec![("margin --help".to_string(), help.clone()), ("margin help".to_string(), topics.clone()), ("margin skill".to_string(), run(&["skill"]).1), ("margin schema".to_string(), run(&["schema"]).1), ("margin daemon --help".to_string(), run(&["daemon", "--help"]).1)];
+    let mut texts = vec![("margin --help".to_string(), help.clone()), ("margin help".to_string(), topics.clone()), ("margin claude skill".to_string(), run(&["claude", "skill"]).1), ("margin schema".to_string(), run(&["schema"]).1), ("margin daemon --help".to_string(), run(&["daemon", "--help"]).1)];
     for n in &names {
         let (ok, text, err) = run(&["help", n]);
         assert!(ok && !text.is_empty(), "margin help {n}: {err}");
@@ -1501,12 +1512,13 @@ fn the_shipped_agents_provider_writes_as_an_outside_owner() {
     let _ = ch.wait();
     assert!(line.contains("\"id\":\"ag\""), "the agents provider printed: {line}");
     let (ok, out, err) = run(&["apply", "agents", "--as", "agents"], &line);
-    assert!(ok && out.trim() == "agents rev 2", "{out}{err}");
+    // the rev printed is the board's (its layout's): the owner's write does not move it
+    assert!(ok && out.trim() == "agents rev 1", "{out}{err}");
     let (_, show, _) = run(&["show", "agents"], "");
-    assert!(show.contains("rev 2 by owner:agents") && show.contains("(owner agents owns the ids ag and ag-…") && show.contains("row ag-sess1") && show.contains("last: Edit · parse.rs"), "{show}");
+    assert!(show.contains("rev 1 by owner:agents") && show.contains("(owner agents owns the ids ag and ag-…") && show.contains("row ag-sess1") && show.contains("last: Edit · parse.rs"), "{show}");
     // the same line again is "still the same": no revision, and the owner's last write moves
     let (ok, out, _) = run(&["apply", "agents", "--as", "agents"], &line);
-    assert!(ok && out.trim() == "agents rev 2", "{out}");
+    assert!(ok && out.trim() == "agents rev 1", "{out}");
     assert!(run(&["owner", "ls"], "").1.contains("wrote "));
     assert!(!home.join("p/daemon.pid").exists() && !home.join("p/handlers.json").exists(), "margin ran nothing for it");
     let _ = std::fs::remove_dir_all(&home);
@@ -1573,6 +1585,136 @@ fn the_test_guard_stops_a_daemon_left_running() {
     wait_for("the daemon to be gone once the guard dropped", 5, || unsafe { libc_kill(pid, 0) } != 0);
     let (_, status, _) = plain(&decoy, &home, &["daemon", "status", "--unit-dir", &decoy.join("units").display().to_string()], "");
     assert!(status.contains("daemon: not running"), "{status}");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// Everything for Claude Code is one group, `margin claude …`, and the spellings from before the
+/// group still run, unlisted: a settings.json written by an earlier `init` holds `margin hook …`,
+/// and its hooks must keep handing a session the person's decisions until `margin claude init`
+/// rewrites them. Each old spelling does what the new one does.
+#[test]
+fn the_claude_group_and_the_spellings_from_before_it_run_the_same_code() {
+    let (decoy, home, rt) = (temp("group-decoy"), temp("group-home"), temp("group-runtime"));
+    let _daemons = Daemons(home.clone());
+    let run = |argv: &[&str], stdin: &str| {
+        let mut ch = bare(&decoy, &home, argv).env("XDG_RUNTIME_DIR", &rt).env("XDG_CONFIG_HOME", decoy.join("config")).spawn().unwrap();
+        ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let o = ch.wait_with_output().unwrap();
+        (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let ok = |argv: &[&str], stdin: &str| {
+        let (code, out, err) = run(argv, stdin);
+        assert_eq!(code, 0, "margin {argv:?}: {err}");
+        out
+    };
+    let hook_in = |session: &str| format!(r#"{{"cwd":"{}","session_id":"{session}"}}"#, decoy.display());
+    ok(&["new", "plan"], DOC);
+
+    // link, unlink: the old spelling writes the link the new one reads, and the other way round
+    assert_eq!(ok(&["link", "plan", "--session", "old"], ""), "linked plan\n");
+    assert!(ok(&["claude", "link", "--session", "old"], "").starts_with("plan  (explicit"));
+    assert_eq!(ok(&["claude", "link", "plan", "--session", "new"], ""), "linked plan\n");
+    assert!(ok(&["link", "--session", "new"], "").starts_with("plan  (explicit"));
+
+    // the hooks: both sessions are noted, the person decides, and each spelling hands its session
+    // the same line and moves that session's cursor
+    for (spelling, session) in [(&["hook", "prompt"][..], "old"), (&["claude", "hook", "prompt"][..], "new")] {
+        ok(spelling, &hook_in(session));
+    }
+    ok(&["select", "mg:todo/plan.t1=next"], "");
+    let unread_old = ok(&["events", "--unread", "--session", "old"], "");
+    let unread_new = ok(&["claude", "unread", "--session", "old"], "");
+    assert!(unread_old.contains("wants plan.t1") && unread_old == unread_new, "old: {unread_old}\nnew: {unread_new}");
+    let handed_old = ok(&["hook", "prompt"], &hook_in("old"));
+    let handed_new = ok(&["claude", "hook", "prompt"], &hook_in("new"));
+    assert!(handed_old.contains("margin: the user acted in the margin pane") && handed_old.contains("wants plan.t1"), "{handed_old}");
+    assert_eq!(handed_old, handed_new, "the hook written yesterday says what today's says");
+    assert!(ok(&["claude", "unread", "--session", "old"], "").is_empty() && ok(&["claude", "unread", "--session", "new"], "").is_empty(), "both cursors moved");
+    // every other hook kind runs under both spellings (rewake leaves at once: nothing is pending)
+    for kind in ["start", "pre-tool", "post-tool", "stop", "permission", "notify", "end"] {
+        assert_eq!(run(&["hook", kind], &hook_in("old")).0, 0, "margin hook {kind}");
+        assert_eq!(run(&["claude", "hook", kind], &hook_in("new")).0, 0, "margin claude hook {kind}");
+    }
+    for spelling in [&["hook", "rewake", "--timeout", "1s"][..], &["claude", "hook", "rewake", "--timeout", "1s"][..]] {
+        assert_eq!(run(spelling, &hook_in("nobody")).0, 0, "{spelling:?}");
+    }
+
+    // skill, init, stop, propose
+    assert_eq!(ok(&["skill"], ""), ok(&["claude", "skill"], ""));
+    let dir = decoy.join("claude-dir").display().to_string();
+    let (dry_old, dry_new) = (ok(&["init", "--dry-run", "--claude-dir", &dir], ""), ok(&["claude", "init", "--dry-run", "--claude-dir", &dir], ""));
+    assert!(dry_old == dry_new && dry_new.starts_with("margin claude init (dry run") && dry_new.contains("added 9"), "{dry_new}");
+    assert_eq!(ok(&["stop", "plan"], ""), ok(&["claude", "stop", "plan"], ""));
+    ok(&["propose", "plan", "t1", "tick", "done", "--why", "old"], "");
+    ok(&["claude", "propose", "plan", "t3", "tick", "done", "--why", "new"], "");
+    let shown = ok(&["show", "plan", "--json"], "");
+    assert!(shown.matches("\"proposal\"").count() == 2, "{shown}");
+    assert_eq!(ok(&["unlink", "--session", "old"], ""), "unlinked\n");
+    assert_eq!(ok(&["claude", "unlink", "--session", "new"], ""), "unlinked\n");
+
+    // the listing: the group, and none of the old spellings
+    let help = ok(&["--help"], "");
+    let group = ok(&["claude", "--help"], "");
+    assert_eq!(group, ok(&["claude"], ""));
+    assert_eq!(group, ok(&["help", "claude"], ""));
+    for sub in ["init", "skill", "link", "unlink", "unread", "stop", "propose", "hook"] {
+        assert!(group.contains(&format!("  margin claude {sub}")), "margin claude --help doesn't list {sub}: {group}");
+        for text in [&help, &group] {
+            assert!(!text.lines().any(|l| l.trim_start().starts_with(&format!("margin {sub} ")) || l.trim_start() == format!("margin {sub}")), "--help lists the old spelling of {sub}");
+        }
+        // its own help, reached by either spelling, teaches the new one
+        let h = ok(&["claude", sub, "--help"], "");
+        assert!(h.starts_with(&format!("margin claude {sub}")), "{h}");
+        if sub != "unread" {
+            assert_eq!(h, ok(&[sub, "--help"], ""));
+        }
+    }
+    assert!(help.contains("\nClaude Code (") && help.find("margin claude init") > help.find("margin handler add"), "the core first, then the group");
+    // a message names the command as it was typed; what was never a top-level command is not one now
+    let (code, _, err) = run(&["claude", "link", "nope", "--session", "s"], "");
+    assert!(code == 3 && err.starts_with("margin claude link: no board"), "{code} {err}");
+    let (code, _, err) = run(&["link", "nope", "--session", "s"], "");
+    assert!(code == 3 && err.starts_with("margin link: no board"), "{code} {err}");
+    let (code, _, err) = run(&["unread"], "");
+    assert!(code == 1 && err.contains("unknown command \"unread\""), "{err}");
+    let (code, _, err) = run(&["claude", "ls"], "");
+    assert!(code == 1 && err.contains("margin claude: unknown subcommand \"ls\""), "{err}");
+    let (code, _, err) = run(&["claude", "link", "--nope"], "");
+    assert!(code == 1 && err.contains("unknown flag --nope; margin claude link --help"), "{err}");
+    for d in [&home, &decoy, &rt] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A plain dashboard, with nothing of Claude Code in the environment and no session linked to
+/// it: the frame draws no consumer's name, no live strip and no stop control, even while a
+/// Claude session is at work on something else in the same project. Linking that session to
+/// the board is what brings the name on screen.
+#[test]
+fn a_plain_dashboard_draws_nothing_of_claude() {
+    let (decoy, home) = (temp("plain-decoy"), temp("plain-home"));
+    let _daemons = Daemons(home.clone());
+    let (ok, board, _) = plain(&decoy, &home, &["example", "services"], "");
+    assert!(ok && board.contains("\"blocks\""));
+    assert!(plain(&decoy, &home, &["new", "services"], &board).0);
+    let render = || {
+        let (ok, frame, err) = plain(&decoy, &home, &["render", "services", "--width", "100", "--height", "40"], "");
+        assert!(ok, "{err}");
+        frame
+    };
+    let frame = render();
+    assert!(frame.contains("services") && !frame.to_lowercase().contains("claude"), "{frame}");
+    // a session busy elsewhere in the project: a running tool, recorded by its hook
+    let hook = |kind: &str, extra: &str| plain(&decoy, &home, &["claude", "hook", kind], &format!(r#"{{"cwd":"{}","session_id":"S1"{extra}}}"#, decoy.display()));
+    assert!(hook("pre-tool", r#","tool_name":"Bash","tool_input":{"command":"cargo build","description":"Build the release binary"}"#).0);
+    let busy = render();
+    assert_eq!(busy.replace(char::is_numeric, ""), frame.replace(char::is_numeric, ""), "a session that does not keep the board changes nothing on it");
+    assert!(!busy.contains("Build the release binary") && !busy.to_lowercase().contains("claude"), "{busy}");
+    // linked, the same board names its consumer and shows what it is doing
+    assert!(plain(&decoy, &home, &["claude", "link", "services", "--session", "S1"], "").0);
+    let linked = render();
+    assert!(linked.contains("Claude is current") && linked.contains("Build the release binary"), "{linked}");
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }
