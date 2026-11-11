@@ -250,11 +250,25 @@ fn head_lines(inp: &Input) -> Vec<HeadLine> {
     }
     let mut doing: Vec<&Block> = Vec::new();
     let mut needs: Vec<String> = Vec::new();
+    // the steps that no longer hold anything up: a step of the person's that waits on another
+    // (`after`) needs them only once every step it waits on is among these
+    let mut finished: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut steps: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    walk(&inp.doc.blocks, &mut |b, _, _| {
+        if b.kind == "todo" {
+            steps.insert(b.id.as_str());
+            if matches!(components::status_of(inp.state, b).as_str(), "done" | "skipped") {
+                finished.insert(b.id.as_str());
+            }
+        }
+    });
     walk(&inp.doc.blocks, &mut |b, _, _| match b.kind.as_str() {
         "todo" => {
             let st = components::status_of(inp.state, b);
             if components::yours(inp.state, b) {
-                if !matches!(st.as_str(), "done" | "skipped") {
+                // an `after` that names no step holds nothing up (the lanes ignore it too)
+                let free = b.strs("after").iter().all(|d| finished.contains(d.as_str()) || !steps.contains(d.as_str()));
+                if !matches!(st.as_str(), "done" | "skipped") && free {
                     needs.push(b.id.clone());
                 }
             } else if st == "doing" {
@@ -3195,6 +3209,36 @@ mod tests {
             {"type": "todo", "id": "t3", "text": "read the frame", "owner": "you"}]})];
         blocks.extend((0..rows).map(|i| json!({"type": "text", "id": format!("r{i}"), "text": format!("filler row {i}")})));
         serde_json::from_value(json!({"id": "a", "title": "plan", "rev": 1, "blocks": blocks})).unwrap()
+    }
+
+    /// "N need you" counts a step of the person's only when it can be acted on: every step it
+    /// comes `after` is done or skipped. One still held up by an unfinished step is not counted
+    /// (it was, even with a later step waiting on it in turn), and comes into the count when
+    /// what it waits on finishes.
+    #[test]
+    fn the_head_counts_a_step_of_theirs_only_once_what_it_waits_on_is_finished() {
+        let cfg = Config::default();
+        let doc = |build: &str, review: &str| -> Doc {
+            let mut blocks = vec![json!({"type": "section", "id": "next", "title": "Next", "children": [
+                {"type": "todo", "id": "c1", "text": "build it", "status": build},
+                {"type": "todo", "id": "c2", "text": "review it", "status": review},
+                {"type": "todo", "id": "u1", "text": "try it on the phone", "owner": "you", "after": ["c1", "c2"]},
+                {"type": "todo", "id": "c3", "text": "ship it", "after": ["u1"]},
+                {"type": "todo", "id": "u2", "text": "pick a name", "owner": "you"},
+                {"type": "todo", "id": "u3", "text": "sign off", "owner": "you", "after": ["gone"]}]})];
+            blocks.extend((0..30).map(|i| json!({"type": "text", "id": format!("r{i}"), "text": format!("filler row {i}")})));
+            serde_json::from_value(json!({"id": "a", "title": "plan", "rev": 1, "blocks": blocks})).unwrap()
+        };
+        let needs = |d: &Doc| {
+            let t = frame_text(&mut Scene::new(&cfg), d, 0.0);
+            t.lines().find(|l| l.contains("need you") || l.contains("needs you")).map(|l| l.trim().to_string()).unwrap_or_default()
+        };
+        // u1 waits on c1 and c2: not counted while either is open, though c3 waits on u1
+        assert!(needs(&doc("doing", "todo")).contains("2 need you: u2, u3"), "{}", needs(&doc("doing", "todo")));
+        assert!(needs(&doc("done", "todo")).contains("2 need you: u2, u3"), "one of two finished is not enough");
+        // both finished (done, or skipped): now it is theirs to do
+        assert!(needs(&doc("done", "done")).contains("3 need you: u1, u2, u3"), "{}", needs(&doc("done", "done")));
+        assert!(needs(&doc("done", "skipped")).contains("3 need you: u1, u2, u3"), "{}", needs(&doc("done", "skipped")));
     }
 
     /// The head (goal, running step, what needs him) shows only when the content overflows the
