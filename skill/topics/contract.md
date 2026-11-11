@@ -61,7 +61,7 @@ Every field is always present.
 | `value` | any JSON | what the event carries; `null` when nothing |
 | `by` | string | who appended it: `you` (the person), `claude`, a name given with `--by`, `handler:<name>`, `owner:<name>` |
 | `via` | string | how: `key`, `mouse`, `pane`, `select`, `cli`, `act`, `emit`, `handler` (more may be added) |
-| `rev` | number | the board's revision when it was appended; 0 with no board |
+| `rev` | number | the board's revision (its layout's, see below) when it was appended; 0 with no board |
 
 **Names.** A `kind` is letters, digits and `. _ - :`, starting with a letter or digit, at most
 128 characters. Three families:
@@ -107,8 +107,13 @@ stop when it is not. All have `by: "you"`, `via: "pane"`:
 
 ## A board, and one block
 
-`margin show <board> --json`: the document as stored and the decisions made on it. The answer
-carries `v`, as every JSON answer does; `doc.v` is the stored document's own.
+`margin show <board> --json`: the board and the decisions made on it. The answer carries `v`,
+as every JSON answer does; `doc.v` is the document's own.
+
+A board has one **layout** (its structure and authored text, written with `margin apply`, `add`,
+`set`, `rm`, `move`, `title`, `purpose`, `hints`) and the blocks of each **owner or handler**
+that holds an id prefix on it, which only that owner writes. Every read gives the two
+**composed**: each owner's blocks in place among the layout's.
 
 ```json
 {"v": 1,
@@ -125,9 +130,17 @@ carries `v`, as every JSON answer does; `doc.v` is the stored document's own.
 ```
 
 - `doc`: always `v` (number), `id` (string, the board's name), `title` (string), `kind`
-  (string, may be empty), `rev` (number: goes up by one on every change of content), `blocks`
-  (list), `updated` (RFC 3339), `by` (string: the last writer). When set: `purpose`, `hints`,
-  `actions`, `sessions`.
+  (string, may be empty), `rev` (number: **the layout's revision**, up by one on every change
+  of the layout and on nothing else), `blocks` (list), `updated` (RFC 3339) and `by` (string):
+  the board's last change and who made it, an owner's write included. When set: `purpose`,
+  `hints`, `actions`, `sessions`, `owned`.
+- `doc.owned`, on a board an owner or a handler has written: `{"owner:<name>" | "handler:<name>":
+  {"rev": number, "updated": RFC 3339 or ""}}`. An owner's `rev` goes up by one each time its
+  blocks change; the board's `rev` does not move for it. To ask "did anything change", compare
+  `rev` and every entry of `owned`.
+- `--base-rev N` on a layout write means **the layout has not changed since N**: it is refused
+  (exit 1, `stale base`) only when another layout write landed, never because an owner or a
+  handler updated its rows. `--as` takes no `--base-rev`: an owner is its file's only writer.
 - A block: always `type` and `id` (strings; an id is unique in its board); `children` (list)
   on a block that holds some; every other key is one of the type's fields, as `margin schema
   <type>` lists them (`margin schema --json` for all, with each field's type).
@@ -137,6 +150,12 @@ carries `v`, as every JSON answer does; `doc.v` is the stored document's own.
   not in the block.
 - Rows a table reads from a dataset (`"rows": "<name>"`) are not in the document: read the
   dataset.
+- An owner's block sits under a container of the layout (`"parent"`), or at the top level. It
+  keeps its place among the layout's blocks: after the one it followed when written. In a
+  container with no layout children, and when that neighbor is gone, owners' blocks come after
+  the layout's: owners in the order registered, each owner's blocks in its own order.
+- A whole-document `margin apply` writes the layout: blocks it carries under an owned prefix
+  are ignored, and the owners' blocks stay as their owners left them.
 
 `margin show <board> <id> --json`: one block.
 
@@ -231,8 +250,17 @@ margin owner add fetcher --board reviews --owns ci --expect-every 10m   # once; 
   string prefix: never `city`); `--owns '*'` is the whole board. Only `--as fetcher` may write
   them, and it may write nothing else: either mistake is exit 1 and nothing is written. One
   id has one owner; an overlapping registration is refused.
-- A write is all or nothing. One that changes nothing costs no revision and still counts as a
-  write for staleness.
+- A write is all or nothing. It moves the owner's own revision (`doc.owned["owner:fetcher"].rev`)
+  and never the board's `rev`. One that changes nothing moves neither and still counts as a
+  write for staleness. The `rev` that `margin apply --as` prints is the board's, unchanged.
+- An owner's block goes under one of its own blocks, at the top level, or under a block of the
+  layout (`"parent": "<id>"`: the container it fills). A parent that is not in the layout is
+  refused (exit 1) with a message that names it. The layout's writer may move or remove that
+  container: removed, the owner's rows under it are kept and not drawn until it is back
+  (`margin doctor` says so).
+- `margin owner rm` (and `margin handler rm`) turns the blocks it wrote into ordinary layout
+  content, where anyone may write them: nothing disappears. `margin rm <board> --yes` also
+  unregisters the owners and handlers of that board.
 - **Staleness**: with `--expect-every`, once the last write is older than that the rows show
   `◷ stale` in the pane and `stale` is true in `margin owner ls --json`:
   `{"v":1,"owners":[{"name","board","owns","expect_every","added","last_write","stale"}]}`.

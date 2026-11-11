@@ -346,6 +346,32 @@ fn an_owner_writes_its_ids_and_only_those() {
     assert_eq!((ls["owners"][0]["stale"].as_bool(), ls["owners"][0]["expect_every"].as_f64()), (Some(false), Some(600.0)));
     // the owner's row still takes the person's action
     assert_eq!(t.run(&["act", "reviews", "ci-1", "refresh"], "").0, 0);
+    // the board's rev is its layout's: two owner writes did not move it. The owner's own is in
+    // doc.owned, and moves by one per write that changed something
+    let doc = t.json(&["show", "reviews", "--json"])["doc"].clone();
+    has(&doc, &[("rev", "number"), ("owned", "object"), ("updated", "string"), ("by", "string")], "a board with an owner");
+    has(&doc["owned"]["owner:fetcher"], &[("rev", "number"), ("updated", "string")], "an owned entry");
+    assert_eq!((doc["rev"].as_u64(), doc["owned"]["owner:fetcher"]["rev"].as_u64(), doc["by"].as_str()), (Some(1), Some(2), Some("owner:fetcher")));
+    assert!(rfc3339(&doc["owned"]["owner:fetcher"]["updated"]) && TOPIC.contains("`doc.owned`") && TOPIC.contains("\"owner:<name>\" | \"handler:<name>\""));
+    assert!(doc["blocks"].as_array().unwrap().iter().any(|b| b["id"] == json!("ci-1")), "a read is the composed board");
+    assert_eq!(t.run(&["apply", "reviews", "--as", "fetcher"], &row("ci-1")).0, 0);
+    assert_eq!(t.json(&["show", "reviews", "--json"])["doc"]["owned"]["owner:fetcher"]["rev"], json!(2), "the same again: no revision");
+    // --base-rev is about the layout: it holds after any number of owner writes, and is stale
+    // only after a layout write
+    assert!(TOPIC.contains("the layout has not changed since N"));
+    let wrote: Value = serde_json::from_str(&t.ok(&["apply", "reviews", "--base-rev", "1", "--json"], r#"{"op":"set","id":"t1","fields":{"text":"still rev 1"}}"#)).unwrap();
+    assert_eq!(wrote, json!({"v": 1, "artifact": "reviews", "rev": 2}));
+    let (code, _, err) = t.run(&["apply", "reviews", "--base-rev", "1"], r#"{"op":"set","id":"t1","fields":{"text":"too late"}}"#);
+    assert!(code == 1 && err.contains("stale base"), "{err}");
+    // a parent outside the layout is refused and named; one in the layout takes the row
+    let under = |id: &str, parent: &str| format!(r#"{{"type":"tr","id":"{id}","parent":"{parent}","cells":{{"title":"x"}}}}"#);
+    let (code, _, err) = t.run(&["apply", "reviews", "--as", "fetcher"], &under("ci-9", "nowhere"));
+    assert!(code == 1 && err.contains("\"nowhere\"") && err.contains("layout"), "{err}");
+    // unregistered: its rows are ordinary content, and the board says nothing is owned
+    t.ok(&["owner", "rm", "fetcher"], "");
+    let doc = t.json(&["show", "reviews", "--json"])["doc"].clone();
+    assert!(doc.get("owned").is_none() && doc["blocks"].as_array().unwrap().iter().any(|b| b["id"] == json!("ci-1")), "{doc}");
+    assert_eq!(t.run(&["set", "reviews", "ci-1", "text", "mine now"], "").0, 0);
 }
 
 /// 0 done, 3 not found, 1 everything else; on failure stdout is empty and the message is on

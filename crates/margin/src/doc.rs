@@ -605,6 +605,22 @@ pub struct Doc {
     /// action of its own under that key, and with nothing focused.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub actions: Value,
+    /// The owners and handlers whose blocks are part of this board, by who they write as
+    /// (`owner:<name>`, `handler:<name>`): each one's own revision and when its blocks last
+    /// changed. Filled when the board is read (store.rs `compose`), never stored in doc.json:
+    /// `rev` above is the layout's and does not move when an owner writes; these do.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub owned: std::collections::BTreeMap<String, OwnedRev>,
+}
+
+/// One owner's or handler's part of a board, as a reader sees it (`show --json`, `doc.owned`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct OwnedRev {
+    /// Goes up by one each time the owner's blocks change.
+    pub rev: u64,
+    /// When they last changed (RFC 3339); empty before the first change.
+    #[serde(default)]
+    pub updated: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -714,7 +730,7 @@ impl Doc {
     /// when it is given no document.
     #[cfg(test)]
     pub fn empty(id: &str) -> Doc {
-        Doc { v: 1, id: id.into(), title: id.into(), kind: String::new(), rev: 0, icon: None, blocks: vec![], updated: String::new(), sessions: vec![], by: String::new(), hints: vec![], purpose: String::new(), actions: Value::Null }
+        Doc { v: 1, id: id.into(), title: id.into(), kind: String::new(), rev: 0, icon: None, blocks: vec![], updated: String::new(), sessions: vec![], by: String::new(), hints: vec![], purpose: String::new(), actions: Value::Null, owned: Default::default() }
     }
     /// The actions on offer for block `id` (None or empty: the board with nothing focused): the
     /// block's own, then its table's when it is a table row, then the board's; a nearer one wins

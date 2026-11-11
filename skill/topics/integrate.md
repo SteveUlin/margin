@@ -15,7 +15,7 @@ command run from cron or another directory must name it: the pane's bottom line 
 
 ```sh
 margin ls --json                          # {"v":1,"artifacts":[{"id","rev","updated","title","kind"}]}
-margin show BOARD --json                  # {"doc": the whole document, "state": {"decisions": {id: {kind, value, by, at}}}}
+margin show BOARD --json                  # {"doc": the whole board (doc.rev: the layout's; doc.owned: each owner's rev), "state": {"decisions": {id: {kind, value, by, at}}}}
 margin show BOARD ID --json               # {"v":1,"artifact","rev","block":{…},"decision":{…}|null}
 margin events --json [--name GLOB] [--since N] [--cursor NAME --no-commit]   # one event per line
 margin handler ls --json                  # handlers: state, cursor, events waiting, last run
@@ -206,6 +206,15 @@ margin owner ls                                                       # last wri
 - `--as` takes components and ops (the line grammar a handler prints, `margin help handlers`),
   all or nothing.
   A write that changes nothing makes no revision and still counts as a write.
+- One writer per file: the owner's rows are kept apart from the board's layout, so a write
+  `--as queue` never moves the board's `rev`. Whoever edits the layout with `--base-rev N` (an
+  AI assistant, usually) is refused only when the layout itself changed since N, however often
+  the tool wrote in between. The owner's own revision is `doc.owned["owner:queue"].rev` in
+  `margin show runs --json`.
+- A row may sit under a container of the layout that is not the owner's: `"parent": "<its id>"`
+  (a table the layout defines and the tool fills with `tr` rows, a section, a tab). The
+  container must be there: a missing parent is refused with a message that names it.
+- `margin owner rm queue` leaves its rows on the board as ordinary content.
 - `--expect-every 10m`: once the last write is older than that, the owner's rows show `◷ stale ·
   last updated 3h ago, expected every 10m`, the board's tab gets the failure mark, and `owner ls`
   says STALE. margin runs and restarts nothing: the age of the last write is the one thing it

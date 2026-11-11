@@ -5,7 +5,14 @@
 //! review mark's pid, the daemon's flock). The doctor is how the leftovers stop piling up, and
 //! how a person sees them.
 //!
-//! It never touches a board, an event, a named cursor or a registration.
+//! It never touches an event, a named cursor or a registration, and of a board only where its
+//! blocks are kept, never what they say: `--fix` finishes a move of an owner's rows out of
+//! doc.json into the owner's own file (what the board's next write would do anyway), and gives
+//! the rows of an owned file nobody claims back to the layout.
+//!
+//! It reports what a board's owners wrote that is not drawn: rows whose container left the
+//! layout (kept in the owner's file until the container is back or the owner writes them
+//! elsewhere).
 //!
 //! It also reads what the removed feed runner left in a store (`feeds.json`, `feeds/*.log`,
 //! `feeds/*.status.json`): margin no longer runs a command on a timer, a file watch or as a
@@ -23,6 +30,12 @@ pub enum Fix {
     /// Files of the removed feed runner: `--fix` moves them into this directory of `.archive/`
     /// (never deletes), keeping each file's path below the project.
     Archive(Vec<PathBuf>),
+    /// Blocks under an owner's prefix still in a board's doc.json: `--fix` moves them into the
+    /// owner's file (`Store::settle`), as the board's next write would.
+    Move(String),
+    /// An owned file nobody claims, as (board, kind, name): `--fix` puts its blocks into the
+    /// layout (`Store::release`).
+    Release(String, String, String),
     /// Something to know or to do by hand; `--fix` leaves it.
     Note,
 }
@@ -251,6 +264,37 @@ pub fn check(st: &Store, days: u32) -> Vec<Finding> {
             }
         }
     }
+    // one writer per file: what of a board's owned files is not where it should be
+    for d in &docs {
+        let i = st.inspect(&d.id);
+        let n = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+        for (by, parent, ids) in &i.hidden {
+            let who = by.replacen(':', " ", 1);
+            let shown: Vec<&str> = ids.iter().take(4).map(|s| s.as_str()).collect();
+            let more = if ids.len() > shown.len() { format!(" and {} more", ids.len() - shown.len()) } else { String::new() };
+            out.push(Finding {
+                what: format!(
+                    "board {}: {} of {who} ({}{more}) {} not drawn: the container {parent:?} is no longer in the layout. They are kept in {}/owned/{}.json; add {parent:?} back to the layout, or have {who} write them under another parent",
+                    d.id,
+                    n(ids.len(), "block"),
+                    shown.join(" "),
+                    if ids.len() == 1 { "is" } else { "are" },
+                    d.id,
+                    by.replacen(':', ".", 1)
+                ),
+                fix: Fix::Note,
+            });
+        }
+        for (c, k) in &i.legacy {
+            out.push(Finding { what: format!("board {}: {} under the prefix of {} {} {} still in doc.json (written before owners had files of their own); the board's next write moves them into {}/owned/{}.{}.json", d.id, n(*k, "block"), c.kind, c.feed, if *k == 1 { "is" } else { "are" }, d.id, c.kind, c.feed), fix: Fix::Move(d.id.clone()) });
+        }
+        for (kind, name, k) in &i.unclaimed {
+            out.push(Finding { what: format!("board {}: owned/{kind}.{name}.json holds {} and no {kind} {name} is registered on the board, so they are not drawn: --fix puts them into the layout (or register it again: its rows are still there)", d.id, n(*k, "block")), fix: Fix::Release(d.id.clone(), kind.clone(), name.clone()) });
+        }
+        for e in &i.corrupt {
+            out.push(Finding { what: format!("{e}: its blocks are not drawn and its owner's writes are refused; fix the file or move it aside"), fix: Fix::Note });
+        }
+    }
     // files margin no longer writes or reads
     old_feeds(st, &mut out);
     for d in &docs {
@@ -306,6 +350,30 @@ pub fn run(st: &Store, fix: bool, days: u32) -> String {
                             out += &format!("{tag}{}\n      now in {}\n", f.what, rel(st, &dest));
                             continue;
                         }
+                        Err(e) => {
+                            out += &format!("stale {} (not moved: {e})\n", f.what);
+                            continue;
+                        }
+                    }
+                }
+            }
+            Fix::Move(board) => {
+                fixable += 1;
+                if fix {
+                    match st.settle(board) {
+                        Ok(()) => fixed += 1,
+                        Err(e) => {
+                            out += &format!("stale {} (not moved: {e})\n", f.what);
+                            continue;
+                        }
+                    }
+                }
+            }
+            Fix::Release(board, kind, name) => {
+                fixable += 1;
+                if fix {
+                    match st.release(board, kind, name) {
+                        Ok(_) => fixed += 1,
                         Err(e) => {
                             out += &format!("stale {} (not moved: {e})\n", f.what);
                             continue;

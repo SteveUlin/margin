@@ -143,6 +143,10 @@ impl Registry {
     pub fn claims(&self, art: &str) -> Vec<crate::store::Claim> {
         self.handlers.iter().filter(|h| h.board == art && !h.owns.is_empty()).map(|h| crate::store::Claim { feed: h.name.clone(), owns: h.owns.clone(), kind: "handler" }).collect()
     }
+    /// Every claim in the registry, with its board.
+    pub fn all_claims(&self) -> Vec<(String, crate::store::Claim)> {
+        self.handlers.iter().filter(|h| !h.owns.is_empty()).map(|h| (h.board.clone(), crate::store::Claim { feed: h.name.clone(), owns: h.owns.clone(), kind: "handler" })).collect()
+    }
     fn check(h: &Handler) -> Result<(), String> {
         if !valid_id(&h.name) {
             return Err(format!("bad handler name {:?}: letters, digits, - and _", h.name));
@@ -205,11 +209,18 @@ pub fn missing(name: &str) -> String {
 }
 
 /// Change the registry under the project lock.
+///
+/// A handler that stops owning a prefix (removed, or set to another board or prefix) gives its
+/// blocks back to the board's layout first, where they are ordinary content again; one that
+/// starts owning a prefix takes the blocks already under it into its own file (store.rs).
 pub fn edit_registry<T>(st: &Store, f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<T, String> {
     let _l = st.lock().map_err(|e| e.to_string())?;
     let mut r = Registry::load_strict(&st.dir())?;
+    let before = r.all_claims();
     let out = f(&mut r)?;
+    st.claims_going_locked(&before, &r.all_claims())?;
     r.save(&st.dir())?;
+    st.claims_came_locked(&before, &r.all_claims());
     Ok(out)
 }
 
@@ -645,7 +656,8 @@ impl Worker {
         }
         if self.verbose {
             match rev {
-                Some(r) => println!("{} rev {r}", self.h.board),
+                // the handler's own file: the board's rev is its layout's, and did not move
+                Some(r) => println!("{}: {} rev {r}", self.h.board, self.h.by()),
                 None if !self.h.board.is_empty() && errs.is_empty() => println!("{} unchanged", self.h.board),
                 None => {}
             }
@@ -871,7 +883,8 @@ mod tests {
         assert_eq!(got.iter().map(|e| (e["seq"].as_u64().unwrap(), e["kind"].as_str().unwrap().to_string())).collect::<Vec<_>>(), [(a, "mine.one".to_string()), (b, "mine.two".to_string())], "one run, both events, nothing else");
         assert_eq!(got[0]["value"], json!(1));
         let d = st.load("board").unwrap();
-        assert_eq!((d.find("h-1").unwrap().s("text"), d.by.as_str()), ("handled", "handler:h"));
+        assert_eq!((d.find("h-1").unwrap().s("text"), d.rev, d.owned["handler:h"].rev), ("handled", 1, 1), "in the handler's own file: the layout's rev did not move");
+        assert!(st.art("board").join("owned/handler.h.json").exists());
         let done: Vec<Event> = st.events().into_iter().filter(|e| e.kind == "mine.done").collect();
         assert_eq!(done.len(), 1, "its own emit matches its glob and is not handed back to it");
         assert_eq!((done[0].by.as_str(), done[0].via.as_str(), done[0].artifact.as_str(), &done[0].value), ("handler:h", "handler", "board", &json!({"n": 1})));

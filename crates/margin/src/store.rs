@@ -10,17 +10,26 @@
 //!                         (`margin events --cursor`, a job's `job.<name>`)
 //!   delivered/<session>   the same thing for a Claude session: the last seq its hooks handed it
 //!   handlers.json  owners.json  data.json   the registries      daemon.lock|.pid
-//!   <artifact>/doc.json   content (Claude)        state.json  decisions (sulin)
+//!   <artifact>/doc.json   the LAYOUT: structure and authored text (layout writers only)
+//!              owned/owner.<name>.json  owned/handler.<name>.json
+//!                                the blocks under one owner's or handler's prefix (only it writes)
+//!              state.json        decisions (sulin)
 //!              view/<pane>.json  folds, focus, scroll (the pane)
 //! ```
 //!
+//! One writer per file. A board is read COMPOSED (`Store::load`): the layout with each owner's
+//! blocks put in under their parents. An owner's write touches its own file and nothing else, so
+//! the board's `rev` (the layout's) moves only when the layout changes.
+//!
 //! Writes go to a temp file and `rename` into place, so the renderer never reads half a file.
 
-use crate::doc::{Doc, Op};
+use crate::doc::{Block, Doc, Op, OwnedRev};
 use crate::util::{now_rfc3339, slug};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -213,6 +222,294 @@ pub struct Claim {
     pub kind: &'static str,
 }
 
+impl Claim {
+    /// Who the claim's writes are logged as, and its key in a board's `owned` map:
+    /// `owner:<name>` or `handler:<name>`.
+    pub fn by(&self) -> String {
+        format!("{}:{}", self.kind, self.feed)
+    }
+}
+
+/// One owner's or handler's blocks on one board: the file `<board>/owned/<kind>.<name>.json`.
+/// Only that owner writes it (`margin apply --as`, a handler's commit); a layout write never does.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Owned {
+    #[serde(default = "crate::util::v1")]
+    pub v: u64,
+    /// Who writes this file: `owner:<name>` or `handler:<name>`.
+    #[serde(default)]
+    pub by: String,
+    /// The id prefix it held when it last wrote.
+    #[serde(default)]
+    pub owns: String,
+    /// This file's own revision: up by one each time its blocks change.
+    #[serde(default)]
+    pub rev: u64,
+    /// When its blocks last changed (RFC 3339). The file's mtime is the owner's last write,
+    /// changed or not: the staleness clock (owner.rs).
+    #[serde(default)]
+    pub updated: String,
+    /// The board's title as a whole-board (`*`) owner set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub blocks: Vec<Entry>,
+}
+
+/// One owned block (with its children) and where it sits in the layout.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Entry {
+    /// The layout block it sits under; absent: the top level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Its place among the parent's layout children: right after the one with this id, or
+    /// first when empty. Absent (or naming a sibling that is gone): after all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    pub block: Block,
+}
+
+impl Owned {
+    fn new(c: &Claim) -> Owned {
+        Owned { v: 1, by: c.by(), owns: c.owns.clone(), rev: 0, updated: String::new(), title: None, blocks: Vec::new() }
+    }
+}
+
+/// What `margin doctor` says about one board's owned files (`Store::inspect`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Inspect {
+    /// Owned blocks whose parent is not in the layout: kept in their file, not drawn.
+    /// (who, the missing parent, the blocks' ids)
+    pub hidden: Vec<(String, String, Vec<String>)>,
+    /// Owned files nobody registered claims: (kind, name, blocks). Not drawn.
+    pub unclaimed: Vec<(String, String, usize)>,
+    /// Blocks under a claimed prefix still in doc.json (a board from before owners had files,
+    /// or an interrupted move): (the claim, how many). The next write to the board moves them.
+    pub legacy: Vec<(Claim, usize)>,
+    /// Owned files that do not parse: not drawn, and their owner's writes are refused.
+    pub corrupt: Vec<String>,
+}
+
+// ------------------------------------------------------------------ reading files once
+
+/// A file as last read: (length, mtime, inode). A write replaces the file by rename, so any
+/// write changes the inode even inside one tick of the clock.
+type Stamp = (u64, Option<std::time::SystemTime>, u64);
+
+thread_local! {
+    /// Parsed store files by path, kept while their stamp holds: a board that has not changed is
+    /// not read again, and a change to one owned file reads that file only.
+    static FILES: RefCell<HashMap<PathBuf, (Stamp, Rc<dyn std::any::Any>)>> = RefCell::new(HashMap::new());
+    /// Reads of store files that went to the disk on this thread, and their bytes (tests and
+    /// the measurements in the docs count them; a cache hit is neither).
+    static FILE_READS: Cell<u64> = const { Cell::new(0) };
+    static FILE_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// (reads, bytes) of store files (doc.json, owned files, the registries) on this thread so far.
+#[cfg(test)]
+pub fn file_reads() -> (u64, u64) {
+    (FILE_READS.with(|c| c.get()), FILE_BYTES.with(|c| c.get()))
+}
+
+fn stamp(p: &Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(p).ok()?;
+    Some((m.len(), m.modified().ok(), m.ino()))
+}
+
+/// The JSON file at `p`, parsed: `Ok(None)` when it is not there. `fresh`: read it now whatever
+/// was kept (every writer, under the lock: a read-modify-write never starts from a kept copy).
+fn cached<T: for<'a> Deserialize<'a> + 'static>(p: &Path, fresh: bool) -> Result<Option<Rc<T>>, String> {
+    let Some(st) = stamp(p) else {
+        FILES.with(|f| f.borrow_mut().remove(p));
+        return Ok(None);
+    };
+    if !fresh {
+        let hit = FILES.with(|f| f.borrow().get(p).filter(|(s, _)| *s == st).map(|(_, v)| v.clone()));
+        if let Some(Ok(v)) = hit.map(|v| v.downcast::<Result<Rc<T>, String>>()) {
+            return (*v).clone().map(Some);
+        }
+    }
+    let r: Result<Rc<T>, String> = match fs::read(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => Err(e.to_string()),
+        Ok(b) => {
+            FILE_READS.with(|c| c.set(c.get() + 1));
+            FILE_BYTES.with(|c| c.set(c.get() + b.len() as u64));
+            serde_json::from_slice::<T>(&b).map(Rc::new).map_err(|e| e.to_string())
+        }
+    };
+    FILES.with(|f| f.borrow_mut().insert(p.to_path_buf(), (st, Rc::new(r.clone()) as Rc<dyn std::any::Any>)));
+    r.map(Some)
+}
+
+// ------------------------------------------------------------------ layout + owned = the board
+
+fn find_block_mut<'a>(bs: &'a mut Vec<Block>, id: &str) -> Option<&'a mut Block> {
+    for b in bs.iter_mut() {
+        if b.id == id {
+            return Some(b);
+        }
+        if let Some(x) = find_block_mut(&mut b.children, id) {
+            return Some(x);
+        }
+    }
+    None
+}
+
+/// Take out of `blocks` every subtree whose root `which` gives to a writer (by index into
+/// `out`), recording where it sat: its parent, and the nearest sibling before it that stays
+/// (`""`: none, it was first). In a list where nothing stays the place is left out: "after the
+/// layout's own children", which is where a provider's rows go in a container it fills.
+fn extract(blocks: &mut Vec<Block>, parent: Option<&str>, which: &dyn Fn(&str) -> Option<usize>, out: &mut [Vec<Entry>]) {
+    let old = std::mem::take(blocks);
+    let stays = old.iter().any(|b| which(&b.id).is_none());
+    let mut prev = String::new();
+    for mut b in old {
+        match which(&b.id) {
+            Some(i) => out[i].push(Entry { parent: parent.map(String::from), after: stays.then(|| prev.clone()), block: b }),
+            None => {
+                let id = b.id.clone();
+                extract(&mut b.children, Some(&id), which, out);
+                prev = id;
+                blocks.push(b);
+            }
+        }
+    }
+}
+
+/// Put each owner's blocks into `d` under their parents: the parent's own children keep their
+/// order, an owned block goes right after the sibling it names (or first, or after them all),
+/// owners in the order given (registration), each owner's blocks in its file's order. Returns
+/// the entries whose parent is not in `d`, as (owner, entry) indexes: they are left out.
+fn insert_owned(d: &mut Doc, owners: &[(&Claim, &Owned)]) -> Vec<(usize, usize)> {
+    let mut groups: Vec<(Option<&str>, Vec<(usize, usize)>)> = Vec::new();
+    for (oi, (_, o)) in owners.iter().enumerate() {
+        for (ei, e) in o.blocks.iter().enumerate() {
+            match groups.iter_mut().find(|(p, _)| *p == e.parent.as_deref()) {
+                Some(g) => g.1.push((oi, ei)),
+                None => groups.push((e.parent.as_deref(), vec![(oi, ei)])),
+            }
+        }
+    }
+    let mut hidden = Vec::new();
+    for (parent, members) in groups {
+        let list = match parent {
+            None => Some(&mut d.blocks),
+            Some(p) => find_block_mut(&mut d.blocks, p).map(|b| &mut b.children),
+        };
+        let Some(list) = list else {
+            hidden.extend(members);
+            continue;
+        };
+        let own = std::mem::take(list);
+        let (mut first, mut last): (Vec<Block>, Vec<Block>) = Default::default();
+        let mut mid: HashMap<&str, Vec<Block>> = HashMap::new();
+        for (oi, ei) in members {
+            let e = &owners[oi].1.blocks[ei];
+            match e.after.as_deref() {
+                Some("") => first.push(e.block.clone()),
+                Some(x) if own.iter().any(|b| b.id == x) => mid.entry(x).or_default().push(e.block.clone()),
+                _ => last.push(e.block.clone()),
+            }
+        }
+        list.append(&mut first);
+        for b in own {
+            let follow = mid.remove(b.id.as_str());
+            list.push(b);
+            list.extend(follow.into_iter().flatten());
+        }
+        list.append(&mut last);
+    }
+    hidden
+}
+
+/// The board as every reader gets it: `layout` with each owner's blocks in place, and each
+/// owner's revision in `owned`. A block the layout still holds under a prefix whose owner has a
+/// file is left out: the file is the truth (a move from doc.json into the file that was
+/// interrupted leaves the block in both). Returns the entries that are not drawn, too.
+fn compose(layout: &Doc, owners: &[(&Claim, &Owned)]) -> (Doc, Vec<(usize, usize)>) {
+    let mut d = layout.clone();
+    d.owned.clear();
+    if owners.is_empty() {
+        return (d, Vec::new());
+    }
+    let filed = |id: &str| owners.iter().any(|(c, _)| owns(&c.owns, id));
+    let mut any = false;
+    crate::doc::walk(&layout.blocks, &mut |b, _, _| any |= filed(&b.id));
+    if any {
+        extract(&mut d.blocks, None, &|id| filed(id).then_some(0), &mut [Vec::new()]);
+    }
+    for (c, o) in owners {
+        d.owned.insert(c.by(), OwnedRev { rev: o.rev, updated: o.updated.clone() });
+        if let Some(t) = &o.title {
+            d.title = t.clone();
+        }
+        // `updated` and `by` are the board's as a reader knows them: its last change, whoever
+        // made it
+        if !o.updated.is_empty() && o.updated >= d.updated {
+            d.updated = o.updated.clone();
+            d.by = c.by();
+        }
+    }
+    let hidden = insert_owned(&mut d, owners);
+    (d, hidden)
+}
+
+fn count_blocks(bs: &[Block]) -> usize {
+    let mut n = 0;
+    crate::doc::walk(bs, &mut |_, _, _| n += 1);
+    n
+}
+
+/// A board's files as a writer holds them under the lock: read fresh, and already settled
+/// (`Store::settle_locked`), so the layout holds no block under a claimed prefix.
+struct Settled {
+    layout: Doc,
+    claims: Vec<Claim>,
+    /// Each claim's file, by the claim's index; None: it has not written yet.
+    files: Vec<Option<Owned>>,
+}
+
+impl Settled {
+    /// The owned block `id` when it is the root of an entry: (who owns it, the entry).
+    fn entry(&self, id: &str) -> Option<(&Claim, &Entry)> {
+        self.claims.iter().zip(&self.files).find_map(|(c, f)| f.as_ref()?.blocks.iter().find(|e| e.block.id == id).map(|e| (c, e)))
+    }
+
+    /// A layout op that names an owner's block as the sibling to land beside. The layout does
+    /// not hold that block, so `after` it becomes the same place in the layout's own terms (the
+    /// owned block keeps the place its file records, and the new block follows it). `before`
+    /// it cannot be said in the layout alone, and is refused.
+    fn place(&self, op: &Op) -> Result<Op, String> {
+        let (before, after) = match op {
+            Op::Add { before, after, .. } | Op::Move { before, after, .. } => (before, after),
+            _ => return Ok(op.clone()),
+        };
+        if let Some((c, _)) = before.as_deref().and_then(|x| self.entry(x)) {
+            let x = before.as_deref().unwrap_or("");
+            return Err(format!("{x:?} belongs to {} `{}`, and its place is kept in that owner's file: a layout block cannot be put before it. Use --after {x}, or name a block of the layout", c.kind, c.feed));
+        }
+        let Some((_, e)) = after.as_deref().and_then(|x| self.entry(x)) else { return Ok(op.clone()) };
+        let empty = Vec::new();
+        let sibs = match &e.parent {
+            None => &self.layout.blocks,
+            Some(p) => self.layout.find(p).map(|b| &b.children).unwrap_or(&empty),
+        };
+        let (b, a) = match e.after.as_deref() {
+            Some("") => (sibs.first().map(|b| b.id.clone()), None),
+            Some(x) if sibs.iter().any(|b| b.id == x) => (None, Some(x.to_string())),
+            _ => (None, sibs.last().map(|b| b.id.clone())),
+        };
+        Ok(match op {
+            Op::Add { block, .. } => Op::Add { parent: e.parent.clone(), block: block.clone(), before: b, after: a },
+            Op::Move { id, .. } => Op::Move { id: id.clone(), parent: if b.is_none() && a.is_none() { e.parent.clone() } else { None }, before: b, after: a },
+            _ => unreachable!(),
+        })
+    }
+}
+
 /// Does prefix `p` cover `id`? `*` covers everything; the empty prefix covers nothing. A prefix
 /// is a namespace, not a string prefix: `ci` covers `ci` and `ci-…` / `ci_…`, never `city`
 /// (2026-11-06 review: `--owns ci` claimed Claude's `city`, `circle`, `cite`). A prefix that
@@ -248,8 +545,12 @@ pub fn check_owner(op: &Op, doc: &Doc, w: &Writer, claims: &[Claim]) -> Result<(
             if let Some(id) = ids.iter().find(|id| !owns(p, id)) {
                 return Err(format!("{who} may only write the ids {p} and {p}-…; {id:?} is outside its prefix"));
             }
+            // outside its prefix a parent is a container of the layout, which the owner fills
+            // and does not write. It must be there: the layout is somebody else's file
             if let Some(par) = parent.filter(|par| !owns(p, par)) {
-                return Err(format!("{who} may only insert into its own components or the top level, not into {par:?}"));
+                if doc.find(&par).is_none() {
+                    return Err(format!("{who} writes under {par:?}, and the layout of {} has no such block (removed, or not created yet): add that container to the layout first, or write under another parent", doc.id));
+                }
             }
         }
         None => {
@@ -512,14 +813,268 @@ impl Store {
         v
     }
 
-    pub fn load(&self, a: &str) -> Result<Doc, String> {
-        let s = fs::read_to_string(self.doc_path(a)).map_err(|_| self.missing(a))?;
-        let d: Doc = serde_json::from_str(&s).map_err(|e| format!("{a}/doc.json: {e}"))?;
+    /// Where the owners' and handlers' files of board `a` are.
+    pub fn owned_dir(&self, a: &str) -> PathBuf {
+        self.art(a).join("owned")
+    }
+    /// The file holding the blocks of claim `c` on board `a`.
+    pub fn owned_path(&self, a: &str, c: &Claim) -> PathBuf {
+        self.owned_dir(a).join(format!("{}.{}.json", c.kind, c.feed))
+    }
+
+    /// The owned files of board `a` as (kind, name), from the directory alone.
+    fn owned_files(&self, a: &str) -> Vec<(String, String)> {
+        let Ok(rd) = fs::read_dir(self.owned_dir(a)) else { return vec![] };
+        let mut v: Vec<(String, String)> = rd
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|n| n.strip_suffix(".json").and_then(|n| n.split_once('.')).map(|(k, n)| (k.to_string(), n.to_string())))
+            .filter(|(k, n)| (k == "owner" || k == "handler") && crate::util::valid_id(n))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The layout of board `a`: doc.json and nothing else.
+    fn layout(&self, a: &str, fresh: bool) -> Result<Rc<Doc>, String> {
+        let d: Rc<Doc> = cached(&self.doc_path(a), fresh).map_err(|e| format!("{a}/doc.json: {e}"))?.ok_or_else(|| self.missing(a))?;
         // design §3 "Versions": a newer format is refused, not read as v 1 and rewritten
         if d.v != 1 {
             return Err(format!("{a}/doc.json: version {}: this margin reads v 1", d.v));
         }
         Ok(d)
+    }
+
+    /// The claims on board `a` for a reader, from the registries as last read (re-read only when
+    /// one changed). A registry that will not parse claims nothing here: the board still draws.
+    fn claims_cached(&self, a: &str) -> Vec<Claim> {
+        let d = self.dir();
+        let mut v = cached::<crate::handler::Registry>(&crate::handler::Registry::path(&d), false).ok().flatten().map(|r| r.claims(a)).unwrap_or_default();
+        v.extend(cached::<crate::owner::Registry>(&crate::owner::Registry::path(&d), false).ok().flatten().map(|r| r.claims(a)).unwrap_or_default());
+        v
+    }
+
+    /// The claims on `a` that have a file, in registration order, with the file as last read.
+    /// An owned file that will not parse is skipped (`margin doctor` names it).
+    fn owners_of(&self, a: &str) -> Vec<(Claim, Rc<Owned>)> {
+        // no owned file at all: nothing to compose, and the registries need not be looked at
+        if self.owned_files(a).is_empty() {
+            return Vec::new();
+        }
+        self.claims_cached(a).into_iter().filter_map(|c| cached::<Owned>(&self.owned_path(a, &c), false).ok().flatten().filter(|o| o.v == 1).map(|o| (c, o))).collect()
+    }
+
+    /// The board as every reader gets it (`margin show`, `render`, the pane, an action's
+    /// snapshot, a handler): the layout with each owner's blocks in place (`compose`). Its `rev`
+    /// is the layout's; each owner's is in `owned`. Files are read once and kept by (length,
+    /// mtime, inode): a board that has not changed costs a few `stat` calls.
+    pub fn load(&self, a: &str) -> Result<Doc, String> {
+        let layout = self.layout(a, false)?;
+        let owners = self.owners_of(a);
+        let refs: Vec<(&Claim, &Owned)> = owners.iter().map(|(c, o)| (c, &**o)).collect();
+        Ok(compose(&layout, &refs).0)
+    }
+
+    /// What is not as it should be in board `a`'s files, for `margin doctor`.
+    pub fn inspect(&self, a: &str) -> Inspect {
+        let mut out = Inspect::default();
+        let Ok(layout) = self.layout(a, true) else { return out };
+        let claims = self.claims(a);
+        let mut owners: Vec<(Claim, Owned)> = Vec::new();
+        for (kind, name) in self.owned_files(a) {
+            let p = self.owned_dir(a).join(format!("{kind}.{name}.json"));
+            let rel = format!("{a}/owned/{kind}.{name}.json");
+            match cached::<Owned>(&p, true) {
+                Ok(Some(o)) if o.v == 1 => match claims.iter().find(|c| c.kind == kind && c.feed == name) {
+                    Some(c) => owners.push((c.clone(), (*o).clone())),
+                    None => out.unclaimed.push((kind, name, o.blocks.iter().map(|e| count_blocks(std::slice::from_ref(&e.block))).sum())),
+                },
+                Ok(Some(o)) => out.corrupt.push(format!("{rel}: version {}: this margin reads v 1", o.v)),
+                Ok(None) => {}
+                Err(e) => out.corrupt.push(format!("{rel}: {e}")),
+            }
+        }
+        for c in &claims {
+            let mut n = 0;
+            crate::doc::walk(&layout.blocks, &mut |b, _, _| n += owns(&c.owns, &b.id) as usize);
+            if n > 0 {
+                out.legacy.push((c.clone(), n));
+            }
+        }
+        // in registration order, as a reader composes them
+        owners.sort_by_key(|(c, _)| claims.iter().position(|x| x == c));
+        let refs: Vec<(&Claim, &Owned)> = owners.iter().map(|(c, o)| (c, o)).collect();
+        for (oi, ei) in compose(&layout, &refs).1 {
+            let e = &refs[oi].1.blocks[ei];
+            let (by, parent) = (refs[oi].0.by(), e.parent.clone().unwrap_or_default());
+            match out.hidden.iter_mut().find(|(b, p, _)| *b == by && *p == parent) {
+                Some(h) => h.2.push(e.block.id.clone()),
+                None => out.hidden.push((by, parent, vec![e.block.id.clone()])),
+            }
+        }
+        out
+    }
+
+    /// An owned file for a writer: read now, and one that will not parse is an error (a write
+    /// over it would make the loss permanent).
+    fn owned_strict(&self, a: &str, c: &Claim) -> Result<Option<Owned>, String> {
+        let p = self.owned_path(a, c);
+        let what = || format!("{a}/owned/{}.{}.json", c.kind, c.feed);
+        match cached::<Owned>(&p, true).map_err(|e| format!("{}: {e}; nothing was written (fix the file or move it aside)", what()))? {
+            Some(o) if o.v != 1 => Err(format!("{}: version {}: this margin reads v 1", what(), o.v)),
+            o => Ok(o.map(|o| (*o).clone())),
+        }
+    }
+
+    /// Write an owner's file: temp file, fsync, rename. `durable` syncs the directory too: for
+    /// the write that must be on disk before doc.json gives up the same rows.
+    fn write_owned(&self, a: &str, c: &Claim, o: &Owned, durable: bool) -> Result<(), String> {
+        let p = self.owned_path(a, c);
+        let data = serde_json::to_string_pretty(o).unwrap();
+        if durable { write_durable(&p, data.as_bytes()) } else { write_atomic(&p, data.as_bytes()) }.map_err(|e| format!("{}: {e}", p.display()))
+    }
+
+    /// Write the layout as it is, keeping its revision: for a step that moves blocks between
+    /// doc.json and an owner's file, which changes nothing a reader sees.
+    fn write_layout(&self, d: &Doc) -> Result<(), String> {
+        let mut d = d.clone();
+        d.owned.clear();
+        write_durable(&self.doc_path(&d.id), serde_json::to_string_pretty(&d).unwrap().as_bytes()).map_err(|e| e.to_string())
+    }
+
+    /// Under the lock, before any write to board `a`: its layout and its owners' files, read
+    /// now, with every block under a claimed prefix in its owner's file and none in doc.json.
+    ///
+    /// This is the migration of a board written before owners had files (and of rows a layout
+    /// writer put under a prefix before it was claimed): those blocks move out of doc.json into
+    /// the owner's file, here, in the first write anyone makes to the board. The owner's file is
+    /// written and synced first and doc.json rewritten after, so a crash between the two leaves
+    /// the blocks in both, never in neither; and where a block is in both, the file wins (for a
+    /// reader in `compose`, and here, where the copy in doc.json is dropped). The layout keeps
+    /// its revision: nothing a reader sees has changed.
+    fn settle_locked(&self, a: &str) -> Result<Settled, String> {
+        let mut layout = (*self.layout(a, true)?).clone();
+        layout.owned.clear();
+        let claims = self.claims_strict(a)?;
+        let mut files: Vec<Option<Owned>> = claims.iter().map(|c| self.owned_strict(a, c)).collect::<Result<_, _>>()?;
+        let mut theirs = false;
+        crate::doc::walk(&layout.blocks, &mut |b, _, _| theirs |= claims.iter().any(|c| owns(&c.owns, &b.id)));
+        if theirs {
+            let mut out = vec![Vec::new(); claims.len()];
+            extract(&mut layout.blocks, None, &|id| claims.iter().position(|c| owns(&c.owns, id)), &mut out);
+            for (i, entries) in out.into_iter().enumerate() {
+                // a file is already there: what doc.json held is the leftover of a move that was
+                // interrupted after the file was written, and the file is the truth
+                if entries.is_empty() || files[i].is_some() {
+                    continue;
+                }
+                // when they last changed is known only if their owner was the board's last writer
+                let updated = if layout.by == claims[i].by() { layout.updated.clone() } else { String::new() };
+                let o = Owned { rev: 1, updated, blocks: entries, ..Owned::new(&claims[i]) };
+                self.write_owned(a, &claims[i], &o, true)?;
+                // the file's mtime is the owner's last write: moving its rows is not one
+                if claims[i].kind == "owner" {
+                    let wrote = crate::owner::Registry::recorded_write(&self.dir(), &claims[i].feed);
+                    if let (Some(t), Ok(f)) = (wrote, fs::File::options().write(true).open(self.owned_path(a, &claims[i]))) {
+                        let _ = f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(t.max(0.0)));
+                    }
+                }
+                files[i] = Some(o);
+            }
+            // only now: every row doc.json gives up is safe in its owner's file
+            self.write_layout(&layout)?;
+        }
+        Ok(Settled { layout, claims, files })
+    }
+
+    /// `margin doctor --fix`: do now what the next write to `a` would (`settle_locked`).
+    pub fn settle(&self, a: &str) -> Result<(), String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        self.settle_locked(a).map(|_| ())
+    }
+
+    /// Give the blocks of the owned file `<kind>.<name>` on board `a` back to the layout, where
+    /// they become ordinary content: what unregistering an owner or a handler does, so that
+    /// nothing it wrote disappears. doc.json is written (and synced) with the blocks first and
+    /// the file removed after: a crash between the two leaves them in both, and the file wins
+    /// while its claim stands. A block that cannot go back (its parent is not in the layout, or
+    /// the layout now has its id) stays in the file, which then moves to `.archive/`. Returns
+    /// how many entries went into the layout.
+    pub(crate) fn release_locked(&self, a: &str, kind: &str, name: &str) -> Result<usize, String> {
+        if !self.exists(a) {
+            return Ok(0);
+        }
+        let p = self.owned_dir(a).join(format!("{kind}.{name}.json"));
+        if !p.exists() {
+            return Ok(0);
+        }
+        let st = self.settle_locked(a)?;
+        let c = Claim { feed: name.to_string(), owns: String::new(), kind: if kind == "handler" { "handler" } else { "owner" } };
+        let Some(mut o) = self.owned_strict(a, &c)? else { return Ok(0) };
+        let mut d = st.layout.clone();
+        // an id the layout holds already stays behind (a file nobody claimed, whose ids were
+        // free to write since)
+        let taken: HashSet<String> = d.ids().into_iter().collect();
+        let clash = |e: &Entry| {
+            let mut hit = false;
+            crate::doc::walk(std::slice::from_ref(&e.block), &mut |b, _, _| hit |= taken.contains(&b.id));
+            hit
+        };
+        let (keep, go): (Vec<Entry>, Vec<Entry>) = o.blocks.drain(..).partition(clash);
+        o.blocks = go;
+        let hidden = insert_owned(&mut d, &[(&c, &o)]);
+        let moved = o.blocks.len() - hidden.len();
+        let mut left = keep;
+        left.extend(hidden.iter().map(|(_, ei)| o.blocks[*ei].clone()));
+        if let Some(t) = &o.title {
+            d.title = t.clone();
+        }
+        d.normalize()?;
+        if moved > 0 || o.title.is_some() {
+            d.rev = st.layout.rev + 1;
+            d.updated = now_rfc3339();
+            d.by = self.author.clone();
+            self.write_layout(&d)?;
+        }
+        if left.is_empty() {
+            fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        } else {
+            let dir = self.dir().join(".archive");
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let base = format!("{a}-owned-{kind}.{name}-{}", &now_rfc3339()[..10]);
+            let dest = (1..).map(|n| dir.join(if n == 1 { format!("{base}.json") } else { format!("{base}-{n}.json") })).find(|p| !p.exists()).unwrap();
+            o.blocks = left;
+            write_durable(&dest, serde_json::to_string_pretty(&o).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+            fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        Ok(moved)
+    }
+
+    /// `margin doctor --fix` for an owned file nobody claims: its blocks go into the layout.
+    pub fn release(&self, a: &str, kind: &str, name: &str) -> Result<usize, String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        self.release_locked(a, kind, name)
+    }
+
+    /// A registry is about to change, under the lock: `before` and `after` are every (board,
+    /// claim) it holds. A claim that goes (removed, or moved to another board or prefix) gives
+    /// its blocks back to the layout first, so the registry never stops naming a file that
+    /// still holds rows.
+    pub(crate) fn claims_going_locked(&self, before: &[(String, Claim)], after: &[(String, Claim)]) -> Result<(), String> {
+        for (board, c) in before.iter().filter(|x| !after.contains(x)) {
+            self.release_locked(board, c.kind, &c.feed)?;
+        }
+        Ok(())
+    }
+
+    /// The registry changed: a new claim takes the blocks already under its prefix into its
+    /// file now, not at the board's next write. A failure here is left for that write.
+    pub(crate) fn claims_came_locked(&self, before: &[(String, Claim)], after: &[(String, Claim)]) {
+        for (board, _) in after.iter().filter(|x| !before.contains(x)) {
+            if self.exists(board) {
+                let _ = self.settle_locked(board);
+            }
+        }
     }
 
     /// For display: an unparseable state.json reads as empty. Never write this back.
@@ -540,28 +1095,38 @@ impl Store {
         let _ = write_atomic(&self.view_path(a, pane), serde_json::to_string_pretty(v).unwrap().as_bytes());
     }
 
+    /// Write the layout as its next revision. `d` is the layout alone: no owner's block.
     fn save_doc_locked(&self, d: &mut Doc, old: Option<&Doc>, by: &str) -> Result<u64, String> {
         // no copy of the old revision is kept: nothing ever read history.jsonl, and it grew
         // without bound (a board made before 2026-11 may still have one; `margin doctor` lists it)
         d.rev = old.map(|o| o.rev).unwrap_or(0) + 1;
         d.updated = now_rfc3339();
         d.by = by.to_string();
+        d.owned.clear();
         if let (true, Ok(s)) = (by == "claude", std::env::var("CLAUDE_CODE_SESSION_ID")) {
             if !d.sessions.contains(&s) {
                 d.sessions.push(s);
             }
         }
         write_atomic(&self.doc_path(&d.id), serde_json::to_string_pretty(d).unwrap().as_bytes()).map_err(|e| e.to_string())?;
-        self.prune_claude_orphans(d);
+        self.prune_orphans(&d.id);
         Ok(d.rev)
     }
 
     /// Drop decisions Claude (or a feed) made on components that no longer exist: a status on a
     /// row Claude removed is Claude's own bookkeeping, not something sulin decided, so it would
     /// only pile up as orphans. sulin's own decisions stay until Claude has been handed them.
-    fn prune_claude_orphans(&self, d: &Doc) {
+    /// After a write to board `a`, the layout's or an owner's. The board is read composed: a
+    /// decision on an owner's row is on a row that exists.
+    fn prune_orphans(&self, a: &str) {
         // an unparseable state.json is left exactly as it is
-        let Ok(mut st) = self.state_rw(&d.id) else { return };
+        let Ok(mut st) = self.state_rw(a) else { return };
+        // nothing decided (most dashboards): nothing to prune, and the board need not be read
+        if st.decisions.is_empty() {
+            return;
+        }
+        let Ok(d) = self.load(a) else { return };
+        let d = &d;
         let ids: std::collections::HashSet<String> = d.ids().into_iter().collect();
         let before = st.decisions.len();
         // a note is answered once Claude rewrites (or removes) its row
@@ -624,29 +1189,32 @@ impl Store {
         crate::doc::parse_actions(&d.actions, "the document", &crate::app::reserved_keys())?;
         // a doc that exists but won't parse is not a missing doc: replacing it would reset the rev
         // and skip archiving what was there
-        let old = if self.doc_path(&d.id).exists() { Some(self.load(&d.id)?) } else { None };
-        check_base(old.as_ref(), base_rev)?;
-        // a whole-document put must leave every feed-owned component exactly as the feed left it
-        let claims = self.claims_strict(&d.id)?;
-        if !claims.is_empty() {
-            let mut ids: Vec<String> = d.ids();
-            if let Some(o) = &old {
-                ids.extend(o.ids());
-            }
-            for id in ids {
-                if let Some(c) = claims.iter().find(|c| owns(&c.owns, &id)) {
-                    if old.as_ref().and_then(|o| o.find(&id)) != d.find(&id) {
-                        return Err(feed_owned_msg(&format!("{id:?}"), c, &d.id) + "; a whole-document apply must carry owned components through unchanged, so prefer id-addressed ops");
-                    }
-                }
-            }
-            if let (Some(c), Some(o)) = (claims.iter().find(|c| c.owns == "*"), &old) {
-                if o.title != d.title {
+        if !self.doc_path(&d.id).exists() {
+            check_base(None, base_rev)?;
+            // the registries must read even here: a claim on this name may be waiting
+            self.claims_strict(&d.id)?;
+            let rev = self.save_doc_locked(&mut d, None, &self.author)?;
+            // a new board that comes with rows under a prefix already claimed: into that
+            // owner's file at once
+            self.settle_locked(&d.id)?;
+            return Ok(rev);
+        }
+        let st = self.settle_locked(&d.id)?;
+        check_base(Some(&st.layout), base_rev)?;
+        // a whole document is a layout write: what it carries under an owner's prefix (it was
+        // read composed, and sent back) is not the layout's, and is left out. The owners' files
+        // stay exactly as their owners left them
+        if !st.claims.is_empty() {
+            extract(&mut d.blocks, None, &|id| st.claims.iter().any(|c| owns(&c.owns, id)).then_some(0), &mut [Vec::new()]);
+            if let Some((c, f)) = st.claims.iter().zip(&st.files).find(|(c, _)| c.owns == "*") {
+                let shown = f.as_ref().and_then(|o| o.title.clone()).unwrap_or_else(|| st.layout.title.clone());
+                if shown != d.title {
                     return Err(feed_owned_msg("the title", c, &d.id));
                 }
+                d.title = st.layout.title.clone();
             }
         }
-        let rev = self.save_doc_locked(&mut d, old.as_ref(), &self.author)?;
+        let rev = self.save_doc_locked(&mut d, Some(&st.layout), &self.author)?;
         Ok(rev)
     }
 
@@ -688,19 +1256,27 @@ impl Store {
             return Err(self.missing(&o.board));
         }
         self.claim_overlap(&o.board, &o.owns, ("owner", ""))?;
-        r.save(&self.dir())
+        r.save(&self.dir())?;
+        // the blocks already under its prefix are its own from here on: into its file
+        let _ = self.settle_locked(&o.board);
+        Ok(())
     }
 
     /// `margin owner set`: change a registered owner (its last write stays).
     pub fn set_owner(&self, o: crate::owner::Owner) -> Result<(), String> {
         let _l = self.lock().map_err(|e| e.to_string())?;
         let mut r = crate::owner::Registry::load_strict(&self.dir())?;
+        let before = r.all_claims();
         r.set(o.clone())?;
         if !self.exists(&o.board) {
             return Err(self.missing(&o.board));
         }
         self.claim_overlap(&o.board, &o.owns, ("owner", &o.name))?;
-        r.save(&self.dir())
+        // another board or prefix: what it wrote under the old one goes back to that layout
+        self.claims_going_locked(&before, &r.all_claims())?;
+        r.save(&self.dir())?;
+        self.claims_came_locked(&before, &r.all_claims());
+        Ok(())
     }
 
     pub fn remove_owner(&self, name: &str) -> Result<crate::owner::Owner, String> {
@@ -708,35 +1284,42 @@ impl Store {
     }
 
     /// `margin apply <board> --as <owner>`: an outside program's write. All of `ops` or none,
-    /// each checked against the owner's prefix; the owner's last-write time moves whether or not
-    /// the content changed. Returns the board's rev afterwards.
+    /// each checked against the owner's prefix. It writes the owner's file and nothing else; the
+    /// file's mtime (the owner's last write) moves whether or not the content changed. Returns
+    /// the board's rev, which is the layout's: this write does not move it.
     pub fn apply_as(&self, board: &str, name: &str, ops: &[Op]) -> Result<u64, String> {
         let _l = self.lock().map_err(|e| e.to_string())?;
-        let mut reg = crate::owner::Registry::load_strict(&self.dir())?;
+        let reg = crate::owner::Registry::load_strict(&self.dir())?;
         let o = reg.get(name).cloned().ok_or_else(|| crate::owner::missing(name))?;
         if o.board != board {
             return Err(format!("owner {name} is registered on {}, not {board}", o.board));
         }
-        let old = self.load(board)?;
-        let w = Writer::Named { by: o.by(), owns: o.owns.clone() };
-        let mut d = old.clone();
-        for op in ops {
-            check_owner(op, &d, &w, &[])?;
-            d.apply(op)?;
+        let c = Claim { feed: o.name.clone(), owns: o.owns.clone(), kind: "owner" };
+        let (changed, mut errs, rev) = self.owned_write_locked(board, &c, &[ops.to_vec()])?;
+        if !errs.is_empty() {
+            return Err(errs.remove(0));
         }
-        let rev = if d.blocks != old.blocks || d.title != old.title { self.save_doc_locked(&mut d, Some(&old), &w.by())? } else { old.rev };
-        if let Some(x) = reg.owners.iter_mut().find(|x| x.name == name) {
-            x.last_write = now_rfc3339();
+        if changed.is_none() {
+            self.touch_owned(board, &c)?;
         }
-        reg.save(&self.dir())?;
         Ok(rev)
+    }
+
+    /// An owner wrote and nothing changed: that is still a write. Move its file's mtime (an
+    /// owner that has no file yet gets an empty one).
+    fn touch_owned(&self, a: &str, c: &Claim) -> Result<(), String> {
+        let p = self.owned_path(a, c);
+        match fs::File::options().write(true).open(&p) {
+            Ok(f) => f.set_modified(std::time::SystemTime::now()).map_err(|e| format!("{}: {e}", p.display())),
+            Err(_) => self.write_owned(a, c, &Owned::new(c), false),
+        }
     }
 
     /// What a handler's run commits on exit 0, under one lock: its ops (each line all or
     /// nothing, as a feed's), its emitted events (`by` the handler, via `handler`, about its
     /// board), and its cursor moved to the last event it was given. One step, so a crash never
-    /// leaves the board updated with the cursor behind it, or the reverse. Returns the board's
-    /// new rev, if its content changed, and what was rejected.
+    /// leaves the board updated with the cursor behind it, or the reverse. Returns the new rev
+    /// of the handler's own file, if its blocks changed, and what was rejected.
     pub fn handler_commit(&self, a: &str, groups: &[Vec<Op>], w: &Writer, emits: &[(String, Value)], cursor: Option<(&str, u64)>) -> (Option<u64>, Vec<String>) {
         let _l = match self.lock() {
             Ok(l) => l,
@@ -745,9 +1328,24 @@ impl Store {
         let (rev, mut errs) = match (groups.is_empty(), a.is_empty()) {
             (true, _) => (None, Vec::new()),
             (false, true) => (None, vec![format!("{} line(s) write a board, and this handler has none: register it with --board B --owns PREFIX", groups.len())]),
-            (false, false) => self.owned_write_locked(a, groups, w),
+            (false, false) => match w {
+                Writer::Named { owns: prefix, .. } => {
+                    // the prefix says whose file: the one claim that holds exactly it. A writer
+                    // whose prefix nobody holds (a handler removed while it ran) owns nothing:
+                    // those ids are ordinary layout, and that is where its lines go
+                    let r = match self.claims_strict(a) {
+                        Ok(claims) => match claims.iter().find(|c| c.owns == *prefix) {
+                            Some(c) => self.owned_write_locked(a, c, groups).map(|(rev, errs, _)| (rev, errs)),
+                            None => self.unclaimed_write_locked(a, groups, w),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    r.unwrap_or_else(|e| (None, vec![e]))
+                }
+                Writer::Claude => (None, vec!["a handler writes as itself, inside the prefix it owns".to_string()]),
+            },
         };
-        let at = if a.is_empty() { 0 } else { self.load(a).map(|d| d.rev).unwrap_or(0) };
+        let at = if a.is_empty() { 0 } else { self.layout(a, false).map(|d| d.rev).unwrap_or(0) };
         for (name, value) in emits {
             // `<board>.<name>` is how a board's own actions are named: a handler writing board
             // A can't raise an event that reads as board B's
@@ -780,24 +1378,18 @@ impl Store {
         }
     }
 
-    /// A handler's write: groups of ops (one group per stdout line), each applied all-or-nothing,
-    /// so one bad line is rejected and logged without losing its neighbours. A script that
-    /// re-prints the same state costs no revision. It updates its board and never creates it: a
-    /// missing one fails the write with the message that names `margin new`.
-    fn owned_write_locked(&self, a: &str, groups: &[Vec<Op>], w: &Writer) -> (Option<u64>, Vec<String>) {
+    /// The write of a named writer that holds no claim on `a`: into the layout, inside its
+    /// prefix and outside everyone's claims, each group all-or-nothing. Returns the layout's
+    /// new rev when it changed.
+    fn unclaimed_write_locked(&self, a: &str, groups: &[Vec<Op>], w: &Writer) -> Result<(Option<u64>, Vec<String>), String> {
+        let st = self.settle_locked(a)?;
         let mut errs = Vec::new();
-        let old = match self.load(a) {
-            Ok(d) => d,
-            Err(e) => return (None, vec![e]),
-        };
-        let mut d = old.clone();
-        let claims = self.claims(a);
-        let base_blocks = d.blocks.clone();
-        let base_title = d.title.clone();
+        let mut d = st.layout.clone();
         for g in groups {
             let mut t = d.clone();
             let r: Result<(), String> = g.iter().try_for_each(|op| {
-                check_owner(op, &t, w, &claims)?;
+                check_owner(op, &t, w, &st.claims)?;
+                check_owner(op, &t, &Writer::Claude, &st.claims)?;
                 t.apply(op)
             });
             match r {
@@ -805,16 +1397,69 @@ impl Store {
                 Err(e) => errs.push(e),
             }
         }
-        if d.blocks == base_blocks && d.title == base_title {
-            return (None, errs);
+        if d.blocks == st.layout.blocks && d.title == st.layout.title {
+            return Ok((None, errs));
         }
-        match self.save_doc_locked(&mut d, Some(&old), &w.by()) {
-            Ok(rev) => (Some(rev), errs),
-            Err(e) => {
-                errs.push(e);
-                (None, errs)
+        let rev = self.save_doc_locked(&mut d, Some(&st.layout), &w.by())?;
+        Ok((Some(rev), errs))
+    }
+
+    /// An owner's or a handler's write: groups of ops (one group per stdout line), each applied
+    /// all-or-nothing, so one bad line is rejected and logged without losing its neighbours. It
+    /// reads the layout and the writer's own file, and writes that file only: never doc.json,
+    /// never another owner's file. A script that re-prints the same state costs no revision. It
+    /// updates its board and never creates it: a missing one fails the write with the message
+    /// that names `margin new`. Returns (the file's new rev when its blocks changed, what was
+    /// rejected, the layout's rev).
+    fn owned_write_locked(&self, a: &str, c: &Claim, groups: &[Vec<Op>]) -> Result<(Option<u64>, Vec<String>, u64), String> {
+        let st = self.settle_locked(a)?;
+        let i = st.claims.iter().position(|x| x == c).ok_or_else(|| format!("{} {} is not registered on {a} with the prefix {:?}: nothing was written", c.kind, c.feed, c.owns))?;
+        let own = st.files[i].clone().unwrap_or_else(|| Owned::new(c));
+        // the layout and this writer's blocks: all it may read or touch. Another owner's rows
+        // are not here, so nothing it does can depend on them or move them
+        let (mut d, hidden) = compose(&st.layout, &[(c, &own)]);
+        let w = Writer::Named { by: c.by(), owns: c.owns.clone() };
+        let mut errs = Vec::new();
+        for g in groups {
+            let mut t = d.clone();
+            let r: Result<(), String> = g.iter().try_for_each(|op| {
+                check_owner(op, &t, &w, &st.claims)?;
+                t.apply(op)
+            });
+            match r {
+                Ok(()) => d = t,
+                Err(e) => errs.push(e),
             }
         }
+        let title = (d.title != st.layout.title).then(|| d.title.clone());
+        let mut out = [Vec::new()];
+        extract(&mut d.blocks, None, &|id| owns(&c.owns, id).then_some(0), &mut out);
+        let [mut entries] = out;
+        if d.blocks != st.layout.blocks {
+            return Err(format!("{} {} would have changed the layout of {a}: nothing was written", c.kind, c.feed));
+        }
+        // what is not drawn (its parent left the layout) was not in front of the writer: it
+        // stays in the file unless this write gave the same id a place
+        if !hidden.is_empty() {
+            let mut ids: HashSet<String> = HashSet::new();
+            for e in &entries {
+                crate::doc::walk(std::slice::from_ref(&e.block), &mut |b, _, _| {
+                    ids.insert(b.id.clone());
+                });
+            }
+            for (_, ei) in hidden {
+                if !ids.contains(&own.blocks[ei].block.id) {
+                    entries.push(own.blocks[ei].clone());
+                }
+            }
+        }
+        if entries == own.blocks && title == own.title {
+            return Ok((None, errs, st.layout.rev));
+        }
+        let o = Owned { rev: own.rev + 1, updated: now_rfc3339(), title, blocks: entries, ..Owned::new(c) };
+        self.write_owned(a, c, &o, false)?;
+        self.prune_orphans(a);
+        Ok((Some(o.rev), errs, st.layout.rev))
     }
 
     /// Apply ops to an artifact that exists, atomically: all land or none do (a missing artifact
@@ -826,13 +1471,17 @@ impl Store {
     }
 
     fn patch_locked(&self, a: &str, ops: &[Op], base_rev: Option<u64>) -> Result<u64, String> {
-        let old = self.load(a)?;
+        // the layout alone: an owner's rows are not this writer's to read, move or remove, and
+        // a container may go from under them (they stay in their file; `margin doctor` says so)
+        let st = self.settle_locked(a)?;
+        let old = st.layout.clone();
         check_base(Some(&old), base_rev)?;
-        let claims = self.claims_strict(a)?;
+        let claims = &st.claims;
         let mut d = old.clone();
         let mut status_writes = Vec::new();
         for op in ops {
-            check_owner(op, &d, &Writer::Claude, &claims)?;
+            let op = &st.place(op)?;
+            check_owner(op, &d, &Writer::Claude, claims)?;
             if let Op::Set { id, field, value } = op {
                 if field == "status" && d.find(id).map(|b| b.kind == "todo").unwrap_or(false) {
                     crate::doc::check_field(crate::doc::kind("todo").unwrap(), field, value).map_err(|e| format!("{id}: {e}"))?;
@@ -1346,7 +1995,40 @@ impl Store {
     /// Move one artifact's directory (document, decisions, history, views) into `.archive/`,
     /// under `<id>-<date>` (with `-2`, `-3`… when that name is taken). The store never deletes:
     /// `margin rm <art>` and `margin gc` both end here, and moving the directory back restores it.
+    ///
+    /// Removing a board by name (`margin rm <board> --yes`) also unregisters the handlers and
+    /// owners that claimed a prefix on it: with the board gone they could only fail. What was
+    /// unregistered is written beside the archived board as `unregistered.json`.
     pub fn archive(&self, a: &str) -> Result<PathBuf, String> {
+        let _l = self.lock().map_err(|e| e.to_string())?;
+        let dest = self.archive_locked(a)?;
+        // after the move: a crash in between leaves a claim on a board that is gone, which
+        // every command already tolerates; the other order would leave rows nobody claims
+        let dir = self.dir();
+        let mut gone = json!({});
+        if let Ok(mut r) = crate::handler::Registry::load_strict(&dir) {
+            let (out, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut r.handlers).into_iter().partition(|h| h.board == a);
+            r.handlers = keep;
+            if !out.is_empty() && r.save(&dir).is_ok() {
+                gone["handlers"] = json!(out);
+            }
+        }
+        if let Ok(mut r) = crate::owner::Registry::load_strict(&dir) {
+            let (out, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut r.owners).into_iter().partition(|o| o.board == a);
+            r.owners = keep;
+            if !out.is_empty() && r.save(&dir).is_ok() {
+                gone["owners"] = json!(out);
+            }
+        }
+        if gone.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
+            let _ = write_atomic(&dest.join("unregistered.json"), serde_json::to_string_pretty(&gone).unwrap().as_bytes());
+        }
+        Ok(dest)
+    }
+
+    /// `margin gc`: the move alone. A board that went quiet keeps its registrations, so moving
+    /// its directory back restores it whole.
+    fn archive_quiet(&self, a: &str) -> Result<PathBuf, String> {
         let _l = self.lock().map_err(|e| e.to_string())?;
         self.archive_locked(a)
     }
@@ -1375,8 +2057,10 @@ impl Store {
                 .iter()
                 .filter_map(|f| fs::metadata(self.art(&d.id).join(f)).ok()?.modified().ok())
                 .chain(fs::read_dir(self.art(&d.id).join("view")).into_iter().flatten().filter_map(|e| e.ok()?.metadata().ok()?.modified().ok()))
+                // an owner's write is a touch of the board too, though doc.json does not move
+                .chain(fs::read_dir(self.owned_dir(&d.id)).into_iter().flatten().filter_map(|e| e.ok()?.metadata().ok()?.modified().ok()))
                 .max();
-            if newest.map(|t| t < cutoff).unwrap_or(false) && self.archive(&d.id).is_ok() {
+            if newest.map(|t| t < cutoff).unwrap_or(false) && self.archive_quiet(&d.id).is_ok() {
                 moved.push(d.id.clone());
             }
         }
@@ -1395,7 +2079,7 @@ fn check_base(old: Option<&Doc>, base: Option<u64>) -> Result<(), String> {
         let cur = old.map(|d| d.rev).unwrap_or(0);
         if cur != b {
             return Err(format!(
-                "stale base: you edited rev {b} but the board is at rev {cur}; run `margin show` and redo the change on rev {cur}"
+                "stale base: you edited rev {b} but the board's layout is at rev {cur}; run `margin show` and redo the change on rev {cur}"
             ));
         }
     }
@@ -1996,6 +2680,404 @@ pub mod tests {
         assert_eq!(s.act("reviews", "note", "open", None, "you", "act").unwrap_err(), "\"note\" in reviews has no target to open");
         assert_eq!(s.events().len(), 3, "a refusal logs nothing");
         assert_eq!(s.load("reviews").unwrap().rev, 1, "and an action changes no content");
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    // ------------------------------------------------------------ one writer per file
+
+    fn owner(name: &str, board: &str, owns: &str) -> crate::owner::Owner {
+        crate::owner::Owner { name: name.into(), board: board.into(), owns: owns.into(), expect_every: None, added: "2026-11-10T10:00:00Z".into(), last_write: String::new() }
+    }
+    fn handler(name: &str, board: &str, owns: &str) -> crate::handler::Handler {
+        crate::handler::Handler { name: name.into(), cmd: vec!["true".into()], on: vec![format!("{name}.go")], board: board.into(), owns: owns.into(), paused: false, cwd: "/".into(), path: String::new(), timeout: 60.0, retries: 3, added: String::new() }
+    }
+    fn line(v: Value) -> Vec<Op> {
+        crate::doc::parse_line(&v.to_string()).unwrap()
+    }
+    fn top(d: &Doc) -> Vec<&str> {
+        d.blocks.iter().map(|b| b.id.as_str()).collect()
+    }
+    fn kids<'a>(d: &'a Doc, id: &str) -> Vec<&'a str> {
+        d.find(id).unwrap().children.iter().map(|b| b.id.as_str()).collect()
+    }
+    /// A layout with two containers and a note between them, and two owners and a handler.
+    fn dash() -> Store {
+        let s = temp_store();
+        let d: Doc = serde_json::from_value(json!({"id": "dash", "title": "Dash", "blocks": [
+            {"type": "section", "id": "top", "title": "Top", "children": [{"type": "text", "id": "intro", "text": "the layout's own"}]},
+            {"type": "text", "id": "note", "text": "between"},
+            {"type": "table", "id": "jobs", "columns": [{"key": "name"}]}]}))
+        .unwrap();
+        s.create(d).unwrap();
+        crate::handler::edit_registry(&s, |r| r.add(handler("fetch", "dash", "f"))).unwrap();
+        s.add_owner(owner("queue", "dash", "q")).unwrap();
+        s.add_owner(owner("ci", "dash", "ci")).unwrap();
+        s
+    }
+
+    /// An owner's write lands in the owner's file and nowhere else: doc.json keeps its bytes,
+    /// the board keeps its rev, and a layout write made against that rev goes through after any
+    /// number of owner writes. Only a layout write makes a base stale.
+    #[test]
+    fn an_owner_write_leaves_the_layout_and_its_rev_alone() {
+        let s = dash();
+        let layout = fs::read(s.doc_path("dash")).unwrap();
+        for i in 0..25 {
+            assert_eq!(s.apply_as("dash", "queue", &line(json!({"type": "tr", "id": format!("q-{}", i % 5), "parent": "jobs", "cells": {"name": format!("job {i}")}}))).unwrap(), 1);
+        }
+        let w = Writer::Named { by: "handler:fetch".into(), owns: "f".into() };
+        assert_eq!(s.handler_commit("dash", &[line(json!({"type": "row", "id": "f-1", "text": "fetched", "parent": "top"}))], &w, &[], None), (Some(1), vec![]));
+        assert_eq!(fs::read(s.doc_path("dash")).unwrap(), layout, "doc.json is byte for byte what the layout writer left");
+        let d = s.load("dash").unwrap();
+        assert_eq!((d.rev, d.owned["owner:queue"].rev, d.owned["handler:fetch"].rev, d.owned.len()), (1, 25, 1, 2));
+        // `by` and `updated` are the board's last change, an owner's included (to the second)
+        assert!(d.by != s.author && d.updated >= d.owned["owner:queue"].updated, "{}", d.by);
+        assert_eq!((kids(&d, "jobs").len(), kids(&d, "top")), (5, vec!["intro", "f-1"]));
+        // the assistant read rev 1 before all of that: its edit still applies
+        let set = Op::Set { id: "note".into(), field: "text".into(), value: json!("edited") };
+        assert_eq!(s.patch("dash", &[set.clone()], Some(1)).unwrap(), 2);
+        assert!(s.patch("dash", &[set], Some(1)).unwrap_err().contains("stale base"), "another layout write is what makes it stale");
+        // each owner's file holds its own blocks and nobody else's
+        let q: Owned = serde_json::from_str(&fs::read_to_string(s.art("dash").join("owned/owner.queue.json")).unwrap()).unwrap();
+        assert_eq!((q.by.as_str(), q.owns.as_str(), q.rev, q.blocks.len()), ("owner:queue", "q", 25, 5));
+        assert!(q.blocks.iter().all(|e| e.parent.as_deref() == Some("jobs") && e.after.is_none() && e.block.id.starts_with("q-")));
+        assert!(!s.art("dash").join("owned/owner.ci.json").exists(), "an owner that has not written has no file");
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// The composed order: a parent's layout children in their order, then the owners' blocks,
+    /// owners in registration order (handlers, then owners), each owner's blocks in its own
+    /// order. An owned block written beside a layout sibling keeps that place when the layout
+    /// grows.
+    #[test]
+    fn composition_puts_layout_children_first_then_each_owners_blocks_in_order() {
+        let s = dash();
+        let tr = |id: &str| line(json!({"type": "tr", "id": id, "parent": "jobs", "cells": {"name": id}}));
+        // written in the opposite order to their registration
+        s.apply_as("dash", "ci", &[tr("ci-2"), tr("ci-1")].concat()).unwrap();
+        s.apply_as("dash", "queue", &tr("q-1")).unwrap();
+        let w = Writer::Named { by: "handler:fetch".into(), owns: "f".into() };
+        s.handler_commit("dash", &[tr("f-1")], &w, &[], None);
+        s.apply_as("dash", "queue", &tr("q-2")).unwrap();
+        assert_eq!(kids(&s.load("dash").unwrap(), "jobs"), ["f-1", "q-1", "q-2", "ci-2", "ci-1"]);
+        // under a parent with layout children, and at the top level: after them
+        s.apply_as("dash", "queue", &line(json!({"type": "row", "id": "q-in-top", "text": "x", "parent": "top"}))).unwrap();
+        s.apply_as("dash", "ci", &line(json!({"type": "row", "id": "ci-top", "text": "y"}))).unwrap();
+        let d = s.load("dash").unwrap();
+        assert_eq!((kids(&d, "top"), top(&d)), (vec!["intro", "q-in-top"], vec!["top", "note", "jobs", "ci-top"]));
+        // the layout grows: its new blocks land where the layout writer put them, and an owned
+        // block stays after the layout sibling it followed
+        let add = |id: &str, parent: Option<&str>| Op::Add { parent: parent.map(String::from), block: serde_json::from_value(json!({"type": "text", "id": id, "text": id})).unwrap(), before: None, after: None };
+        s.patch("dash", &[add("outro", Some("top")), add("foot", None)], None).unwrap();
+        let d = s.load("dash").unwrap();
+        assert_eq!((kids(&d, "top"), top(&d)), (vec!["intro", "q-in-top", "outro"], vec!["top", "note", "jobs", "ci-top", "foot"]));
+        // an owner places a block of its own before a layout sibling, and it stays there
+        s.apply_as("dash", "ci", &[Op::Add { parent: None, block: serde_json::from_value(json!({"type": "row", "id": "ci-first", "text": "z"})).unwrap(), before: Some("top".into()), after: None }]).unwrap();
+        assert_eq!(top(&s.load("dash").unwrap()), ["ci-first", "top", "note", "jobs", "ci-top", "foot"]);
+        // a layout block asked to go after an owner's block goes right after it
+        s.patch("dash", &[Op::Add { parent: None, block: serde_json::from_value(json!({"type": "text", "id": "under", "text": "u"})).unwrap(), before: None, after: Some("ci-top".into()) }], None).unwrap();
+        assert_eq!(top(&s.load("dash").unwrap()), ["ci-first", "top", "note", "jobs", "ci-top", "under", "foot"]);
+        let e = s.patch("dash", &[Op::Add { parent: None, block: serde_json::from_value(json!({"type": "text", "id": "over", "text": "o"})).unwrap(), before: Some("ci-top".into()), after: None }], None).unwrap_err();
+        assert!(e.contains("belongs to owner `ci`") && e.contains("--after ci-top"), "{e}");
+        // composing is deterministic: the same files, the same board
+        assert_eq!(s.load("dash").unwrap(), s.load("dash").unwrap());
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// An owner may write under a container of the layout, and only one that is there: a
+    /// missing parent is refused by name. The layout writer may remove the container: the rows
+    /// stay in the owner's file, are not drawn, are reported, survive the owner's next write,
+    /// and draw again when the container is back.
+    #[test]
+    fn an_owned_block_whose_parent_left_the_layout_is_kept_and_reported() {
+        let s = dash();
+        let tr = |id: &str, parent: &str| line(json!({"type": "tr", "id": id, "parent": parent, "cells": {"name": id}}));
+        let e = s.apply_as("dash", "queue", &tr("q-1", "nowhere")).unwrap_err();
+        assert!(e.contains("owner queue writes under \"nowhere\"") && e.contains("the layout of dash has no such block"), "{e}");
+        s.apply_as("dash", "queue", &[tr("q-1", "jobs"), tr("q-2", "jobs")].concat()).unwrap();
+        // inside the prefix the layout writer is still refused; the container itself is its own
+        assert!(s.patch("dash", &[Op::Rm { id: "q-1".into() }], None).unwrap_err().contains("belongs to owner `queue`"));
+        assert!(s.patch("dash", &[Op::Add { parent: Some("q-1".into()), block: serde_json::from_value(json!({"type": "text", "id": "x", "text": "x"})).unwrap(), before: None, after: None }], None).is_err());
+        assert_eq!(s.patch("dash", &[Op::Rm { id: "jobs".into() }], None).unwrap(), 2);
+        let d = s.load("dash").unwrap();
+        assert!(d.find("jobs").is_none() && d.find("q-1").is_none(), "not drawn");
+        assert_eq!(s.inspect("dash").hidden, vec![("owner:queue".to_string(), "jobs".to_string(), vec!["q-1".to_string(), "q-2".to_string()])]);
+        // the owner goes on writing elsewhere: what is hidden is not lost
+        s.apply_as("dash", "queue", &line(json!({"type": "row", "id": "q-9", "text": "elsewhere", "parent": "top"}))).unwrap();
+        let q: Owned = serde_json::from_str(&fs::read_to_string(s.art("dash").join("owned/owner.queue.json")).unwrap()).unwrap();
+        assert_eq!(q.blocks.iter().map(|e| e.block.id.as_str()).collect::<Vec<_>>(), ["q-9", "q-1", "q-2"]);
+        // and writing under the missing container is refused, naming it
+        assert!(s.apply_as("dash", "queue", &tr("q-3", "jobs")).unwrap_err().contains("\"jobs\""));
+        // the container comes back: so do the rows
+        s.patch("dash", &[Op::Add { parent: None, block: serde_json::from_value(json!({"type": "table", "id": "jobs", "columns": [{"key": "name"}]})).unwrap(), before: None, after: None }], None).unwrap();
+        assert_eq!(kids(&s.load("dash").unwrap(), "jobs"), ["q-1", "q-2"]);
+        assert!(s.inspect("dash").hidden.is_empty());
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// A board from before owners had files: every block in doc.json, the owner's among them.
+    fn old_board(s: &Store) -> String {
+        s.create(Doc::empty("old")).unwrap();
+        let stored = json!({"v": 1, "id": "old", "title": "Old", "kind": "", "rev": 41, "updated": "2026-11-01T10:00:00Z", "by": "owner:queue", "blocks": [
+            {"type": "text", "id": "head", "text": "the layout"},
+            {"type": "table", "id": "pr", "columns": [{"key": "title"}], "children": [
+                {"type": "tr", "id": "pr-1", "target": "https://example.com/1", "cells": {"title": "One"}},
+                {"type": "tr", "id": "pr-2", "cells": {"title": "Two"}}]},
+            {"type": "text", "id": "foot", "text": "more layout"},
+            {"type": "section", "id": "jj", "title": "left by a runner that is gone", "children": [{"type": "row", "id": "jj-1", "text": "a change"}]}]});
+        let text = serde_json::to_string_pretty(&stored).unwrap();
+        fs::write(s.doc_path("old"), &text).unwrap();
+        fs::write(s.dir().join("owners.json"), r#"{"owners": [{"name": "queue", "board": "old", "owns": "pr", "expect_every": 600.0, "added": "2026-10-01T10:00:00Z", "last_write": "2026-11-01T10:00:00Z"}]}"#).unwrap();
+        text
+    }
+
+    /// The migration: a board whose doc.json holds an owner's blocks reads as it always did,
+    /// and the first write to it (here the owner's) moves those blocks into the owner's file in
+    /// one locked step: nothing is lost, nothing moves on screen, the layout keeps its rev, and
+    /// the owner's last write is still when it last wrote. Blocks under a prefix nobody claims
+    /// are layout and stay.
+    #[test]
+    fn an_old_board_moves_its_owners_blocks_out_on_the_first_write() {
+        let s = temp_store();
+        let before = old_board(&s);
+        let d = s.load("old").unwrap();
+        assert_eq!((d.rev, top(&d), kids(&d, "pr")), (41, vec!["head", "pr", "foot", "jj"], vec!["pr-1", "pr-2"]));
+        assert_eq!(fs::read_to_string(s.doc_path("old")).unwrap(), before, "reading moves nothing");
+        assert_eq!(s.inspect("old").legacy.iter().map(|(c, n)| (c.feed.as_str(), *n)).collect::<Vec<_>>(), [("queue", 3)]);
+        let ev = s.act("old", "pr-1", "open", None, "you", "act").unwrap();
+        assert_eq!(ev.value, json!({"cells": {"title": "One"}, "target": "https://example.com/1"}));
+        // the owner's next write, as it always wrote: one more row
+        s.apply_as("old", "queue", &line(json!({"type": "tr", "id": "pr-3", "parent": "pr", "cells": {"title": "Three"}}))).unwrap();
+        let layout: Doc = serde_json::from_str(&fs::read_to_string(s.doc_path("old")).unwrap()).unwrap();
+        assert_eq!((layout.rev, layout.ids()), (41, vec!["head".to_string(), "foot".into(), "jj".into(), "jj-1".into()]), "the layout: what nobody claims, at the rev it had");
+        let q: Owned = serde_json::from_str(&fs::read_to_string(s.art("old").join("owned/owner.queue.json")).unwrap()).unwrap();
+        assert_eq!((q.rev, q.blocks.len(), q.blocks[0].parent.as_deref(), q.blocks[0].after.as_deref(), q.blocks[0].block.children.len()), (2, 1, None, Some("head"), 3));
+        let d = s.load("old").unwrap();
+        assert_eq!((d.rev, top(&d), kids(&d, "pr")), (41, vec!["head", "pr", "foot", "jj"], vec!["pr-1", "pr-2", "pr-3"]), "on screen: the same board, one row more");
+        assert!(s.inspect("old") == Inspect::default());
+        // an action on the owned row still carries its snapshot
+        assert_eq!(s.act("old", "pr-3", "open", None, "you", "act").unwrap_err(), "\"pr-3\" in old has no target to open");
+        assert_eq!(s.act("old", "pr-1", "open", None, "you", "act").unwrap().value["cells"]["title"], "One");
+        // the unclaimed rows are ordinary layout: anyone writes them
+        assert_eq!(s.patch("old", &[Op::Set { id: "jj-1".into(), field: "text".into(), value: json!("mine") }], Some(41)).unwrap(), 42);
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// A layout write migrates too (any first write does), and the owner's clock does not
+    /// start again because its rows moved.
+    #[test]
+    fn a_layout_write_migrates_and_keeps_the_owners_last_write() {
+        let s = temp_store();
+        old_board(&s);
+        assert_eq!(s.patch("old", &[Op::Set { id: "head".into(), field: "text".into(), value: json!("edited") }], Some(41)).unwrap(), 42);
+        assert!(s.art("old").join("owned/owner.queue.json").exists());
+        let d = s.load("old").unwrap();
+        assert_eq!((top(&d), kids(&d, "pr"), d.owned["owner:queue"].rev), (vec!["head", "pr", "foot", "jj"], vec!["pr-1", "pr-2"], 1));
+        let o = crate::owner::Registry::load(&s.dir()).get("queue").unwrap().clone();
+        assert_eq!(o.last_write, "2026-11-01T10:00:00Z");
+        assert!(o.stale(crate::util::epoch_now()).is_some(), "it was overdue before its rows moved, and still is");
+        s.apply_as("old", "queue", &line(json!({"op": "set", "id": "pr-1", "fields": {"detail": "now"}}))).unwrap();
+        assert!(crate::owner::stale_on(&s, "old", crate::util::epoch_now()).is_empty(), "its own write is what makes it fresh");
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// The move is two writes: the owner's file, then doc.json. A crash between them leaves the
+    /// blocks in both. A reader then takes the owner's file (no row twice, none missing), and
+    /// the next write drops the copy in doc.json.
+    #[test]
+    fn a_block_in_both_files_reads_once_from_the_owners_file() {
+        let s = temp_store();
+        let before = old_board(&s);
+        s.settle("old").unwrap();
+        let owned = fs::read_to_string(s.art("old").join("owned/owner.queue.json")).unwrap();
+        s.apply_as("old", "queue", &line(json!({"op": "set", "id": "pr-1", "fields": {"cells": {"title": "One, newer"}}}))).unwrap();
+        // the crash: doc.json as it was before the move, the owner's file already written
+        fs::write(s.doc_path("old"), &before).unwrap();
+        let d = s.load("old").unwrap();
+        assert_eq!((top(&d), kids(&d, "pr")), (vec!["head", "pr", "foot", "jj"], vec!["pr-1", "pr-2"]));
+        assert_eq!(d.find("pr-1").unwrap().f["cells"]["title"], "One, newer", "the owner's file is the truth");
+        assert_eq!(d.ids().len(), 7, "nothing twice");
+        assert_eq!(s.inspect("old").legacy.len(), 1, "and the doctor sees the leftover");
+        // the other half of the same crash: the file as the move wrote it, doc.json still whole
+        fs::write(s.art("old").join("owned/owner.queue.json"), &owned).unwrap();
+        assert_eq!(kids(&s.load("old").unwrap(), "pr"), ["pr-1", "pr-2"]);
+        // any write finishes the move
+        s.settle("old").unwrap();
+        let layout: Doc = serde_json::from_str(&fs::read_to_string(s.doc_path("old")).unwrap()).unwrap();
+        assert!(layout.find("pr").is_none() && layout.rev == 41 && s.inspect("old") == Inspect::default());
+        assert_eq!(kids(&s.load("old").unwrap(), "pr"), ["pr-1", "pr-2"]);
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// Unregistering gives the blocks back to the layout, in place, as ordinary content; so does
+    /// moving a handler to another prefix. Registering takes the blocks already under the prefix.
+    #[test]
+    fn unregistering_returns_the_blocks_to_the_layout() {
+        let s = dash();
+        let w = Writer::Named { by: "handler:fetch".into(), owns: "f".into() };
+        s.handler_commit("dash", &[line(json!({"type": "row", "id": "f-1", "text": "fetched", "parent": "top"}))], &w, &[], None);
+        s.apply_as("dash", "queue", &line(json!({"type": "tr", "id": "q-1", "parent": "jobs", "cells": {"name": "a"}}))).unwrap();
+        s.apply_as("dash", "ci", &[Op::Add { parent: None, block: serde_json::from_value(json!({"type": "row", "id": "ci-1", "text": "z"})).unwrap(), before: Some("note".into()), after: None }]).unwrap();
+        let shown = s.load("dash").unwrap();
+        assert_eq!((shown.rev, top(&shown)), (1, vec!["top", "ci-1", "note", "jobs"]));
+        s.remove_owner("ci").unwrap();
+        crate::handler::edit_registry(&s, |r| r.remove("fetch").map(|_| ())).unwrap();
+        let d = s.load("dash").unwrap();
+        assert_eq!((top(&d), kids(&d, "top"), kids(&d, "jobs")), (vec!["top", "ci-1", "note", "jobs"], vec!["intro", "f-1"], vec!["q-1"]), "where they were");
+        assert_eq!(d.owned.keys().collect::<Vec<_>>(), ["owner:queue"]);
+        let layout: Doc = serde_json::from_str(&fs::read_to_string(s.doc_path("dash")).unwrap()).unwrap();
+        assert!(layout.find("ci-1").is_some() && layout.find("f-1").is_some() && layout.find("q-1").is_none() && layout.rev == 3);
+        assert!(!s.art("dash").join("owned/owner.ci.json").exists() && !s.art("dash").join("owned/handler.fetch.json").exists());
+        // ordinary content: anyone writes it
+        s.patch("dash", &[Op::Set { id: "ci-1".into(), field: "text".into(), value: json!("mine") }, Op::Rm { id: "f-1".into() }], None).unwrap();
+        // claimed again: the blocks under the prefix are the owner's from the registration on
+        s.add_owner(owner("ci", "dash", "ci")).unwrap();
+        assert!(s.art("dash").join("owned/owner.ci.json").exists());
+        assert!(s.patch("dash", &[Op::Set { id: "ci-1".into(), field: "text".into(), value: json!("no") }], None).unwrap_err().contains("belongs to owner `ci`"));
+        assert_eq!(top(&s.load("dash").unwrap()), ["top", "ci-1", "note", "jobs"]);
+        // an owner set to another prefix lets go of what it wrote under the old one
+        s.set_owner(owner("queue", "dash", "qq")).unwrap();
+        let layout: Doc = serde_json::from_str(&fs::read_to_string(s.doc_path("dash")).unwrap()).unwrap();
+        assert!(layout.find("q-1").is_some() && s.load("dash").unwrap().owned.keys().collect::<Vec<_>>() == ["owner:ci"]);
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// A whole-document write is a layout write: it replaces doc.json and leaves the owners'
+    /// files alone, whether it carries the owners' blocks (it was read composed) or not.
+    #[test]
+    fn a_whole_document_replace_leaves_owned_files_alone() {
+        let s = dash();
+        s.apply_as("dash", "queue", &line(json!({"type": "tr", "id": "q-1", "parent": "jobs", "cells": {"name": "a"}}))).unwrap();
+        let file = fs::read(s.art("dash").join("owned/owner.queue.json")).unwrap();
+        // read composed, change the layout, send it all back: with a stale copy of the row
+        let mut d = s.load("dash").unwrap();
+        d.purpose = "the queue".into();
+        d.blocks[2].children[0].f.insert("detail".into(), json!("an edit that is not the layout's to make"));
+        assert_eq!(s.replace(d, Some(1)).unwrap(), 2);
+        // a layout that names none of them
+        let bare: Doc = serde_json::from_value(json!({"id": "dash", "title": "Dash", "blocks": [{"type": "table", "id": "jobs", "columns": [{"key": "name"}]}]})).unwrap();
+        assert_eq!(s.replace(bare, Some(2)).unwrap(), 3);
+        assert_eq!(fs::read(s.art("dash").join("owned/owner.queue.json")).unwrap(), file);
+        let d = s.load("dash").unwrap();
+        assert_eq!((top(&d), kids(&d, "jobs"), d.find("q-1").unwrap().opt("detail")), (vec!["jobs"], vec!["q-1"], None));
+        let layout: Doc = serde_json::from_str(&fs::read_to_string(s.doc_path("dash")).unwrap()).unwrap();
+        assert!(layout.find("q-1").is_none() && layout.owned.is_empty());
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// Reading a board twice reads its files once; an owner's write is one file read again, a
+    /// layout write is doc.json read again, and the other files stay as they were kept.
+    #[test]
+    fn the_composition_cache_reads_only_the_file_that_changed() {
+        let s = dash();
+        let tr = |id: &str, n: usize| line(json!({"type": "tr", "id": id, "parent": "jobs", "cells": {"name": "x".repeat(n)}}));
+        s.apply_as("dash", "queue", &tr("q-1", 2000)).unwrap();
+        s.apply_as("dash", "ci", &tr("ci-1", 3000)).unwrap();
+        let size = |f: &str| fs::metadata(s.art("dash").join(f)).unwrap().len();
+        let reader = Store::new(s.home.clone(), s.project.clone());
+        let cost = |f: &dyn Fn()| {
+            let a = file_reads();
+            f();
+            let b = file_reads();
+            (b.0 - a.0, b.1 - a.1)
+        };
+        reader.load("dash").unwrap();
+        assert_eq!(cost(&|| drop(reader.load("dash").unwrap())), (0, 0), "an unchanged board is not read again");
+        // writes come from another process: here another thread, so its reads are not counted
+        let other = |f: Box<dyn FnOnce(Store) + Send>| {
+            let st = Store::new(s.home.clone(), s.project.clone());
+            std::thread::spawn(move || f(st)).join().unwrap()
+        };
+        let ops = tr("q-1", 2500);
+        other(Box::new(move |st| drop(st.apply_as("dash", "queue", &ops).unwrap())));
+        assert_eq!(cost(&|| assert_eq!(reader.load("dash").unwrap().owned["owner:queue"].rev, 2)), (1, size("owned/owner.queue.json")), "one owner wrote: its file, alone");
+        other(Box::new(|st| drop(st.patch("dash", &[Op::Set { id: "note".into(), field: "text".into(), value: json!("edited") }], None).unwrap())));
+        assert_eq!(cost(&|| assert_eq!(reader.load("dash").unwrap().rev, 2)), (1, size("doc.json")), "the layout changed: doc.json, alone");
+        assert_eq!(cost(&|| drop(reader.load("dash").unwrap())), (0, 0));
+        // a board nobody owns a part of costs its doc.json and no registry
+        reader.create(Doc::empty("plain")).unwrap();
+        let fresh = Store::new(s.home.clone(), s.project.clone());
+        let plain = fs::metadata(s.doc_path("plain")).unwrap().len();
+        let got = std::thread::spawn(move || {
+            let a = file_reads();
+            fresh.load("plain").unwrap();
+            let b = file_reads();
+            (b.0 - a.0, b.1 - a.1)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(got, (1, plain));
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// Two owners, a handler and a layout writer at once, many times over: every write lands,
+    /// each in its own file, and the layout's rev counts the layout's writes alone.
+    #[test]
+    fn concurrent_owners_and_a_layout_writer_lose_nothing() {
+        let s = dash();
+        const N: usize = 30;
+        let spawn = |f: Box<dyn Fn(&Store, usize) + Send>| {
+            let st = Store::new(s.home.clone(), s.project.clone());
+            std::thread::spawn(move || (0..N).for_each(|i| f(&st, i)))
+        };
+        let hs = vec![
+            spawn(Box::new(|st, i| drop(st.apply_as("dash", "queue", &line(json!({"type": "tr", "id": format!("q-{i}"), "parent": "jobs", "cells": {"name": "q"}}))).unwrap()))),
+            spawn(Box::new(|st, i| drop(st.apply_as("dash", "ci", &line(json!({"type": "row", "id": format!("ci-{i}"), "text": "c", "parent": "top"}))).unwrap()))),
+            spawn(Box::new(|st, i| {
+                let w = Writer::Named { by: "handler:fetch".into(), owns: "f".into() };
+                assert_eq!(st.handler_commit("dash", &[line(json!({"type": "row", "id": format!("f-{i}"), "text": "f"}))], &w, &[], None).1, Vec::<String>::new());
+            })),
+            spawn(Box::new(|st, i| {
+                // read, then write against what was read: never stale, whatever the owners did
+                let rev = st.load("dash").unwrap().rev;
+                let add = Op::Add { parent: None, block: serde_json::from_value(json!({"type": "text", "id": format!("l-{i}"), "text": "l"})).unwrap(), before: None, after: None };
+                assert_eq!(st.patch("dash", &[add], Some(rev)).unwrap(), rev + 1);
+            })),
+        ];
+        hs.into_iter().for_each(|h| h.join().unwrap());
+        let d = s.load("dash").unwrap();
+        for pre in ["q", "ci", "f", "l"] {
+            assert_eq!(d.ids().iter().filter(|id| id.starts_with(&format!("{pre}-"))).count(), N, "{pre}");
+        }
+        assert_eq!((d.rev as usize, d.owned["owner:queue"].rev as usize, d.owned["owner:ci"].rev as usize, d.owned["handler:fetch"].rev as usize), (1 + N, N, N, N));
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// `margin rm <board> --yes` archives the directory, owned files and all, and unregisters
+    /// what claimed a prefix on it; `margin gc` moves a quiet board and leaves its registrations.
+    #[test]
+    fn removing_a_board_unregisters_its_owners_and_handlers() {
+        let s = dash();
+        s.create(Doc::empty("other")).unwrap();
+        s.add_owner(owner("elsewhere", "other", "x")).unwrap();
+        s.apply_as("dash", "queue", &line(json!({"type": "tr", "id": "q-1", "parent": "jobs", "cells": {"name": "a"}}))).unwrap();
+        let dest = s.archive("dash").unwrap();
+        assert!(dest.join("owned/owner.queue.json").exists() && dest.join("doc.json").exists());
+        assert!(crate::handler::Registry::load(&s.dir()).handlers.is_empty());
+        assert_eq!(crate::owner::Registry::load(&s.dir()).owners.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["elsewhere"]);
+        let gone: Value = serde_json::from_str(&fs::read_to_string(dest.join("unregistered.json")).unwrap()).unwrap();
+        assert_eq!((gone["handlers"][0]["name"].as_str(), gone["owners"].as_array().unwrap().len()), (Some("fetch"), 2));
+        // the name is free: a new board of that name starts with nothing owned
+        s.create(Doc::empty("dash")).unwrap();
+        assert!(s.claims("dash").is_empty() && s.load("dash").unwrap().owned.is_empty());
+        fs::remove_dir_all(&s.home).ok();
+    }
+
+    /// A whole-board owner (`*`) writes the title too, in its own file.
+    #[test]
+    fn a_whole_board_owner_writes_every_block_and_the_title_in_its_file() {
+        let s = temp_store();
+        s.create(Doc::empty("live")).unwrap();
+        s.add_owner(owner("all", "live", "*")).unwrap();
+        let layout = fs::read(s.doc_path("live")).unwrap();
+        s.apply_as("live", "all", &[vec![Op::Title { value: "Live now".into() }], line(json!({"type": "row", "id": "anything", "text": "x"}))].concat()).unwrap();
+        assert_eq!(fs::read(s.doc_path("live")).unwrap(), layout);
+        let d = s.load("live").unwrap();
+        assert_eq!((d.title.as_str(), top(&d), d.rev), ("Live now", vec!["anything"], 1));
+        assert!(s.patch("live", &[Op::Title { value: "mine".into() }], None).unwrap_err().contains("belongs to owner `all`"));
+        s.remove_owner("all").unwrap();
+        let d = s.load("live").unwrap();
+        assert_eq!((d.title.as_str(), top(&d), d.owned.len()), ("Live now", vec!["anything"], 0));
         fs::remove_dir_all(&s.home).ok();
     }
 }

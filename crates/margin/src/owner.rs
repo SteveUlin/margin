@@ -30,10 +30,6 @@ pub struct Owner {
 }
 
 impl Owner {
-    /// Who its writes are logged as.
-    pub fn by(&self) -> String {
-        format!("owner:{}", self.name)
-    }
     /// Why it is stale, or None: `last updated 3h ago, expected every 10m`. An owner that has
     /// never written is measured from its registration.
     pub fn stale(&self, now: f64) -> Option<String> {
@@ -94,15 +90,48 @@ impl Registry {
     pub fn load(dir: &Path) -> Registry {
         Self::load_strict(dir).unwrap_or_default()
     }
-    pub fn load_strict(dir: &Path) -> Result<Registry, String> {
+    /// The registry as owners.json holds it.
+    fn read(dir: &Path) -> Result<Registry, String> {
         match std::fs::read_to_string(Self::path(dir)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
             Err(e) => Err(format!("{}: {e}", Self::path(dir).display())),
             Ok(s) => serde_json::from_str(&s).map_err(|e| format!("{} is corrupt ({e}); fix or remove it", Self::path(dir).display())),
         }
     }
+    /// The registry, with each owner's `last_write` taken from its file on its board
+    /// (`<board>/owned/owner.<name>.json`): that file's mtime is the one record of when the
+    /// owner last wrote. owners.json holds a `last_write` only for an owner from before owners
+    /// had files, until its rows move into one.
+    pub fn load_strict(dir: &Path) -> Result<Registry, String> {
+        let mut r = Self::read(dir)?;
+        for o in &mut r.owners {
+            if let Some(t) = wrote(dir, o) {
+                o.last_write = crate::util::rfc3339(t);
+            }
+        }
+        Ok(r)
+    }
+    /// One writer per file: an owner's write no longer comes here. Saved on a registration
+    /// change only, without the `last_write` of an owner whose file records it.
     pub fn save(&self, dir: &Path) -> Result<(), String> {
-        crate::store::write_durable(&Self::path(dir), serde_json::to_string_pretty(self).unwrap().as_bytes()).map_err(|e| e.to_string())
+        let mut r = self.clone();
+        for o in &mut r.owners {
+            if wrote(dir, o).is_some() {
+                o.last_write.clear();
+            }
+        }
+        crate::store::write_durable(&Self::path(dir), serde_json::to_string_pretty(&r).unwrap().as_bytes()).map_err(|e| e.to_string())
+    }
+    /// When owner `name` last wrote as owners.json records it (an owner from before owners had
+    /// files), else when it was registered: what its new file's mtime starts from.
+    pub fn recorded_write(dir: &Path, name: &str) -> Option<f64> {
+        let r = Self::read(dir).ok()?;
+        let o = r.get(name)?;
+        crate::util::parse_rfc3339(&o.last_write).or_else(|| crate::util::parse_rfc3339(&o.added))
+    }
+    /// Every claim in the registry, with its board.
+    pub fn all_claims(&self) -> Vec<(String, Claim)> {
+        self.owners.iter().map(|o| (o.board.clone(), Claim { feed: o.name.clone(), owns: o.owns.clone(), kind: "owner" })).collect()
     }
     pub fn get(&self, name: &str) -> Option<&Owner> {
         self.owners.iter().find(|o| o.name == name)
@@ -145,12 +174,24 @@ impl Registry {
     }
 }
 
-/// Change the registry under the project lock.
+/// When an owner last wrote: the mtime of its file on its board (epoch seconds). None: it has
+/// no file yet.
+fn wrote(dir: &Path, o: &Owner) -> Option<f64> {
+    let p = dir.join(&o.board).join("owned").join(format!("owner.{}.json", o.name));
+    std::fs::metadata(p).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+}
+
+/// Change the registry under the project lock. An owner that goes (or moves to another board or
+/// prefix) gives its blocks back to the board's layout first, where they are ordinary content
+/// again: nothing it wrote disappears, and no file is left that nobody claims.
 pub fn edit_registry<T>(st: &Store, f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<T, String> {
     let _l = st.lock().map_err(|e| e.to_string())?;
     let mut r = Registry::load_strict(&st.dir())?;
+    let before = r.all_claims();
     let out = f(&mut r)?;
+    st.claims_going_locked(&before, &r.all_claims())?;
     r.save(&st.dir())?;
+    st.claims_came_locked(&before, &r.all_claims());
     Ok(out)
 }
 
@@ -196,13 +237,24 @@ mod tests {
         st.add_owner(owner("queue", "run")).unwrap();
         assert!(st.add_owner(owner("queue", "zz")).unwrap_err().contains("exists: change it with margin owner set queue"));
         assert!(st.add_owner(owner("second", "run-x")).unwrap_err().contains("overlaps owner queue"), "one id has one owner");
+        let layout = std::fs::read(st.doc_path("runs")).unwrap();
         let rev = st.apply_as("runs", "queue", &block(json!({"type": "row", "id": "run-1", "text": "sim A"}))).unwrap();
         let d = st.load("runs").unwrap();
-        assert_eq!((rev, d.rev, d.by.as_str(), d.find("run-1").unwrap().s("text")), (2, 2, "owner:queue", "sim A"));
+        // the board's rev is its layout's: the owner's write moved its own and not that one
+        assert_eq!((rev, d.rev, d.by.as_str(), d.find("run-1").unwrap().s("text")), (1, 1, "owner:queue", "sim A"));
+        assert_eq!(d.owned["owner:queue"].rev, 1);
+        assert_eq!(std::fs::read(st.doc_path("runs")).unwrap(), layout, "doc.json is the layout writer's file: untouched");
+        let file = st.art("runs").join("owned/owner.queue.json");
         let wrote = Registry::load(&st.dir()).get("queue").unwrap().last_write.clone();
-        assert!(crate::util::parse_rfc3339(&wrote).is_some(), "the write is recorded");
-        // the same state again: no new rev, and still a write
-        assert_eq!(st.apply_as("runs", "queue", &block(json!({"type": "row", "id": "run-1", "text": "sim A"}))).unwrap(), 2);
+        assert!(crate::util::parse_rfc3339(&wrote).is_some(), "the write is recorded: the file's mtime");
+        assert!(!std::fs::read_to_string(Registry::path(&st.dir())).unwrap().contains("last_write"), "and owners.json is not written by a write");
+        // the same state again: no new rev of either, and still a write
+        let age = std::time::SystemTime::now() - std::time::Duration::from_secs(900);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(age).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        assert_eq!(st.apply_as("runs", "queue", &block(json!({"type": "row", "id": "run-1", "text": "sim A"}))).unwrap(), 1);
+        assert_eq!((st.load("runs").unwrap().owned["owner:queue"].rev, std::fs::read(&file).unwrap()), (1, before));
+        assert!(std::fs::metadata(&file).unwrap().modified().unwrap() > age + std::time::Duration::from_secs(800), "the last write moved");
         // outside its prefix, on another board, as someone unregistered: refused, nothing written
         let e = st.apply_as("runs", "queue", &block(json!({"type": "row", "id": "note", "text": "x"}))).unwrap_err();
         assert!(e.contains("owner queue may only write the ids run and run-…"), "{e}");
@@ -218,8 +270,10 @@ mod tests {
         // the person can still act on its rows: an action changes no content
         let ev = st.act("runs", "run-1", "cancel", None, "you", "act").unwrap();
         assert_eq!((ev.kind.as_str(), ev.value["text"].as_str()), ("runs.cancel", Some("sim A")));
-        // removed: the rows stay, unowned
+        // removed: the rows go back into the layout, where they are ordinary content
         st.remove_owner("queue").unwrap();
+        let d = st.load("runs").unwrap();
+        assert!(!file.exists() && d.owned.is_empty() && d.rev == 2 && std::fs::read_to_string(st.doc_path("runs")).unwrap().contains("sim A"));
         st.patch("runs", &[Op::Set { id: "run-1".into(), field: "text".into(), value: json!("mine") }], None).unwrap();
         assert!(st.remove_owner("queue").unwrap_err().starts_with("no owner \"queue\""));
         std::fs::remove_dir_all(&st.home).ok();
