@@ -1046,8 +1046,12 @@ impl Scene {
                     }
                     let right = ag.took(inp.wall);
                     let mut buttons = vec![(0u16, 0u16, iw, format!("mg:agent/{}", ag.id))];
-                    let mut edge = iw.saturating_sub(width(&right) as u16 + 1);
-                    gg.put(edge, 0, &right, Style::fg(p.grey1).on(p.bg0));
+                    // the time is right-aligned in a slot of fixed width, so the stop buttons of
+                    // rows with "45s" and "1h04" sit in one column
+                    const TIME_SLOT: u16 = 5;
+                    let tw = width(&right) as u16;
+                    gg.put(iw.saturating_sub(tw + 1), 0, &right, Style::fg(p.grey1).on(p.bg0));
+                    let mut edge = iw.saturating_sub(tw.max(TIME_SLOT) + 1);
                     if !ag.finished && inp.mouse {
                         let a = gg.area();
                         let bx = edge.saturating_sub(8);
