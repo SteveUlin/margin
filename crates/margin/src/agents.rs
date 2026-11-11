@@ -344,12 +344,15 @@ impl Agent {
         Some((now - since).max(0.0))
     }
 
-    /// A short name for the row: its plan section without the `ag-` prefix (`ag-widgets` is
-    /// `widgets`), else its description.
+    /// The row's name: the description it was started with, which is written to be read. Its
+    /// plan section's id (`ag-new` once showed as a row named "new") is only the fallback.
     pub fn who(&self) -> String {
+        if !self.description.trim().is_empty() {
+            return self.description.clone();
+        }
         match &self.plan {
             Some((_, sec)) => sec.strip_prefix("ag-").unwrap_or(sec).to_string(),
-            None => self.description.clone(),
+            None => String::new(),
         }
     }
 
