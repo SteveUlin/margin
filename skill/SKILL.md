@@ -137,7 +137,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
 
 Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 
-- `dashboards`: standing boards: tables, run strips, tabs, badges, the theme; design to handler, step by step.
+- `dashboards`: standing boards: tables, run strips, tabs, badges, plots fed by `margin data`; step by step.
 - `handlers`: commands margin runs for an event (a key on a row, a refresh): the contract, the daemon.
 - `integrate`: other programs: cron and systemd recipes, following events, owning rows, JSON queries.
 - `lifecycle`: what survives a session end, a closed pane, a reboot; `margin doctor`, `daemon status`.

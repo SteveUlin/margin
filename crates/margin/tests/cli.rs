@@ -351,6 +351,25 @@ fn the_examples_run_end_to_end_through_new() {
         assert!(ok && out.trim() == format!("{name} rev 1"), "{name}: {out}");
         let (ok, out) = run(&["render", name, "--width", "100", "--height", "40"], "");
         assert!(ok && !out.trim().is_empty(), "{name}: {out}");
+        // the services board's plot reads a dataset: the steps register it and append to it
+        // from a loop. Run as written (the loop's body three times), the plot draws
+        if name == "services" {
+            assert!(out.contains("no dataset \"latency\" (margin data add latency)"), "{out}");
+            let lines: Vec<&str> = steps.lines().map(|l| l.trim_start_matches('#').trim()).collect();
+            let at = lines.iter().position(|l| l.starts_with("margin data add latency")).expect("the dataset step");
+            let words: Vec<&str> = lines[at].split_whitespace().skip(1).collect();
+            assert!(run(&words, "").0, "{}", lines[at]);
+            assert!(lines[at + 1].starts_with("while sleep") && lines[at + 3] == "done", "{:?}", &lines[at..at + 4]);
+            let script = format!("margin() {{ {BIN:?} --home {:?} --project p \"$@\"; }}\nfor i in 1 2 3; do\n{}\ndone\n", home.display().to_string(), lines[at + 2]);
+            let o = Command::new("bash").arg("-c").arg(&script).current_dir(&decoy).output().unwrap();
+            assert!(o.status.success(), "{script}\n{}", String::from_utf8_lossy(&o.stderr));
+            let (_, shown) = run(&["data", "show", "latency", "--json"], "");
+            let v: serde_json::Value = serde_json::from_str(shown.trim()).unwrap_or_else(|e| panic!("{e}: {shown}"));
+            assert!(v["records"].as_array().unwrap().len() == 3 && v["records"][2]["p95"].as_u64().unwrap() >= 120 && v["records"][2]["t"].as_u64().unwrap() > 1_700_000_000, "{shown}");
+            let (ok, out) = run(&["render", name, "--width", "100", "--height", "40"], "");
+            assert!(ok && !out.contains("no dataset") && out.contains("● p50") && out.contains("● p95") && out.contains("now"), "{out}");
+            assert!(run(&["show", name, "--json"], "").1.contains("\"rev\": 1,"), "appends make no revision");
+        }
         let (ok, out) = run(&["apply", name], &feed_out);
         assert!(ok && out.trim() == format!("{name} rev 1"), "{name}: the feed's output changes nothing: {out}");
         let (ok, out) = run(&["new", name], &json);

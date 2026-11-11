@@ -20,11 +20,13 @@ margin show BOARD ID --json               # {"v":1,"artifact","rev","block":{…
 margin events --json [--name GLOB] [--since N] [--cursor NAME --no-commit]   # one event per line
 margin handler ls --json                  # handlers: state, cursor, events waiting, last run
 margin owner ls --json                    # owners: last write, stale or not
+margin data ls --json                     # datasets: path, size, last change, stale or not
+margin data show NAME --last 5 --json     # {"v":1,"name","records":[…],…}: the newest records
 margin daemon status --json
 ```
 
 Exit codes: 0 done; 1 refused, invalid or failed; 3 not found (no such artifact, component,
-handler or owner). The message is on stderr, and stdout stays empty on failure.
+handler, owner or dataset). The message is on stderr, and stdout stays empty on failure.
 
 ## Submit work or news from anywhere
 
@@ -108,6 +110,39 @@ WantedBy=default.target
 A program that already runs on its own schedule can write its rows directly, as a registered
 owner (below): `./fetch.sh | margin apply reviews --as fetcher --project boards` from cron.
 margin then runs nothing, and `--expect-every` shows the rows stale if the cron job stops.
+
+## Publish numbers for a board to draw
+
+Values that change often (a rate, a latency, a queue length) go in a dataset, not in the board: a
+plot bound to it by name redraws when the dataset changes, and the board itself gets no new
+revision (`margin help dashboards`, "Numbers that change often"). margin runs nothing to fetch
+them: whoever has the number appends it.
+
+```sh
+margin data add queue-depth --cap 1440 --expect-every 2m --project boards      # once
+crontab -e
+#   * * * * *  /usr/local/bin/margin data append queue-depth "$(redis-cli llen jobs)" --project boards
+```
+
+- `margin data append NAME VALUE` takes a number or a JSON object (`'{"t":"…","p50":41}'`); `-`
+  reads many from stdin, one per line. `margin data put NAME < records` replaces the content (a
+  JSON array or JSON lines). Both refuse a name that is not registered (exit 3).
+- `--cap 1440` keeps the newest 1440 records; `--expect-every 2m` shows what is bound to the
+  dataset as stale when the cron job stops, and `margin data ls` says STALE.
+- `--owner NAME` (a name from `margin owner add`) makes the dataset that owner's: only `margin
+  data append … --as NAME` writes it.
+
+A tool that already writes a JSON lines or CSV file registers that file and writes nothing more:
+
+```sh
+margin data add requests --file /var/log/app/requests.jsonl --expect-every 30s --project boards
+```
+
+margin reads the file where it is (only its end, however large it has grown) and never writes
+it, so `put` and `append` on it are refused. CSV needs a header row and the `.csv` extension. A
+relative path is resolved against the directory of this command and stored absolute.
+
+`margin data show NAME --last 5 --json` and `margin data ls --json` are the queries.
 
 ## React to events in your own process
 

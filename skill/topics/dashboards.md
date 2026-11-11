@@ -293,6 +293,82 @@ fewer with no dash. **decided**: a settled decision: `text`, `by` (`claude` or `
 and `@[name]`, which draws the name's badge (`"review from @[ada] is pending"`). A name gets the
 same glyph and color everywhere it appears: a `who` column, a row's `who`, `@[name]`.
 
+## Numbers that change often
+
+A board holds layout and text someone wrote, which change rarely. Values that change more often
+than the layout (a request rate, a latency, a queue length, the last runs of a job) go in a
+**dataset**: named, kept in the project outside every document, and read by the pane when it
+draws. Appending a number to a dataset redraws the plot bound to it and changes nothing about the
+board: no new revision, no change bar, no unseen count. The pane runs nothing to get data;
+whoever has the numbers writes them (`margin help integrate`, "Publish numbers for a board to draw").
+
+```sh
+margin data add latency --cap 2000 --expect-every 1m     # once: register it (a write to an unregistered name is an error)
+margin data append latency '{"t":"2026-11-10T19:40:00Z","p50":41,"p95":180}'   # from anywhere, as often as you like
+margin data add requests --file /var/log/app/requests.jsonl   # or: a JSON lines or CSV file a program already writes
+margin data ls        margin data show latency --last 5        margin data put prs < prs.json
+```
+
+A record is a JSON object, or a bare number (a dataset of bare numbers is one unnamed series).
+`--cap N` keeps the newest N records. `--expect-every 1m` marks what is bound to the dataset
+`◷ stale` once it has not changed for that long. `--file` is read in place and never written.
+
+A component binds to a dataset by name:
+
+**plot**: lines, an area, bars, columns, a histogram, sparklines or heat strips (`kind`; default
+`line`). Bound with `data`, it draws one series per field in `y`, from the newest `last` records
+(default: as many as the plot is wide).
+
+```json
+{"type": "plot", "id": "latency", "data": "latency", "y": ["p50", "p95"], "x": "t", "last": 120,
+ "height": 6, "legend": true, "threshold": 250}
+```
+
+- `y`: a field, or a list of fields. Each series is labeled with its field's name; `series`
+  renames and colors them by position (`"series": [{"label": "median"}, {"color": "orange"}]`).
+  Without `y`, bare numbers are one series, and records draw every numeric field.
+- `x`: a field holding the record's time (RFC 3339 or epoch seconds). The ends of the axis then
+  read as ages (`-5m`, `now`; the right end shows an age instead of `now` when the newest record
+  is late).
+- A plot may instead carry its values in the document (`"series": [{"label": "p50", "values":
+  [41, 40, 44]}]`): right for numbers that are part of what was written, such as a benchmark result.
+
+**table** rows from a dataset: `rows` names it, `key` names the record field that identifies a
+row (default `id`). Each record is a row: its fields are the cells by column key, its `target`
+and `detail` fields are the row's, and its id is `<table id>-<key value>`, so the focus, the
+table's `actions` and `open` follow the record (the event's snapshot carries it). Records sharing
+a key are one row, the newest. The 200 newest records show.
+
+```json
+{"type": "table", "id": "queue", "rows": "queue", "key": "id", "empty": "nothing queued",
+ "columns": [{"key": "id", "title": "Job", "kind": "id"}, {"key": "what", "title": "What"},
+             {"key": "since", "title": "Queued", "kind": "age"}]}
+```
+
+**runs** from a dataset: `{"type": "runs", "id": "nightly", "label": "nightly", "data": "nightly",
+"y": "outcome", "summary": true}` reads `ok` `fail` `skip` `running` from that field of the newest
+records.
+
+**Inline**: `~[@latency.p95]` in any text that takes markup is the newest values as a sparkline in
+the line: 12 cells, or `~[@latency.p95:24]` for 24; `~[@latency.p95|orange]` colors it; `~[@name]`
+reads bare numbers. (`~[3 5 2 9]` draws numbers written in the text itself.)
+
+A dataset that is not registered draws one dim line where the component would be, naming the
+command that registers it; the rest of the board draws as usual.
+
+**A dataset, or rows written by a handler or an owner?**
+
+- **A dataset** for values: many points of the same shape, where the newest ones matter and no
+  single point has an identity. Cheap to write from a loop or a cron line, and a write never marks
+  the board as changed.
+- **Rows** (a handler's, an owner's: `tr`, `row`, `status`) for state with identity that changes
+  occasionally: this pull request, that service. A change there is news: the row gets a change
+  bar and the tab its unseen count, which is what you want when a service goes red and not when a
+  number ticks.
+- A table bound to a dataset sits between: records with a key, replaced wholesale by whoever has
+  them (`margin data put`), shown without marking the board. Use it for a list that churns
+  (a queue); use owned rows when each change should be noticed.
+
 ## Theme
 
 The look is set per machine under `dashboard` in `~/.config/margin/config.json` (or the file

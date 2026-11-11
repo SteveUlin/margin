@@ -218,6 +218,32 @@ mod tests {
         }
     }
 
+    /// Datasets are documented where the binary sends a reader: the command's help names the
+    /// dashboards heading, that section shows each binding and says when a dataset is the right
+    /// tool, and the integrate topic has the two ways to publish (append from cron, register a file).
+    #[test]
+    fn datasets_are_documented_where_the_help_points() {
+        assert!(crate::DATA_HELP.contains("margin help dashboards") && crate::DATA_HELP.contains("Numbers that change often"));
+        let d = topic("dashboards").unwrap();
+        let sec = d.split("## Numbers that change often").nth(1).expect("the heading").split("\n## ").next().unwrap();
+        for must in ["margin data add", "margin data append", "--file", "--cap", "--expect-every", "\"data\": \"latency\"", "\"rows\": \"queue\"", "\"key\": \"id\"", "~[@latency.p95]", "~[@latency.p95:24]", "\"y\": \"outcome\"", "no new revision", "A dataset, or rows written by a handler or an owner?", "margin help integrate"] {
+            assert!(sec.contains(must), "dashboards, Numbers that change often: {must:?} is missing");
+        }
+        let i = topic("integrate").unwrap();
+        let sec = i.split("## Publish numbers for a board to draw").nth(1).expect("the heading").split("\n## ").next().unwrap();
+        for must in ["margin data add", "margin data append", "crontab", "--file", "--as NAME", "never writes", "margin help dashboards"] {
+            assert!(sec.contains(must), "integrate, Publish numbers: {must:?} is missing");
+        }
+        // the fields the topics name are the schema's
+        for (kind, fields) in [("plot", &["data", "y", "last", "x"][..]), ("table", &["rows", "key"][..]), ("runs", &["data", "y", "last"][..])] {
+            let k = crate::doc::kind(kind).unwrap();
+            for f in fields {
+                assert!(k.fields.iter().any(|x| x.0 == *f), "{kind} has no field {f}");
+            }
+        }
+        assert!(SKILL.contains("margin data"), "the skill names the command once");
+    }
+
     /// Every JSON block in the dashboards topic is a component the schema takes (or the theme).
     #[test]
     fn dashboards_topic_json_passes_the_schema() {

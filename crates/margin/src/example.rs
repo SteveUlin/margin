@@ -20,10 +20,15 @@ pub struct Example {
     pub owns: &'static str,
     /// The trigger its `margin feed add` line uses.
     pub trigger: &'static str,
+    /// More steps, for the parts of the board that no script writes (a plot fed by a dataset).
+    pub more: &'static str,
 }
 
 macro_rules! example {
     ($name:literal, $owns:literal, $trigger:literal, $about:literal) => {
+        example!($name, $owns, $trigger, $about, "")
+    };
+    ($name:literal, $owns:literal, $trigger:literal, $about:literal, $more:expr) => {
         Example {
             name: $name,
             about: $about,
@@ -33,15 +38,30 @@ macro_rules! example {
             out: include_str!(concat!("../../../skill/examples/", $name, ".feed.out")),
             owns: $owns,
             trigger: $trigger,
+            more: $more,
         }
     };
 }
 
 pub const EXAMPLES: &[Example] = &[
     example!("reviews", "pr", "--watch reviews.data.json", "pull requests to review: a table (id, author badge, title, CI run strip, age), rules, hints"),
-    example!("services", "svc", "--every 30s", "background services: tabs Failing / All; rows with the error, run strips with a failure count, a table with state glyphs"),
+    example!("services", "svc", "--every 30s", "background services: a latency plot fed by a dataset; tabs Failing / All; rows with the error, run strips with a failure count, a table with state glyphs", SERVICES_DATA),
     example!("tracker", "wk", "--watch tracker.data.json", "a work tracker: sections Now / Next / Waiting (todos, rows, owner badges) kept by a feed, beside a Decided section that is yours"),
 ];
+
+/// The services example's plot reads the dataset `latency`, which no script of the example
+/// writes: these steps register it and append to it from a shell loop. The numbers are not in
+/// the board, so appending one redraws the plot and makes no revision.
+const SERVICES_DATA: &str = "#
+# The latency plot at the top reads a dataset, not the document (margin help dashboards, \"Numbers that
+# change often\"). Until the dataset is registered the plot's place says so. Register it, then append to it
+# from whatever has the numbers; here a loop with made-up ones. Each append redraws the plot, and the
+# board keeps its revision: nothing is marked as changed
+#        margin data add latency --cap 600 --expect-every 30s
+#        while sleep 5; do
+#          margin data append latency \"{\\\"t\\\":$(date +%s),\\\"p50\\\":$((30 + RANDOM % 20)),\\\"p95\\\":$((120 + RANDOM % 150))}\"
+#        done
+";
 
 /// The fourth example is not a board with a fetcher: it is an outside tool. A run queue that
 /// takes submissions as events, runs them one at a time and owns its rows, as a program of its
@@ -144,7 +164,8 @@ impl Example {
 #
 # Optional convenience, instead of steps 4 and 6: the older feed runner schedules the script itself ({trigger_words})
 #        margin feed add {n} {trigger} --artifact {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
-",
+{more}",
+            more = self.more,
             trigger_words = if self.trigger.starts_with("--watch") { "here: whenever the data file changes" } else { "here: on an interval" },
             about = self.about,
             trigger = self.trigger,
@@ -247,6 +268,48 @@ mod tests {
             assert!(!o.status.success() && o.stdout.is_empty() && !o.stderr.is_empty(), "{}", e.name);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The services board's plot is bound to a dataset: the artifact says which, the steps
+    /// register it and append to it, and with records there the plot draws them (before that,
+    /// its place names the command that registers the dataset).
+    #[test]
+    fn the_services_plot_reads_a_dataset_the_steps_register_and_append_to() {
+        let e = get("services").unwrap();
+        let d = doc(e);
+        let plot = d.find("latency").expect("the latency plot");
+        assert_eq!((plot.kind.as_str(), plot.opt("data"), plot.strs("y")), ("plot", Some("latency"), vec!["p50".to_string(), "p95".to_string()]));
+        assert!(plot.f.get("series").is_none(), "its numbers are not in the document");
+        let notes = e.notes();
+        let lines: Vec<&str> = notes.lines().map(|l| l.trim_start_matches('#').trim()).collect();
+        let at = lines.iter().position(|l| *l == "margin data add latency --cap 600 --expect-every 30s").expect("the step that registers the dataset");
+        assert!(lines[at + 1].starts_with("while ") && lines[at + 2].starts_with("margin data append latency ") && lines[at + 3] == "done", "a three-line loop: {:?}", &lines[at + 1..at + 4]);
+        for other in EXAMPLES.iter().filter(|x| x.name != "services") {
+            assert!(!other.notes().contains("margin data"), "{}", other.name);
+        }
+        // the board as the pane draws it: without the dataset, then with records of the loop's shape
+        let st = temp_store();
+        st.put(d.clone(), None).unwrap();
+        let frame = |st: &crate::store::Store| {
+            let raw = st.load("services").unwrap();
+            let snap = std::rc::Rc::new(crate::data::Snapshot::load(st, &crate::data::wants(&raw, 100), &mut crate::data::Cache::default()));
+            crate::data::install(snap.clone());
+            let shown = crate::data::expand(&raw, &snap);
+            let (cfg, state, view) = (crate::config::Config::default(), crate::store::State::default(), crate::store::View::default());
+            let mut sc = crate::scene::Scene::new(&cfg);
+            let inp = crate::scene::Input { doc: &shown, state: &state, view: &view, delivered: 0, unread: 0, now: 1.0, wall: 1_794_000_057.0, cfg: &cfg, kitty: false, cell: (10, 20), focused_pane: false, mouse: false, project: "p", w: 100, h: 40, activity: &[] };
+            sc.frame(&inp).grid.to_text()
+        };
+        let before = frame(&st);
+        assert!(before.contains("no dataset \"latency\" (margin data add latency)") && before.contains("Failing (2)"), "{before}");
+        st.data_add("latency", crate::data::Dataset { cap: Some(600), expect_every: Some(30.0), added: crate::util::now_rfc3339(), ..Default::default() }).unwrap();
+        for i in 0..12 {
+            st.data_append("latency", None, &[serde_json::json!({"t": 1_794_000_000 + i * 5, "p50": 30 + i % 7, "p95": 120 + (i * 37) % 150})]).unwrap();
+        }
+        let after = frame(&st);
+        assert!(!after.contains("no dataset") && after.contains("● p50") && after.contains("● p95") && after.contains("-57s") && after.contains("now"), "{after}");
+        assert_eq!(st.load("services").unwrap().rev, 1, "twelve appends, the same revision");
+        let _ = std::fs::remove_dir_all(&st.home);
     }
 
     /// The examples are for anyone: no name, no machine path.

@@ -3,6 +3,7 @@
   "purpose": "Background services: what is failing now, and how each one has been running",
   "hints": ["]t  next view", "d  the error of the focused service", "strips: oldest run left, newest right"],
   "blocks": [
+    {"type": "plot", "id": "latency", "data": "latency", "y": ["p50", "p95"], "x": "t", "height": 7, "legend": true},
     {"type": "tabs", "id": "svc", "children": [
       {"type": "section", "id": "svc-failing", "title": "Failing (2)", "children": [
         {"type": "row", "id": "svc-f-ingest-worker", "glyph": "fail", "text": "ingest-worker", "who": "ada", "since": "2026-11-10T17:40:00Z", "detail": "exit 1: connection refused (db:5432) after 3 retries", "target": "https://example.com/services/ingest-worker"},
