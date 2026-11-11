@@ -141,7 +141,6 @@ Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 
 - `dashboards`: standing boards: tables, run strips, tabs, badges, the theme; design to feed, step by step.
 - `feeds`: scripts that keep a panel current without you (jj ledger, agent monitor, queue, turns).
-- `tails`: `margin tail`, a long command's output live in the pane.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
 - `diffs`: `margin diff`, a structural diff {{user}} approves or rejects.
 - `images`: `margin image`, a PNG in the pane.

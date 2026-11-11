@@ -615,58 +615,14 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             Drawn { grid: Some(g), ..Default::default() }
         }
         "tail" => {
-            // a command's output: a header (spinner or outcome, title, time), then while it runs
-            // (or when opened) its last lines in a gutter box, errors red; done, it's one line
-            let t = b.f.get("_tail").cloned().unwrap_or_default();
-            let state = t["state"].as_str().unwrap_or("").to_string();
-            let open = t["open"].as_bool().unwrap_or(false);
-            let running = state == "running";
-            let all: Vec<String> = t["lines"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
-            let n = if open { 30 } else if running { b.num("lines").unwrap_or(6.0) as usize } else { 0 };
-            let lines = &all[all.len().saturating_sub(n)..];
-            // focused: the title and each line of output wrap; otherwise a line is cut
-            let full = in_full(cx, b);
-            let started = t["started"].as_str().and_then(parse_rfc3339);
-            let ended = t["ended"].as_str().and_then(parse_rfc3339).or(if running { Some(cx.wall) } else { None });
-            let took = match (started, ended) {
-                (Some(a), Some(z)) => age_short((z - a).max(0.0)),
-                _ => String::new(),
-            };
-            let right = match state.as_str() {
-                "ok" => format!("done · {took}"),
-                "failed" => format!("exit {} · {took}", t["code"].as_i64().unwrap_or(-1)),
-                "running" => took.clone(),
-                _ => "not run".into(),
-            };
-            let rx = w.saturating_sub(width(&right) as u16 + 1);
-            let title = fit_lines(b.s("title"), rx.saturating_sub(ind + TX + 1) as usize, full);
-            let body: Vec<(String, bool)> = lines
-                .iter()
-                .flat_map(|l| {
-                    let err = crate::tail::is_error(l);
-                    fit_lines(&l.replace('\t', "  "), w.saturating_sub(ind + 3) as usize, full).into_iter().map(move |x| (x, err))
-                })
-                .collect();
-            let head_h = title.len().max(1) as u16;
-            let mut g = new_grid(w, head_h + body.len() as u16, g0);
-            let (gl, col) = match state.as_str() {
-                "running" => (parts::spinner(cx.now, cx.m).to_string(), p.yellow),
-                "ok" => (icon::DONE.to_string(), p.green),
-                "failed" => (icon::BLOCKED.to_string(), p.red),
-                _ => (icon::CLOCK.to_string(), p.grey1),
-            };
-            put(&mut g, ind, 0, &gl, Style::fg(col).on(g0).bold());
-            put(&mut g, rx, 0, &right, Style::fg(if state == "failed" { p.red } else { p.grey1 }).on(g0));
+            // a block type margin no longer has (`margin tail`, removed 2026-11): a board made
+            // before then still loads, and what is left of the block is its title, dim
+            let title = fit_lines(b.s("title"), w.saturating_sub(ind + 1) as usize, in_full(cx, b));
+            let mut g = new_grid(w, title.len().max(1) as u16, g0);
             for (i, l) in title.iter().enumerate() {
-                put(&mut g, ind + TX, i as u16, l, Style::fg(p.fg).on(g0).bold());
+                put(&mut g, ind, i as u16, l, Style::fg(p.grey1).on(g0));
             }
-            for (i, (l, err)) in body.iter().enumerate() {
-                let y = head_h + i as u16;
-                put(&mut g, ind, y, "▏", Style::fg(p.bg4).on(g0));
-                put(&mut g, ind + 2, y, l, Style::fg(if *err { p.red } else { p.grey1 }).on(g0));
-            }
-            let tick = if running { Some(if cx.m.on { 0.1 } else { 1.0 }) } else { None };
-            Drawn { grid: Some(g), tick, buttons: vec![(0, 0, w, format!("mg:tail/{}", b.id))], ..Default::default() }
+            Drawn { grid: Some(g), ..Default::default() }
         }
         "code" => {
             // monospace lines on a raised ground, a gutter rule, no wrap: a long line ends in …

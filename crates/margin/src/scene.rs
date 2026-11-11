@@ -333,10 +333,6 @@ pub struct Scene {
     pub agents_open: HashSet<String>,
     /// Toasts to draw, each with how much of its time is left (toast.rs; the app runs the clock).
     pub toasts: Vec<(crate::toast::Toast, f32)>,
-    /// Each tail component's run (state, lines), loaded by the app on reload (tail.rs), and the
-    /// tails sulin opened to 30 lines.
-    pub tails: HashMap<String, (crate::tail::Meta, Vec<String>)>,
-    pub tails_open: HashSet<String>,
     pub item_pos: HashMap<String, (i32, u16)>,
     /// Buttons on screen this frame: (x, y, width, token).
     pub hits: Vec<(u16, u16, u16, String)>,
@@ -421,8 +417,6 @@ impl Scene {
             agents_folded: None,
             agents_open: HashSet::new(),
             toasts: Vec::new(),
-            tails: HashMap::new(),
-            tails_open: HashSet::new(),
             item_pos: HashMap::new(),
             view_top: 0,
             hits: Vec::new(),
@@ -848,12 +842,6 @@ impl Scene {
                         bb = b.clone();
                         bb.f.insert("_level".into(), (*level).into());
                         bb.f.insert("_gap".into(), (*gap).into());
-                        &bb
-                    } else if b.kind == "tail" {
-                        // the run's state and its last lines, from beside the doc
-                        bb = b.clone();
-                        let (m, lines) = self.tails.get(&b.id).cloned().unwrap_or_default();
-                        bb.f.insert("_tail".into(), serde_json::json!({"state": m.state, "started": m.started, "ended": m.ended, "code": m.code, "lines": lines, "open": self.tails_open.contains(&b.id)}));
                         &bb
                     } else if let Some(r) = graphs.get(&b.id) {
                         // a todo in a section with `after` edges: its lane cells and node links

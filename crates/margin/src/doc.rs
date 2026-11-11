@@ -113,8 +113,6 @@ pub const SCHEMA: &[Kind] = &[
         fields: &[] },
     Kind { name: "text", about: "a paragraph", children: false, action: "",
         fields: &[("text", Ty::Text, "the paragraph; wraps; **bold** `code` @[name]"), ("style", Ty::Enum(&["note", "dim", "warn"]), "note: an aside, dim: grey, warn: yellow"), ("tone", Ty::Enum(TONES), "the text's color")] },
-    Kind { name: "tail", about: "a command's output, live (made by margin tail; the lines live beside the doc)", children: false, action: "open (click: 30 lines)",
-        fields: &[("title", Ty::Text, "the header (default: the command)"), ("lines", Ty::Num, "lines shown while it runs (default 6)")] },
     Kind { name: "code", about: "monospace lines: a fenced block or a table (margin doc makes them)", children: false, action: "",
         fields: &[("text", Ty::Text, "lines, kept as written"), ("language", Ty::Text, "the fence's language, as a label")] },
     Kind { name: "bullet", about: "a bullet; children are sub-bullets", children: true, action: "",

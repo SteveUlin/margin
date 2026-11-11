@@ -397,14 +397,6 @@ names a step (that step shows `? Q1`), a countdown when it has `takes_at`, "taki
 in yellow once the moment comes, and the time Claude took it once it has. **wait for me** holds it:
 Claude stops at that step and waits for your pick; **release** lets the default stand.
 
-### Log tails (fold)
-
-`margin tail <art> <id> [--title T] [--parent P] [--lines N] -- <command>` runs a command with its
-output live in the pane and passed through to whoever ran it: a header (spinner, title, time),
-the last N lines (default 6) with errors in red, then, when it ends, one line with its outcome
-and a toast. A click opens the last 30 lines. The lines live in the project's `tails/`, not in the
-doc, and arrive in batches of at most five a second.
-
 ### Toasts (fold)
 
 `margin toast <art> "text" [--at ID] [--level ok|info|warn|error] [--ttl SECS]`: a message that

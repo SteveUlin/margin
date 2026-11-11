@@ -30,7 +30,7 @@ Claude Code hooks as one line of context.
   overwrite them. Shipped feeds: a jj change ledger, a monitor of Claude Code sessions, a board
   of queued messages, a turn ledger (`feeds/`).
 - Also: structural diffs to approve or reject (through difftastic), PNG images (kitty graphics),
-  live tails of long commands, toasts.
+  toasts.
 
 ![A dashboard tab: a table of pull requests with author badges, CI run strips and ages](docs/img/readme/dashboard.png)
 

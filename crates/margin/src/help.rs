@@ -14,7 +14,6 @@ pub const SKILL: &str = include_str!("../../../skill/SKILL.md");
 pub const TOPICS: &[(&str, &str)] = &[
     ("dashboards", include_str!("../../../skill/topics/dashboards.md")),
     ("feeds", include_str!("../../../skill/topics/feeds.md")),
-    ("tails", include_str!("../../../skill/topics/tails.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
     ("diffs", include_str!("../../../skill/topics/diffs.md")),
     ("images", include_str!("../../../skill/topics/images.md")),

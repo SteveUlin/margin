@@ -240,7 +240,6 @@ impl Live {
             crate::scene::show_in_tabs(&doc, &mut view, &f);
         }
         scene.restore(&view);
-        let _ = std::fs::create_dir_all(crate::tail::dir(st, art));
         Ok(Live {
             last_seq: st.last_seq(),
             st: store_like(st),
@@ -294,8 +293,6 @@ impl Live {
         self.scene.stopped = self.st.stopped();
         self.scene.agents = crate::agents::for_pane(&self.st, &self.art);
         self.toasts = crate::toast::load(&self.st, &self.art);
-        // each tail component's run: its state and its last 30 lines (tail.rs)
-        self.scene.tails = crate::tail::for_doc(&self.st, &self.art, &self.doc);
         self.delivered = self.st.delivered_max();
         // only what is new to Claude or to this pane: never the whole log on every reload
         let evs = self.st.events_since(self.delivered.min(self.last_seq));
@@ -708,13 +705,6 @@ impl Live {
             self.scene.agents_folded = Some(!self.scene.agents_folded.unwrap_or(!running));
             return;
         }
-        if let Some(id) = button.as_deref().and_then(|b| b.strip_prefix("mg:tail/")) {
-            // a tail's header: open it to 30 lines, or close it
-            if !self.scene.tails_open.remove(id) {
-                self.scene.tails_open.insert(id.to_string());
-            }
-            return;
-        }
         if let Some(id) = button.as_deref().and_then(|b| b.strip_prefix("mg:toast/")) {
             crate::toast::dismiss(&self.st, &self.art, id);
             self.toasts.retain(|t| t.id != id);
@@ -1079,14 +1069,13 @@ impl Pane {
         v
     }
 
-    /// The directories whose changes mean "reload": each tab's artifact and tails, and the
+    /// The directories whose changes mean "reload": each tab's artifact, and the
     /// project's shared ones.
     fn watch(&self) -> Vec<std::path::PathBuf> {
         let st = &self.tabs[0].st;
         let mut w = vec![st.dir(), st.dir().join("delivered"), st.activity_dir(), st.dir().join("toasts")];
         for l in &self.tabs {
             w.push(st.art(&l.art));
-            w.push(crate::tail::dir(st, &l.art));
         }
         w
     }

@@ -27,7 +27,6 @@ mod scene;
 mod select;
 mod store;
 mod tabs;
-mod tail;
 mod theme;
 mod toast;
 mod util;
@@ -67,7 +66,6 @@ content (Claude): creating and changing are different commands, for an artifact 
   margin image <art> <id> <png> [--alt A] [--parent P] [--rows N]
   margin doc <art> <id> [--title T] < notes.md                      long-form markdown as a section
   margin toast <art> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
-  margin tail <art> <id> [--title T] -- <command...>                a command's output, live
   margin show <art> [--json]    margin ls [--json]    margin gc
 
 return channel:
@@ -158,7 +156,6 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "wait", help: "margin wait <art>.<id> [--timeout 10m]\n  block until sulin decides and print the decision; exit 2 on timeout\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "doc", help: "margin doc <art> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
-    Cmd { name: "tail", help: "margin tail <art> <id> [--title T] [--parent P] [--lines N] -- <command...>\n  run a command with its output live in the pane (and through to you): a header with a spinner\n  and the time, the last N lines (default 6), errors red; it folds to its outcome when the command\n  ends, and a toast says how it went. Exits with the command's code.\n", flags: &["--title", "--parent", "--lines"], max_pos: Some(2) },
     Cmd { name: "toast", help: "margin toast <art> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
     Cmd { name: "stop", help: "margin stop [<art>]\n  the stop signal: Claude's tool calls in this project are refused until sulin next sends a\n  message (the pane's S key does the same)\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "link", help: "margin link [<art>] [--session S]\n  the artifact this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
@@ -662,8 +659,6 @@ fn main() {
     export_store_flags(&a);
     let r = if cmd == "feed" {
         feed_cmd(&a, rest)
-    } else if cmd == "tail" {
-        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| tail_cmd(&a, rest))
     } else {
         check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for feed add".into()) }).and_then(|_| run(&cmd, &a))
     };
@@ -671,30 +666,6 @@ fn main() {
         eprintln!("margin {cmd}: {}", who::say(&e));
         std::process::exit(1);
     }
-}
-
-/// `margin tail`: make sure the tail component exists, run the command into it, exit with its code.
-fn tail_cmd(a: &Args, rest: Vec<String>) -> Result<(), String> {
-    author(a)?;
-    let st = store(a);
-    let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
-    if rest.is_empty() {
-        return Err("margin tail needs a command after --".into());
-    }
-    let title = a.get("--title").map(String::from).unwrap_or_else(|| rest.join(" "));
-    let mut c = json!({"type": "tail", "id": id, "title": title});
-    if let Some(n) = a.get("--lines").and_then(|n| n.parse::<u64>().ok()) {
-        c["lines"] = json!(n);
-    }
-    if let Some(p) = a.get("--parent") {
-        c["parent"] = json!(p);
-    }
-    apply_cmd(&st, art, &c.to_string(), a, false, Whole::Replace)?;
-    let code = tail::run(&st, art, id, &title, &rest)?;
-    if code != 0 {
-        std::process::exit(code);
-    }
-    Ok(())
 }
 
 fn run(cmd: &str, a: &Args) -> Result<(), String> {
@@ -1278,7 +1249,6 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             sc.recap = recap::for_pane(&st, art);
             sc.agents = agents::for_pane(&st, art);
             sc.toasts = toast::load(&st, art).into_iter().map(|t| (t, 1.0)).collect();
-            sc.tails = tail::for_doc(&st, art, &d);
             if set.len() > 1 {
                 let docs = set.iter().map(|x| st.load(x)).collect::<Result<Vec<_>, _>>()?;
                 let titles = tabs::short_titles(&docs.iter().map(|d| if d.title.is_empty() { d.id.clone() } else { d.title.clone() }).collect::<Vec<_>>());
@@ -1955,10 +1925,9 @@ mod tests {
         for (what, input, bare) in [("apply a whole document", whole, false), ("apply a component", comp, false), ("apply/patch an op", op, false), ("put", whole, true), ("put an array", "[]", true), ("put nothing", "", true)] {
             assert_eq!(apply_cmd(&st, "paln", input, &a(&[]), bare, Whole::Replace).unwrap_err(), want, "{what}");
         }
-        // doc and tail write a component through apply_cmd
+        // doc writes a component through apply_cmd
         let sec = mdoc::to_section("notes", None, "# Notes\n\nA line.\n");
         assert_eq!(apply_cmd(&st, "paln", &sec.to_string(), &a(&[]), false, Whole::Replace).unwrap_err(), want, "doc");
-        assert_eq!(tail_cmd(&a(&["paln", "tl"]), vec!["true".into()]).unwrap_err(), want, "tail");
         // feed registration: a mistyped --artifact (or a name with no artifact) registers nothing
         let e = feed_cmd(&a(&["add", "jj", "--every", "1h", "--artifact", "paln"]), vec!["true".into()]).unwrap_err();
         assert_eq!(e, want, "feed add");

@@ -111,7 +111,6 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("wait", s(&["a.zz", "--timeout", "1s"]), "", false),
         ("hook", s(&["prompt"]), &hook_in, true),
         ("doc", s(&["a", "notes"]), "# Notes\n\nA line.\n", true),
-        ("tail", s(&["a", "tl", "--", "true"]), "", true),
         ("toast", s(&["a", "hello"]), "", true),
         ("stop", s(&["a"]), "", true),
         ("link", s(&["a"]), "", true),
@@ -270,7 +269,6 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
         (vec!["diff", "paln", "d1", "--old", "/nonexistent-a", "--new", "/nonexistent-b"], ""),
         (vec!["image", "paln", "i1", &png_s], ""),
         (vec!["toast", "paln", "hello"], ""),
-        (vec!["tail", "paln", "tl", "--", "true"], ""),
         (vec!["feed", "add", "f", "--every", "1h", "--artifact", "paln", "--", "true"], ""),
     ];
     for (argv, stdin) in &walk {
