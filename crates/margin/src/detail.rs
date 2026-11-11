@@ -40,6 +40,28 @@ pub enum Run {
 
 pub type Line = Vec<(String, Run)>;
 
+/// What the panel says while more about a block has been asked for (app.rs appends
+/// `<board>.detail` and a handler may answer by writing the block or a dataset).
+pub const ASKED: &str = "asked for more";
+/// What it says once `ASKED_SECS` passed with no change to the block.
+pub const NO_ANSWER: &str = "no answer yet";
+
+thread_local! {
+    /// The one quiet line under a block's content, and the block it belongs to. The pane sets it
+    /// before each frame of the tab on screen, as it installs the tab's datasets; drawing reads
+    /// it and never waits on anything.
+    static NOTE: std::cell::RefCell<Option<(String, &'static str)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Say `text` under block `id` in the panel (None: nothing).
+pub fn set_note(note: Option<(String, &'static str)>) {
+    NOTE.with(|n| *n.borrow_mut() = note);
+}
+
+fn note_for(id: &str) -> Option<&'static str> {
+    NOTE.with(|n| n.borrow().as_ref().filter(|(i, _)| i == id).map(|(_, t)| *t))
+}
+
 /// Where the panel goes in a pane `w` by `h` whose list would span rows `top..bottom`: beside the
 /// list (two fifths of the width, a rule's column included) or under it (a third of the rows, a
 /// rule's row included). None when the pane is too small for one.
@@ -145,9 +167,11 @@ pub fn lines(b: &Block, state: &State, wall: f64, w: usize) -> (Vec<Line>, Optio
     out.push(vec![(format!("{} · {}", b.kind, b.id), Run::Dim)]);
     let detail = b.s("detail").trim_end();
     let fs = fields(b, state, wall);
+    let note = note_for(&b.id);
     if detail.trim().is_empty() && fs.is_empty() {
         out.push(Vec::new());
-        out.push(vec![("nothing more on this row".into(), Run::Dim)]);
+        // a block with nothing more yet, and more asked for: say that instead
+        out.push(vec![(note.unwrap_or("nothing more on this row").into(), Run::Dim)]);
         return (out, None);
     }
     if !detail.trim().is_empty() {
@@ -173,6 +197,10 @@ pub fn lines(b: &Block, state: &State, wall: f64, w: usize) -> (Vec<Line>, Optio
                 out.push(vec![(lead, Run::Key), (l.trim_start().to_string(), Run::Value)]);
             }
         }
+    }
+    if let Some(n) = note {
+        out.push(Vec::new());
+        out.push(vec![(n.into(), Run::Dim)]);
     }
     if b.opt("target").is_some() {
         out.push(Vec::new());
@@ -298,6 +326,25 @@ mod tests {
         let (ls, open) = lines(&b, &State::default(), 0.0, 40);
         assert_eq!(text(&ls), ["just a row", "row · r1", "", "nothing more on this row"]);
         assert_eq!(open, None);
+    }
+
+    /// More was asked for: one dim line under the block's content, above the target's hint, on
+    /// that block only; a block with nothing else says it in place of "nothing more".
+    #[test]
+    fn the_asked_note_sits_under_the_content_of_its_block_only() {
+        let b = block(json!({"type": "row", "id": "r1", "text": "a row", "detail": "what is known", "target": "https://example.test/1"}));
+        let bare = block(json!({"type": "row", "id": "r2", "text": "bare"}));
+        set_note(Some(("r1".into(), ASKED)));
+        let (ls, open) = lines(&b, &State::default(), 0.0, 40);
+        let t = text(&ls);
+        assert_eq!(&t[2..], ["", "what is known", "", "target  https://example.test/1", "", "asked for more", "", "⏎ open the target"]);
+        assert_eq!(open, Some(9));
+        assert!(ls[7].iter().all(|(_, r)| *r == Run::Dim));
+        assert!(!text(&lines(&bare, &State::default(), 0.0, 40).0).contains(&ASKED.to_string()));
+        set_note(Some(("r2".into(), NO_ANSWER)));
+        assert_eq!(text(&lines(&bare, &State::default(), 0.0, 40).0), ["bare", "row · r2", "", "no answer yet"]);
+        set_note(None);
+        assert!(!text(&lines(&b, &State::default(), 0.0, 40).0).contains(&ASKED.to_string()));
     }
 
     /// Beside the list from 100 columns, under it when narrower, nowhere in a pane too short.

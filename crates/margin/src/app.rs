@@ -162,7 +162,32 @@ struct Live {
     pane_act: Option<PaneAct>,
     /// Actions the person fired from this pane and what became of each, by block id.
     sent: std::collections::HashMap<String, Sent>,
+    /// The detail panel's block while the focus settles on it: (block, since when, pane clock).
+    detail_at: Option<(String, f64)>,
+    /// The block `<board>.detail` was last appended for (None: the panel is closed, or the tab
+    /// went off screen; the next block it shows is asked about again).
+    detail_sent: Option<String>,
+    /// More was asked for and a handler is registered to answer: what the panel says meanwhile.
+    asked: Option<Asked>,
 }
+
+/// A `<board>.detail` some handler will be run for: the block, when (epoch seconds), and what
+/// the block and the datasets it reads looked like then. A change to either is the answer.
+struct Asked {
+    id: String,
+    at: f64,
+    hash: u64,
+    sets: Vec<(String, Option<u64>, usize)>,
+}
+
+/// The pane says `<board>.shown` again when it regains the terminal focus after this long away
+/// (seconds): what it shows may be old, and a provider can refresh it.
+pub const REFOCUS_SECS: f64 = 60.0;
+/// `<board>.detail` is appended for a block once the detail panel has stayed on it this long
+/// (seconds): arrowing through rows asks about the row where the focus rests, not each one passed.
+pub const DETAIL_SETTLE: f64 = 0.3;
+/// How long the detail panel says "asked for more" before it says "no answer yet" (seconds).
+pub const ASKED_SECS: f64 = 10.0;
 
 /// An action fired on a row, until its note on the row goes: the event it appended (or why it
 /// was refused), when, and the row's content then (a row that changes has been dealt with).
@@ -364,6 +389,9 @@ impl Live {
             saved,
             pane_act: None,
             sent: Default::default(),
+            detail_at: None,
+            detail_sent: None,
+            asked: None,
         })
     }
 
@@ -577,6 +605,73 @@ impl Live {
         });
         self.scene.sent = notes;
         !self.sent.is_empty()
+    }
+
+    /// The view event `<board>.detail`: appended once the detail panel has stayed on a block for
+    /// `DETAIL_SETTLE`, with the block's id and the snapshot an action carries. The pane fetches
+    /// nothing: a handler registered for the name may answer by writing the block or a dataset.
+    /// Returns when to look again (pane clock) while a block waits out the settle time.
+    fn detail_step(&mut self, t: f64, wall: f64) -> Option<f64> {
+        let focus = self.scene.focus.clone().filter(|f| self.view.detail && self.doc.find(f).is_some());
+        let Some(f) = focus else {
+            (self.detail_at, self.detail_sent) = (None, None);
+            return None;
+        };
+        if self.detail_sent.as_deref() == Some(f.as_str()) {
+            self.detail_at = None;
+            return None;
+        }
+        let since = match &self.detail_at {
+            Some((id, since)) if *id == f => *since,
+            _ => {
+                self.detail_at = Some((f.clone(), t));
+                t
+            }
+        };
+        if t - since < DETAIL_SETTLE {
+            return Some(since + DETAIL_SETTLE);
+        }
+        let kind = format!("{}.detail", self.art);
+        let (value, hash) = self.doc.find(&f).map(|b| (crate::store::snapshot(b), b.hash())).unwrap_or_default();
+        self.asked = None;
+        match self.st.log(&self.art, &f, &kind, value, "pane") {
+            // only a handler that will be run for it makes the panel say it asked
+            Ok(_) if self.st.handled(&kind) => self.asked = Some(Asked { sets: self.bound_sets(&f), id: f.clone(), at: wall, hash }),
+            Ok(_) => {}
+            Err(e) => select::log_line(&format!("{kind} on {f}: {e}")),
+        }
+        (self.detail_at, self.detail_sent) = (None, Some(f));
+        None
+    }
+
+    /// The datasets block `id` reads, as this tab last read them: name, last change, records.
+    fn bound_sets(&self, id: &str) -> Vec<(String, Option<u64>, usize)> {
+        crate::data::bound_ids(&self.doc)
+            .into_iter()
+            .filter(|(i, _)| i == id)
+            .map(|(_, name)| {
+                let set = self.data.sets.get(&name).and_then(|r| r.as_ref().ok());
+                (set.and_then(|s| s.changed).map(f64::to_bits), set.map(|s| s.records.len()).unwrap_or(0), name)
+            })
+            .map(|(changed, n, name)| (name, changed, n))
+            .collect()
+    }
+
+    /// The detail panel's line about what was asked (detail.rs `set_note`), before every frame
+    /// of this tab: "asked for more" until the block or a dataset it reads changes, "no answer
+    /// yet" from `ASKED_SECS` on, nothing once the panel closes. Never waits: it compares what
+    /// the tab already holds. Returns when the wording changes (epoch seconds).
+    fn asked_note(&mut self, wall: f64) -> Option<f64> {
+        let open = self.asked.as_ref().map(|a| self.view.detail && self.doc.find(&a.id).map(|b| b.hash() == a.hash).unwrap_or(false) && self.bound_sets(&a.id) == a.sets).unwrap_or(false);
+        if !open {
+            self.asked = None;
+            crate::detail::set_note(None);
+            return None;
+        }
+        let a = self.asked.as_ref().unwrap();
+        let waiting = wall - a.at < ASKED_SECS;
+        crate::detail::set_note(Some((a.id.clone(), if waiting { crate::detail::ASKED } else { crate::detail::NO_ANSWER })));
+        waiting.then_some(a.at + ASKED_SECS)
     }
 
     fn key(&mut self, k: Key, ctrl: bool, now: f64, term: &mut Terminal) {
@@ -1141,6 +1236,13 @@ impl ImgSync {
 struct Pane {
     tabs: Vec<Live>,
     active: usize,
+    /// The board `<board>.shown` was last appended for: the one on screen as far as the log
+    /// knows, and when (epoch seconds).
+    shown: Option<(String, f64)>,
+    /// When each board this pane showed went off screen (epoch seconds).
+    hidden_at: std::collections::HashMap<String, f64>,
+    /// When the pane lost the terminal focus (epoch seconds), until it has it back.
+    blurred: Option<f64>,
 }
 
 impl Pane {
@@ -1160,9 +1262,49 @@ impl Pane {
             }
         }
         let active = tabs.iter().position(|l| l.art == active_art).unwrap_or(0);
-        let mut pn = Pane { tabs, active };
+        let mut pn = Pane { tabs, active, shown: None, hidden_at: Default::default(), blurred: None };
         pn.store_set();
         Ok(pn)
+    }
+
+    /// The view events `<board>.hidden` and `<board>.shown`: appended when the board on screen
+    /// is not the one the log was last told, so once per tab switch however it came about (a
+    /// key, a click, `margin tab`) and once at the pane's start. `shown` carries how long the
+    /// board was off screen in this pane (`since`, seconds; null the first time).
+    fn view_step(&mut self, wall: f64) {
+        let art = self.tabs[self.active].art.clone();
+        if self.shown.as_ref().map(|(a, _)| *a == art).unwrap_or(false) {
+            return;
+        }
+        self.hide(wall);
+        let since = self.hidden_at.get(&art).map(|h| (wall - h).max(0.0).round() as u64);
+        let _ = self.tabs[self.active].st.log(&art, "", &format!("{art}.shown"), json!({"since": since}), "pane");
+        self.shown = Some((art, wall));
+    }
+
+    /// The board on screen stops being it (another tab, or the pane is leaving): `<board>.hidden`,
+    /// with how long it was on screen. Its detail panel asks again when it is next shown.
+    fn hide(&mut self, wall: f64) {
+        let Some((art, at)) = self.shown.take() else { return };
+        let _ = self.tabs[0].st.log(&art, "", &format!("{art}.hidden"), json!({"for": (wall - at).max(0.0).round() as u64}), "pane");
+        if let Some(l) = self.tabs.iter_mut().find(|l| l.art == art) {
+            (l.detail_at, l.detail_sent) = (None, None);
+        }
+        self.hidden_at.insert(art, wall);
+    }
+
+    /// The terminal focus left the pane or came back. Back after `REFOCUS_SECS` or more, the
+    /// board on screen is `shown` again (`since`: the seconds away). Losing the focus alone
+    /// hides nothing: the pane may be in plain sight beside the chat.
+    fn focus_changed(&mut self, focused: bool, wall: f64) {
+        if !focused {
+            self.blurred.get_or_insert(wall);
+            return;
+        }
+        let Some(away) = self.blurred.take().map(|b| wall - b) else { return };
+        if let (true, Some((art, _))) = (away >= REFOCUS_SECS, self.shown.as_ref()) {
+            let _ = self.tabs[0].st.log(art, "", &format!("{art}.shown"), json!({"since": away.round() as u64}), "pane");
+        }
     }
 
     fn set(&self) -> Vec<String> {
@@ -1365,6 +1507,7 @@ impl Pane {
 /// that say "a pane with this pid is in review mode" are removed (a mark left behind held back
 /// Claude's wake-up until something noticed the pid was dead).
 fn leave(pn: &mut Pane) {
+    pn.hide(epoch_now());
     for l in &mut pn.tabs {
         l.save_view();
         if l.review {
@@ -1464,11 +1607,15 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         // the tab bar's badges, from every tab; then this iteration is the tab on screen's
         let infos = pn.infos();
         pn.on_screen(size.cols);
+        // the view events: which board is on screen, and the block the detail panel rests on
+        pn.view_step(wall);
         let active = pn.active;
         let lv = &mut pn.tabs[active];
         lv.scene.tabs = infos;
         lv.scene.tab = active;
         let data_due = lv.data_step(&mut pace, t, wall);
+        let detail_due = lv.detail_step(t, wall);
+        let asked_due = lv.asked_note(wall);
         // an owner goes stale by the clock alone: looked at on every frame, with a wake-up
         // (below) for the moment the next one would
         lv.scene.stale = crate::owner::stale_on(&lv.st, &lv.art, wall);
@@ -1611,8 +1758,12 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         if let Some(at) = next_stale {
             wake.at(t + (at - wall).max(0.0) + 0.5);
         }
-        if let Some(at) = data_due {
+        if let Some(at) = data_due.into_iter().chain(detail_due).reduce(f64::min) {
             wake.at(at);
+        }
+        // "asked for more" becomes "no answer yet"
+        if let Some(at) = asked_due {
+            wake.at(t + (at - wall).max(0.0) + 0.05);
         }
         // a row saying `sent` is looked at again until its note goes
         if sent_wait {
@@ -1718,6 +1869,8 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
             if let Some(m) = exe_mtime(e).filter(|m| *m != t0) {
                 match rebuilt {
                     Some((pm, since)) if pm == m && t - since >= 1.0 => {
+                        // the new binary's pane says `shown` when it starts
+                        pn.hide(epoch_now());
                         for l in &mut pn.tabs {
                             l.save_view();
                         }
@@ -1795,6 +1948,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
                     if f && lv.scene.retained.any_unseen() {
                         pn.mark_seen(t);
                     }
+                    pn.focus_changed(f, epoch_now());
                 }
                 Event::Mouse { kind: MouseKind::Move, x, y, .. } => lv.scene.hover = lv.scene.row_at(x, y).map(String::from),
                 // the wheel scrolls what it is over: the detail panel, or the list
@@ -1911,6 +2065,47 @@ mod pane_tests {
         assert_eq!(seen(&st), ["a", "b"]);
         // a, now out of view, has nothing new
         assert_eq!(pn.infos()[0].unseen, 0);
+    }
+
+    fn views(st: &Store) -> Vec<(String, serde_json::Value)> {
+        st.events().into_iter().filter(|e| crate::store::is_view(&e.kind)).map(|e| (e.kind, e.value)).collect()
+    }
+
+    /// The board on screen is said once: `shown` at the start, `hidden` then `shown` on a tab
+    /// switch (with how long the board coming back was away), `shown` again after a long time
+    /// without the terminal focus, `hidden` on the way out. None of it is a decision or an
+    /// action: the hooks hand a Claude session nothing.
+    #[test]
+    fn a_tab_switch_says_hidden_then_shown_once_each() {
+        let (st, mut pn) = pane(&["a", "b"]);
+        pn.view_step(100.0);
+        pn.view_step(101.0);
+        assert_eq!(views(&st), [("a.shown".to_string(), json!({"since": null}))], "once, however many frames");
+        assert!(pn.act(PaneAct::Next(1)));
+        pn.view_step(130.0);
+        pn.view_step(131.0);
+        assert_eq!(views(&st)[1..], [("a.hidden".to_string(), json!({"for": 30})), ("b.shown".to_string(), json!({"since": null}))]);
+        assert!(pn.act(PaneAct::Prev(1)));
+        pn.view_step(190.0);
+        assert_eq!(views(&st)[3..], [("b.hidden".to_string(), json!({"for": 60})), ("a.shown".to_string(), json!({"since": 60}))]);
+        // the focus: a short time away says nothing, a long one says shown again; never hidden
+        pn.focus_changed(false, 200.0);
+        pn.focus_changed(true, 200.0 + REFOCUS_SECS - 1.0);
+        assert_eq!(views(&st).len(), 5);
+        pn.focus_changed(false, 300.0);
+        pn.focus_changed(true, 300.0 + REFOCUS_SECS + 30.0);
+        pn.focus_changed(true, 500.0);
+        assert_eq!(views(&st)[5..], [("a.shown".to_string(), json!({"since": 90}))]);
+        pn.hide(500.0);
+        assert_eq!(views(&st)[6..], [("a.hidden".to_string(), json!({"for": 310}))]);
+        let evs = st.events();
+        let e = evs.iter().find(|e| e.kind == "a.shown").unwrap();
+        assert_eq!((e.artifact.as_str(), e.id.as_str(), e.by.as_str(), e.via.as_str()), ("a", "", "you", "pane"));
+        // passive: no decision, no action, nothing for a Claude session's hooks
+        assert!(evs.iter().all(|e| !crate::store::is_decision(e) && !crate::store::is_action(e)));
+        assert!(crate::hook::unread(&st, "sess").is_empty());
+        assert!(crate::hook::actions_for_session(&st, "a", 0).is_empty() && crate::hook::actions_for_session(&st, "b", 0).is_empty());
+        std::fs::remove_dir_all(&st.home).ok();
     }
 
     /// The tab set and the tab on screen are written to the pane's own view file and come back
@@ -2042,7 +2237,7 @@ mod action_tests {
         .unwrap();
         st.put(doc, None).unwrap();
         // the table is a feed's: its rows are read-only content, and still take the person's actions
-        std::fs::write(st.dir().join("feeds.json"), r#"{"feeds": [{"name": "ci", "cmd": ["true"], "trigger": {"kind": "stream"}, "artifact": "ci", "owns": "job", "cwd": "/"}]}"#).unwrap();
+        std::fs::write(st.dir().join("owners.json"), r#"{"owners": [{"name": "ci", "board": "ci", "owns": "job"}]}"#).unwrap();
         let mut pn = Pane::open(&st, "ci", &[], &Config::default(), "tty", false, true).unwrap();
         pn.reload(0.0);
         (st, pn)
@@ -2404,6 +2599,109 @@ mod action_tests {
         let (x, y) = lv.scene.hits.iter().find(|h| h.3 == "mg:open/job-1").map(|h| (h.0, h.1)).unwrap();
         lv.click(&g, x, y, 7.0);
         assert!(st.events().iter().any(|e| e.kind == "ci.open" && e.id == "job-1" && e.via == "mouse"));
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    fn details(st: &Store) -> Vec<String> {
+        st.events().into_iter().filter(|e| e.kind == "ci.detail").map(|e| e.id).collect()
+    }
+
+    /// The detail panel asks about the block where the focus rests: a quick run of `j` appends
+    /// one `<board>.detail`, for the last block, carrying the snapshot an action carries. A
+    /// block already asked about is not asked again until the panel was closed.
+    #[test]
+    fn a_quick_run_of_j_asks_about_the_block_where_the_focus_rests() {
+        let (st, mut pn) = board();
+        let lv = pn.lv();
+        frame(lv, 100);
+        lv.scene.focus = Some("job".into());
+        assert_eq!(lv.detail_step(1.0, 1.0), None, "the panel is closed: nothing is asked");
+        lv.view.detail = true;
+        assert_eq!(lv.detail_step(1.0, 1.0), Some(1.0 + DETAIL_SETTLE));
+        // j, j, 100 ms apart: each press starts the wait again
+        lv.scene.move_focus(1);
+        assert_eq!(lv.scene.focus.as_deref(), Some("job-1"));
+        assert_eq!(lv.detail_step(1.1, 1.1), Some(1.1 + DETAIL_SETTLE));
+        lv.scene.move_focus(1);
+        assert_eq!(lv.scene.focus.as_deref(), Some("job-2"));
+        assert_eq!(lv.detail_step(1.2, 1.2), Some(1.2 + DETAIL_SETTLE));
+        assert_eq!(lv.detail_step(1.35, 1.35), Some(1.2 + DETAIL_SETTLE));
+        assert!(details(&st).is_empty(), "nothing while the focus moves");
+        assert_eq!(lv.detail_step(1.25 + DETAIL_SETTLE, 1.5), None);
+        assert_eq!(lv.detail_step(5.0, 5.0), None);
+        assert_eq!(details(&st), ["job-2"], "one event, for the block where the focus rests");
+        let e = st.events().into_iter().find(|e| e.kind == "ci.detail").unwrap();
+        assert_eq!((e.artifact.as_str(), e.by.as_str(), e.via.as_str(), &e.value), ("ci", "you", "pane", &json!({"cells": {"name": "test"}})));
+        assert!(!crate::store::is_decision(&e) && !crate::store::is_action(&e));
+        // back to a block: asked about once it rests there
+        lv.scene.move_focus(-1);
+        lv.detail_step(6.0, 6.0);
+        lv.detail_step(6.05 + DETAIL_SETTLE, 6.3);
+        assert_eq!(details(&st), ["job-2", "job-1"]);
+        assert_eq!(st.events().into_iter().find(|e| e.id == "job-1").unwrap().value, json!({"cells": {"name": "build"}, "target": "https://example.com/job/1", "detail": "exit 2"}));
+        // closed and opened again on the same block: asked again
+        lv.view.detail = false;
+        lv.detail_step(7.0, 7.0);
+        lv.view.detail = true;
+        lv.detail_step(8.0, 8.0);
+        lv.detail_step(8.05 + DETAIL_SETTLE, 8.3);
+        assert_eq!(details(&st), ["job-2", "job-1", "job-1"]);
+        // nothing registered for the name: the panel says nothing extra, and no daemon is wanted
+        lv.asked_note(9.0);
+        assert!(lv.asked.is_none() && !frame(lv, 120).0.contains(crate::detail::ASKED));
+        assert!(!st.wants_daemon("ci.detail") && !st.wants_daemon("ci.shown"));
+        assert!(crate::hook::unread(&st, "sess").is_empty() && crate::hook::actions_for_session(&st, "ci", 0).is_empty());
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A handler registered for `<board>.detail` is given the event and one registered for an
+    /// action is not; while the first exists the panel says "asked for more", then "no answer
+    /// yet", and nothing once the block changed.
+    #[test]
+    fn a_handler_for_detail_gets_it_and_the_panel_says_it_asked() {
+        let (st, mut pn) = board();
+        handler(&st, "more", "ci.detail");
+        handler(&st, "approve", "ci.approve");
+        handler(&st, "all", "*");
+        let reg = crate::handler::Registry::load(&st.dir());
+        let lv = pn.lv();
+        frame(lv, 120);
+        lv.view.detail = true;
+        lv.scene.focus = Some("job-1".into());
+        let wall = epoch_now();
+        lv.detail_step(1.0, wall);
+        lv.detail_step(1.05 + DETAIL_SETTLE, wall);
+        let waiting = |name: &str| crate::handler::pending(&st, reg.get(name).unwrap()).into_iter().map(|e| (e.kind, e.id)).collect::<Vec<_>>();
+        assert_eq!(waiting("more"), [("ci.detail".to_string(), "job-1".to_string())]);
+        assert!(waiting("approve").is_empty() && waiting("all").is_empty(), "a view event goes only to a handler that names it");
+        assert!(st.wants_daemon("ci.detail") && !st.wants_daemon("ci.shown") && !st.wants_daemon("seen") && st.wants_daemon("ci.retry"));
+        // the panel: one quiet line under the block's content, above the hint that opens it
+        assert_eq!(lv.asked_note(wall + 1.0), Some(wall + ASKED_SECS));
+        let text = frame(lv, 120).0;
+        let at = |t: &str, what: &str| t.lines().position(|l| l.contains(what));
+        assert!(at(&text, "exit 2") < at(&text, "asked for more") && at(&text, "asked for more") < at(&text, "open the target"), "{text}");
+        // another block in the panel: the line is the block's, not the panel's
+        lv.scene.focus = Some("note".into());
+        lv.asked_note(wall + 2.0);
+        assert!(!frame(lv, 120).0.contains("asked for more"));
+        lv.scene.focus = Some("job-1".into());
+        assert_eq!(lv.asked_note(wall + ASKED_SECS + 1.0), None);
+        let text = frame(lv, 120).0;
+        assert!(text.contains("no answer yet") && !text.contains("asked for more"), "{text}");
+        // the answer: whoever handled it wrote the block
+        let w = crate::store::Writer::Feed { name: "ci".into(), owns: "job".into() };
+        st.feed_write("ci", &[vec![Op::Set { id: "job-1".into(), field: "detail".into(), value: json!("exit 2: the linker ran out of memory") }]], &w, &[]);
+        lv.reload(3.0);
+        lv.asked_note(wall + ASKED_SECS + 2.0);
+        let text = frame(lv, 120).0;
+        assert!(lv.asked.is_none() && text.contains("ran out of memory") && !text.contains("no answer yet") && !text.contains("asked for more"), "{text}");
+        // a paused handler will not be run: nothing is said
+        crate::handler::edit_registry(&st, |r| r.set_paused("more", true)).unwrap();
+        lv.scene.focus = Some("job-2".into());
+        lv.detail_step(4.0, wall);
+        lv.detail_step(4.05 + DETAIL_SETTLE, wall);
+        assert!(lv.asked.is_none() && !st.wants_daemon("ci.detail"));
+        crate::detail::set_note(None);
         std::fs::remove_dir_all(&st.home).ok();
     }
 

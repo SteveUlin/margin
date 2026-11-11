@@ -9,7 +9,7 @@
 //!   cursors/<name>        a named position in the log: the last seq a consumer has taken
 //!                         (`margin events --cursor`, a job's `job.<name>`)
 //!   delivered/<session>   the same thing for a Claude session: the last seq its hooks handed it
-//!   feeds.json            registered feeds (feed.rs)   feeds/<name>.log|.status.json   daemon.lock|.pid
+//!   handlers.json  owners.json  data.json   the registries      daemon.lock|.pid
 //!   <artifact>/doc.json   content (Claude)        state.json  decisions (sulin)
 //!              view/<pane>.json  folds, focus, scroll (the pane)
 //! ```
@@ -100,9 +100,22 @@ pub struct Event {
     pub rev: u64,
 }
 
-/// Passive kinds are logged but never pushed into the prompt (design §2).
+/// The view events the pane appends about a board (`<board>.shown`, `<board>.hidden`,
+/// `<board>.detail`): what is on screen, so a provider can load what is looked at and stop when
+/// it is not. The last part of the name is one of these.
+pub const VIEW_EVENTS: &[&str] = &["shown", "hidden", "detail"];
+
+/// Is `kind` a view event's name: `<board>.shown`, `<board>.hidden` or `<board>.detail`? Decided
+/// by the name alone, so the three endings are reserved: an event someone emits under such a
+/// name is passive like the pane's own.
+pub fn is_view(kind: &str) -> bool {
+    kind.rsplit_once('.').map(|(board, name)| !board.is_empty() && VIEW_EVENTS.contains(&name)).unwrap_or(false)
+}
+
+/// Passive kinds are logged but never pushed into the prompt (design §2), never counted as one
+/// of the person's decisions, and given to a handler only when its `--on` names them exactly.
 pub fn is_passive(kind: &str) -> bool {
-    matches!(kind, "fold" | "unfold" | "seen" | "open" | "close" | "focus" | "view" | "feed" | "toasttest")
+    matches!(kind, "fold" | "unfold" | "seen" | "open" | "close" | "focus" | "view" | "feed" | "toasttest") || is_view(kind)
 }
 
 /// Is this one of the person's decisions in a pane (a tick, a pick, a strike…): what the hooks
@@ -114,9 +127,10 @@ pub fn is_decision(e: &Event) -> bool {
 
 /// Is this an action on a board (`<board>.<name>`: a declared action's key, or `open`)? An
 /// action is for the handler registered for its name. The hooks hand one to a Claude session
-/// only when the board is that session's own pane (hook.rs `actions_for_session`).
+/// only when the board is that session's own pane (hook.rs `actions_for_session`). A view event
+/// has the same shape of name and is not one: nobody did anything.
 pub fn is_action(e: &Event) -> bool {
-    !e.artifact.is_empty() && e.kind.strip_prefix(e.artifact.as_str()).map(|r| r.starts_with('.')).unwrap_or(false)
+    !e.artifact.is_empty() && !is_view(&e.kind) && e.kind.strip_prefix(e.artifact.as_str()).map(|r| r.starts_with('.')).unwrap_or(false)
 }
 
 /// The log rotates once events.jsonl is this long: the append and a read of what is new stay
@@ -642,13 +656,11 @@ impl Store {
         Ok(rev)
     }
 
-    /// Who owns part of artifact `a`: one table for every kind of claim. Feeds (feeds.json;
-    /// paused ones still own theirs), handlers with a board (handlers.json) and outside owners
-    /// (owners.json).
+    /// Who owns part of artifact `a`: one table for every kind of claim. Handlers with a board
+    /// (handlers.json; paused ones still own theirs) and outside owners (owners.json).
     pub fn claims(&self, a: &str) -> Vec<Claim> {
         let d = self.dir();
-        let mut v = crate::feed::Registry::load(&d).claims(a);
-        v.extend(crate::handler::Registry::load(&d).claims(a));
+        let mut v = crate::handler::Registry::load(&d).claims(a);
         v.extend(crate::owner::Registry::load(&d).claims(a));
         v
     }
@@ -657,8 +669,7 @@ impl Store {
     /// not "nothing is owned" (a write into an owned id would land, and its owner would fight it).
     pub fn claims_strict(&self, a: &str) -> Result<Vec<Claim>, String> {
         let d = self.dir();
-        let mut v = crate::feed::Registry::load_strict(&d)?.claims(a);
-        v.extend(crate::handler::Registry::load_strict(&d)?.claims(a));
+        let mut v = crate::handler::Registry::load_strict(&d)?.claims(a);
         v.extend(crate::owner::Registry::load_strict(&d)?.claims(a));
         Ok(v)
     }
@@ -666,7 +677,7 @@ impl Store {
     /// One id has one owner: the claim that `owns` on `board` would collide with, if any
     /// (`except`: the claim being changed, by kind and name).
     pub fn claim_overlap(&self, board: &str, owns: &str, except: (&str, &str)) -> Result<(), String> {
-        match self.claims_strict(board)?.into_iter().find(|c| (c.kind, c.feed.as_str()) != except && crate::feed::overlaps(&c.owns, owns)) {
+        match self.claims_strict(board)?.into_iter().find(|c| (c.kind, c.feed.as_str()) != except && crate::owner::overlaps(&c.owns, owns)) {
             Some(c) => Err(format!("prefix {owns:?} overlaps {} {} (owns {:?} in {board}); one id has one owner", c.kind, c.feed, c.owns)),
             None => Ok(()),
         }
@@ -1151,10 +1162,27 @@ impl Store {
         let _ = fs::write(self.seq_path().with_extension("tmp"), format!("{} {}", ev.seq, len + line.len() as u64)).and_then(|_| fs::rename(self.seq_path().with_extension("tmp"), self.seq_path()));
         // a registered handler may want this: make sure something is there to dispatch it. Not
         // in unit tests, where the "binary" a daemon would be started from is the test harness
-        if !cfg!(test) {
+        if !cfg!(test) && self.wants_daemon(kind) {
             crate::daemon::wake(self);
         }
         Ok(ev)
+    }
+
+    /// Should appending an event named `kind` make sure the daemon runs? Any event that is not
+    /// passive: yes (`daemon::wake` then starts one only if a handler is registered at all). A
+    /// passive one (a view event, `seen`, a fold) only when a handler that is not paused asked
+    /// for that name: a pane being looked at starts nothing when nobody listens.
+    pub fn wants_daemon(&self, kind: &str) -> bool {
+        if !is_passive(kind) {
+            return true;
+        }
+        self.handled(kind)
+    }
+
+    /// Would a registered handler that is not paused be run for an event named `kind`? What the
+    /// pane asks before it says "asked for more" (it runs nothing itself).
+    pub fn handled(&self, kind: &str) -> bool {
+        crate::handler::Registry::path(&self.dir()).exists() && crate::handler::Registry::load(&self.dir()).for_kind(kind).iter().any(|h| !h.paused)
     }
 
     /// events.jsonl becomes events.1.jsonl, the older generations move up one, and the one past
@@ -1629,21 +1657,21 @@ pub mod tests {
         }
     }
 
-    /// A feeds.json that won't parse used to read as "no feeds", so nothing was owned and Claude's
-    /// write landed in a feed's ids.
+    /// A registry that won't parse used to read as "nothing registered", so nothing was owned
+    /// and Claude's write landed in an owner's ids.
     #[test]
     fn a_corrupt_registry_refuses_writes_instead_of_dropping_ownership() {
         let s = temp_store();
         s.put(plan(), None).unwrap();
-        fs::write(s.dir().join("feeds.json"), r#"{"feeds": [{"name": "jj"},]}"#).unwrap();
+        fs::write(s.dir().join("handlers.json"), r#"{"handlers": [{"name": "jj"},]}"#).unwrap();
         let set = [Op::Set { id: "t1".into(), field: "text".into(), value: json!("reworded") }];
         let e = s.patch("plan", &set, None).unwrap_err();
-        assert!(e.contains("feeds.json"), "{e}");
-        assert!(s.decide("plan", "t1", "tick", json!("done"), "key", None).unwrap_err().contains("feeds.json"));
-        assert!(s.put(plan(), None).unwrap_err().contains("feeds.json"));
+        assert!(e.contains("handlers.json"), "{e}");
+        assert!(s.decide("plan", "t1", "tick", json!("done"), "key", None).unwrap_err().contains("handlers.json"));
+        assert!(s.put(plan(), None).unwrap_err().contains("handlers.json"));
         assert_eq!(s.load("plan").unwrap().rev, 1, "nothing landed");
         // fixed (here: removed), writes go through again
-        fs::remove_file(s.dir().join("feeds.json")).unwrap();
+        fs::remove_file(s.dir().join("handlers.json")).unwrap();
         s.patch("plan", &set, None).unwrap();
     }
 
@@ -1940,6 +1968,27 @@ pub mod tests {
         fs::remove_dir_all(&s.home).ok();
     }
 
+    /// The view events are passive by their name: not decisions, not actions (though named
+    /// like one), and an emit under such a name is passive too. Nothing else with a dot is.
+    #[test]
+    fn view_events_are_passive_by_name() {
+        let ev = |kind: &str, art: &str, by: &str, via: &str| Event { v: 1, seq: 1, at: String::new(), artifact: art.into(), id: String::new(), kind: kind.into(), value: Value::Null, by: by.into(), via: via.into(), rev: 0 };
+        for k in ["reviews.shown", "reviews.hidden", "reviews.detail", "a.b.detail"] {
+            assert!(is_view(k) && is_passive(k), "{k}");
+            let e = ev(k, k.rsplit_once('.').unwrap().0, "you", "pane");
+            assert!(!is_decision(&e) && !is_action(&e), "{k}");
+        }
+        for k in ["reviews.open", "reviews.approve", "reviews.focus", "detail", "shown", ".detail", "reviews.details", "deploy.finished"] {
+            assert!(!is_view(k), "{k}");
+        }
+        assert!(is_action(&ev("reviews.open", "reviews", "you", "key")) && is_passive("seen") && !is_passive("reviews.approve"));
+        // nobody registered: a passive event wants no daemon; anything else leaves it to wake
+        let s = temp_store();
+        assert!(!s.wants_daemon("reviews.detail") && !s.wants_daemon("seen") && s.wants_daemon("reviews.approve") && s.wants_daemon("tick"));
+        assert!(!s.handled("reviews.detail") && !s.handled("reviews.approve"));
+        fs::remove_dir_all(&s.home).ok();
+    }
+
     /// An action appends `<board>.<action>` with the block's id and snapshot, on a feed-owned
     /// row too (ownership guards content, not the person's actions); `decide` still refuses there.
     #[test]
@@ -1951,7 +2000,7 @@ pub mod tests {
             {"type": "row", "id": "note", "text": "hello", "tag": "x", "actions": [{"key": "e", "name": "ping"}]}],
             "actions": [{"key": "u", "name": "refresh"}]})).unwrap();
         s.put(d, None).unwrap();
-        fs::write(s.dir().join("feeds.json"), r#"{"feeds": [{"name": "reviews", "cmd": ["true"], "trigger": {"kind": "stream"}, "artifact": "reviews", "owns": "pr", "cwd": "/"}]}"#).unwrap();
+        fs::write(s.dir().join("owners.json"), r#"{"owners": [{"name": "reviews", "board": "reviews", "owns": "pr"}]}"#).unwrap();
         assert!(s.decide("reviews", "pr-1", "pin", json!(true), "key", None).unwrap_err().contains("read-only"));
         let e = s.act("reviews", "pr-1", "open", None, "you", "act").unwrap();
         assert_eq!((e.kind.as_str(), e.id.as_str(), e.by.as_str(), e.via.as_str(), e.artifact.as_str()), ("reviews.open", "pr-1", "you", "act", "reviews"));
