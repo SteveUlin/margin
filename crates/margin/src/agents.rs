@@ -930,7 +930,7 @@ mod tests {
         // the first section it makes is its plan; later ones are content
         let a = parsed("x", &[sh(1, 2, "ls"), sh(2, 4, "margin add work - section ag-a title=A"), sh(3, 6, "margin add work - section findings title=F")]);
         assert_eq!(a.plan, Some(("work".into(), "ag-a".into())));
-        assert_eq!(a.who(), "a");
+        assert_eq!(a.who(), "x", "the description names the row, not the section id");
         assert_eq!(parsed("Fix the parser", &[sh(1, 2, "ls")]).who(), "Fix the parser");
     }
 

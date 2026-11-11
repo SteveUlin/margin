@@ -2843,7 +2843,8 @@ mod tests {
         for part in ["widgets", "coding", "▰▰▰▱▱", "3/5", "40s"] {
             assert!(row.contains(part), "{part} on the one line: {row}");
         }
-        assert!(!t.contains("Draw the run strip") && !t.contains("Add dashboard widgets"), "the step and the brief wait for the row to open: {t}");
+        assert!(row.contains("Add dashboard widgets"), "the row is named by its description: {row}");
+        assert!(!t.contains("Draw the run strip"), "the step waits for the row to open: {t}");
         // an agent that keeps no plan: no bar and no count, and its phase in the same column
         let other = t.lines().find(|l| l.contains("Survey the terminals")).unwrap_or_else(|| panic!("{t}"));
         assert!(other.contains("coding") && !other.contains('▰') && !other.contains('▱') && !other.contains('/'), "{other}");
