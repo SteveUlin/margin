@@ -499,6 +499,37 @@ pub enum Span {
     Who(Rgb),
 }
 
+/// The body of an inline sparkline `~[…]`: two to sixty numbers split by commas or spaces (`-` or
+/// `_` is a gap), then an optional `|color`. Returns the cells (eighth blocks, scaled to the
+/// values' own range, joined by word joiners so the strip never wraps apart) and the color.
+/// Anything else is not a sparkline and stays as typed.
+fn inline_spark(body: &str) -> Option<(String, Rgb)> {
+    let p = &vellum::color::EVERFOREST;
+    let (nums, color) = match body.rsplit_once('|') {
+        Some((n, c)) => (n, theme::color(p, c)?),
+        None => (body, p.aqua),
+    };
+    let vals: Vec<f64> = nums
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(|t| if t == "-" || t == "_" { Some(f64::NAN) } else { t.parse::<f64>().ok() })
+        .collect::<Option<Vec<f64>>>()?;
+    if vals.len() < 2 || vals.len() > 60 {
+        return None;
+    }
+    let (lo, hi) = vellum::plot::finite_range(vals.iter().copied())?;
+    let cells = vals.iter().map(|v| {
+        if !v.is_finite() {
+            '·'
+        } else if hi > lo {
+            vellum::plot::EIGHTHS_UP[1 + (((v - lo) / (hi - lo)) * 7.0).round() as usize]
+        } else {
+            vellum::plot::EIGHTHS_UP[4]
+        }
+    });
+    Some((cells.collect(), color))
+}
+
 /// A name `@[…]` may hold: short, on one line, and free of the other markers.
 fn who_name(n: &str) -> bool {
     !n.is_empty() && n.trim() == n && n.chars().count() <= 48 && !n.contains(['[', '\n', '`', '*', '@'])
@@ -523,6 +554,17 @@ pub fn markup(s: &str) -> Vec<(String, Span)> {
                 // one after the glyph keeps every badge's symbol the same size (SYMBOL_SPACE)
                 out.push((format!("{}{}{}", m.glyph, widgets::SYMBOL_SPACE, name.replace(' ', "\u{a0}")), Span::Who(m.color)));
                 rest = &rest[2 + name.len() + 1..];
+                continue;
+            }
+        }
+        // `~[3 5 2 9]` (or `~[3,5,2,9|orange]`): a sparkline in the line of text, one cell a value
+        if rest.starts_with("~[") {
+            if let Some((cells, color, len)) = rest[2..].find(']').and_then(|e| inline_spark(&rest[2..2 + e]).map(|(c, col)| (c, col, 2 + e + 1))) {
+                if !plain.is_empty() {
+                    out.push((std::mem::take(&mut plain), Span::Plain));
+                }
+                out.push((cells, Span::Who(color)));
+                rest = &rest[len..];
                 continue;
             }
         }
@@ -2030,6 +2072,24 @@ mod cycle_tests {
             for mine in [false, true] {
                 assert_ne!(todo_cycle(st, mine), Some("done"));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod spark_tests {
+    use super::{markup, Span};
+
+    #[test]
+    fn a_sparkline_sits_in_a_line_of_text() {
+        let m = markup("load ~[1 2 4 8] today");
+        assert_eq!((m[0].0.as_str(), m[1].0.as_str(), m[2].0.as_str()), ("load ", "▁▂▄█", " today"));
+        assert!(matches!(m[1].1, Span::Who(_)), "it carries its own color");
+        assert_eq!(markup("~[3,3,3]")[0].0, "▄▄▄", "a flat series sits mid-height");
+        assert_eq!(markup("~[1,-,8]")[0].0, "▁·█", "a gap is a dot");
+        // not a sparkline: one value, words, an unknown color
+        for t in ["~[5]", "~[a b]", "~[1 2|nocolor]", "~[1 2"] {
+            assert_eq!(markup(t)[0].0, t, "{t} stays as typed");
         }
     }
 }
