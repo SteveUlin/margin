@@ -372,6 +372,25 @@ fn fl(cx: &Ctx, id: &str) -> f32 {
     cx.flash.get(id).copied().unwrap_or(0.0)
 }
 
+/// A list item that opens with its own number: `1. text`, `12) text`, or the same inside a bold
+/// lead-in (`**1. Lead**: rest`). Returns the number as written (`1.`) and the text without it.
+pub fn numbered(text: &str) -> Option<(String, String)> {
+    let (bold, t) = match text.strip_prefix("**") {
+        Some(t) => ("**", t),
+        None => ("", text),
+    };
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 || digits > 3 {
+        return None;
+    }
+    let mark = t[digits..].chars().next().filter(|c| *c == '.' || *c == ')')?;
+    let rest = t[digits + 1..].strip_prefix(' ')?;
+    if rest.trim().is_empty() {
+        return None;
+    }
+    Some((format!("{}{mark}", &t[..digits]), format!("{bold}{rest}")))
+}
+
 /// Where a block at `depth` starts: two cells further in per level, so everything inside a
 /// section sits under its title, not under its chevron (a header's title starts two cells
 /// after its chevron). Capped so deep nesting keeps room for text.
@@ -674,15 +693,22 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             let level = b.num("_level").unwrap_or(0.0) as u16;
             let gap = b.flag("_gap") as u16;
             let x = ind + 2 * level;
-            let glyph = ["•", "◦", "▪"][level as usize % 3];
+            // a counted item ("1. first", "2) second") wears its number where the bullet would
+            // be: a bullet and a number together say the same thing twice
+            let counted = numbered(b.s("text"));
+            let (glyph, text) = match &counted {
+                Some((n, rest)) => (n.as_str(), rest.as_str()),
+                None => (["•", "◦", "▪"][level as usize % 3], b.s("text")),
+            };
+            let tx = x + width(glyph) as u16 + 1;
             let (gc, tc) = if level == 0 { (p.green, p.fg) } else { (p.grey1, p.grey2) };
             let gc = tone(p, b.s("tone"), gc);
             let tc = if b.s("tone").is_empty() { tc } else { gc };
-            let lines = wrap_runs(&markup(b.s("text")), w.saturating_sub(x + 3) as usize);
+            let lines = wrap_runs(&markup(text), w.saturating_sub(tx + 1) as usize);
             let mut g = new_grid(w, lines.len() as u16 + gap, g0);
             put(&mut g, x, gap, glyph, Style::fg(gc).on(g0).bold());
             for (i, l) in lines.iter().enumerate() {
-                rich(&mut g, cx, x + 2, gap + i as u16, l, tc, false, b.s("tone").is_empty());
+                rich(&mut g, cx, tx, gap + i as u16, l, tc, false, b.s("tone").is_empty());
             }
             Drawn { grid: Some(g), ..Default::default() }
         }
@@ -1963,6 +1989,22 @@ mod cycle_tests {
             for mine in [false, true] {
                 assert_ne!(todo_cycle(st, mine), Some("done"));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod numbered_tests {
+    use super::numbered;
+
+    #[test]
+    fn a_counted_item_gives_up_its_number() {
+        assert_eq!(numbered("1. first"), Some(("1.".into(), "first".into())));
+        assert_eq!(numbered("12) twelfth"), Some(("12)".into(), "twelfth".into())));
+        assert_eq!(numbered("**3. Lead**: rest"), Some(("3.".into(), "**Lead**: rest".into())));
+        // a year, a version, a decimal and a bare number are text, not a count
+        for t in ["2026. a year", "1.5 seconds", "3.x is old", "7.", "no number", "v1. no"] {
+            assert_eq!(numbered(t), None, "{t}");
         }
     }
 }
