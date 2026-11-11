@@ -19,7 +19,6 @@
     {"type": "section", "id": "decided", "title": "Decided", "folded": true, "children": [
       {"type": "decided", "id": "D1", "text": "Scheduler migration goes service by service, billing first", "by": "you", "at": "2026-11-06T10:00:00Z"},
       {"type": "decided", "id": "D2", "text": "No new alerts until the queue dashboards exist", "by": "claude", "at": "2026-11-09T14:30:00Z"}
-    ]},
-    {"type": "feed", "id": "wk-feed", "name": "tracker", "state": "not registered"}
+    ]}
   ]
 }

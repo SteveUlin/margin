@@ -1,4 +1,8 @@
-# feeds: scripts that keep a panel current without you
+# feeds: the older runner (a script on margin's own timer, file watch or stream), and the line grammar
+
+New boards use a handler and a schedule outside margin (`margin help handlers`, `margin help
+integrate`): margin then runs a command only for an event. The feed runner below still works and
+is not going away in this version; its line grammar is what handlers and `margin apply` take too.
 
 A feed is a command margin's daemon runs for you; what it prints on stdout is `margin apply`
 input: an update to an artifact that exists (create it first, with `margin new`; a feed never

@@ -71,18 +71,33 @@ impl Example {
 #   1. create the artifact (prints `{n} rev 1`), and look at one frame of it as text
 #        margin example {n} | margin new {n}
 #        margin render {n} --width 100 --height 40
-#   2. take the feed script and its sample data
+#   2. take the script that fetches its rows, and the sample data it reads
 #        margin example {n} --feed > {n}.feed.sh && chmod +x {n}.feed.sh
 #        margin example {n} --data > {n}.data.json
-#   3. run the feed by hand: its stdout is `margin apply` input, an update (here it changes nothing, so no new rev)
+#   3. run the script by hand: its stdout is `margin apply` input, an update (here it changes nothing, so no new rev)
 #        ./{n}.feed.sh {n}.data.json | margin apply {n}
-#   4. register it; from then on the daemon keeps the board current and no AI is involved
-#        margin feed add {n} {trigger} --artifact {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
-#   5. show it: its own pane, or a tab of a pane that is already open
+#   4. register it as the handler of a refresh event: whenever `{n}.refresh` is appended, margin's daemon
+#      runs it and applies what it prints, with no AI involved
+#        margin handler add {n}-refresh --on {n}.refresh --board {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
+#        margin emit {n}.refresh                      # try it: `margin handler ls` shows the run
+#   5. make a row's link open: enter (or a click) on a row with a target appends `{n}.open`, and the pane
+#      runs nothing itself. This ready-made handler opens it; register it once per project
+#        margin handler add open --on '*.open' -- margin handle open
+#   6. keep it current: margin has no timer. Whatever runs on a schedule emits the event (from any
+#      directory: --project names the board's project; `margin ls` run beside the board prints nothing
+#      about it, the pane's bottom line does: MARGIN <artifact> <project>)
+#        cron:           */5 * * * *  margin emit {n}.refresh --project <project>
+#        systemd timer:  a user timer whose service runs the same line (margin help integrate has both units)
+#        a file change:  watchexec -w {n}.data.json -- margin emit {n}.refresh --project <project>
+#   7. show it: its own pane, or a tab of a pane that is already open
 #        margin open {n}        |        margin tab <that pane's artifact> add {n}
-# The feed owns the ids `{owns}` and `{owns}-...`: once it is registered they are read-only for you (test a
-# changed script with `margin feed run {n}`). Every other id in the artifact is yours to write.
+# The handler owns the ids `{owns}` and `{owns}-...`: once it is registered they are read-only for you (test a
+# changed script with `margin handler run {n}-refresh --dry-run`). Every other id in the artifact is yours to write.
+#
+# Optional convenience, instead of steps 4 and 6: the older feed runner schedules the script itself ({trigger_words})
+#        margin feed add {n} {trigger} --artifact {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
 ",
+            trigger_words = if self.trigger.starts_with("--watch") { "here: whenever the data file changes" } else { "here: on an interval" },
             about = self.about,
             trigger = self.trigger,
             owns = self.owns

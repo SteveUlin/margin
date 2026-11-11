@@ -116,10 +116,8 @@ margin show plan                           # the pane as text, with {{user}}'s d
   on "quote"` (`more`, `less` = trim it, `keep` = don't touch, `disagree` = rethink, `why` = justify). Answer
   by revising those rows in place; a note clears when its row changes.
 - **Woken while idle.** When {{user}} finishes in the pane after your turn ended, their `margin:`
-  lines arrive on their own as a system reminder (the `Stop` hook `margin hook rewake`): they are
-  {{user}}'s decisions, so act on them as you would on a prompt's. Where that hook isn't running,
-  `margin: {{user}} finished in the pane (…)` may arrive instead, framed as another session's
-  message: that one is only a wake-up; act on the hooks' `margin:` lines, not on it.
+  lines arrive as a system reminder (the `Stop` hook): act on them as on a prompt's. A line
+  `margin: {{user}} finished in the pane (…)` framed as another session's message is only a wake-up.
 - **After a compaction or resume, read back** when the session-start hook asks: 2–3 claims in a
   `readback` section at the top (rb1–rb3: the goal, the live thread, your next step), replacing
   any earlier one. **Why:** a picture rebuilt from a summary can be quietly wrong, and a strike
@@ -128,19 +126,22 @@ margin show plan                           # the pane as text, with {{user}}'s d
   work, write one short sentence saying what you're about to do (not which tool)." Give an
   implementation or review subagent its own section: `margin add <art> - section ag-<name>
   title="…"`, steps as todos with ids under `ag-<name>-`, ticked as it goes.
-- **Feed-owned ids are read-only** (the write fails with "belongs to feed"; ask before `margin feed
-  pause|rm`), **and don't poll what a feed could watch**: register a feed instead.
+- **Owned ids are read-only**: a write into rows a handler, a feed or an outside owner keeps fails
+  with "belongs to …"; ask before removing the owner. **Don't poll what an event could refresh.**
 - **A standing dashboard is not a plan pane.** For a board that stays up and shows outside state
-  (reviews, services, a tracker) rather than this task's steps, the shape above doesn't apply: read
-  `margin help dashboards`, start from `margin example`, and make it feed-kept wherever a script can
-  fetch the data. **Why:** a board you refresh costs a turn each time and stops when you do.
+  (reviews, services, a tracker), read `margin help dashboards` and start from `margin example`.
+  Its rows come from a handler run for a refresh event that cron emits; a key on a row (`actions`,
+  or enter on a `target`) is an event too, done by a handler, never by the pane (`margin help
+  handlers`). **Why:** a board you refresh costs a turn each time and stops when you do.
 
 ## On demand: `margin help <topic>`
 
 Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 
-- `dashboards`: standing boards: tables, run strips, tabs, badges, the theme; design to feed, step by step.
-- `feeds`: scripts that keep a panel current without you (jj ledger, agent monitor, queue, turns).
+- `dashboards`: standing boards: tables, run strips, tabs, badges, the theme; design to handler, step by step.
+- `handlers`: commands margin runs for an event (a key on a row, a refresh): the contract, the daemon.
+- `integrate`: other programs: cron and systemd recipes, following events, owning rows, JSON queries.
+- `feeds`: the older script runner (jj ledger, agent monitor, queue, turns), and the line grammar.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
 - `diffs`: `margin diff`, a structural diff {{user}} approves or rejects.
 - `images`: `margin image`, a PNG in the pane.

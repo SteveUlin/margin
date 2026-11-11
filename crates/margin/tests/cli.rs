@@ -868,3 +868,113 @@ fn daemon_install_writes_a_unit_and_status_says_how_it_comes_back() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }
+
+/// The proof, with the real binary, a temp store and nothing of Claude in the environment: the
+/// reviews example is created; its rows are fetched by a handler when `reviews.refresh` is
+/// emitted; an `open` on a row is an event the daemon hands to the registered `open` handler,
+/// which opens that row's URL exactly once. The pane's enter key does what `margin act` does
+/// here. A daemon stopped (cleanly, then by kill -9) loses nothing and repeats nothing.
+#[test]
+fn a_row_is_opened_by_the_registered_handler_through_the_daemon() {
+    let has = |c: &str| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !has("bash") || !has("jq") {
+        eprintln!("skipped: bash or jq is not on PATH");
+        return;
+    }
+    let (decoy, home) = (temp("proof-decoy"), temp("proof-home"));
+    let opened = decoy.join("opened.txt");
+    // every command carries MARGIN_DRY_OPEN: whichever of them starts the daemon hands it on,
+    // and `margin handle open` then records the URL instead of starting a browser
+    let run = |argv: &[&str], stdin: &str| {
+        let mut ch = bare(&decoy, &home, argv).env("MARGIN_DRY_OPEN", &opened).spawn().unwrap();
+        ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let o = ch.wait_with_output().unwrap();
+        (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let ok = |argv: &[&str], stdin: &str| {
+        let (code, out, err) = run(argv, stdin);
+        assert_eq!(code, 0, "margin {argv:?}: {out}{err}");
+        out
+    };
+    let opens = || std::fs::read_to_string(&opened).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>();
+    let cursor = |name: &str| std::fs::read_to_string(home.join(format!("p/cursors/handler.{name}"))).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    let daemon_pid = || std::fs::read_to_string(home.join("p/daemon.pid")).ok().and_then(|s| s.trim().parse::<i32>().ok());
+
+    // the example's own steps: the board, the script and its data, the two handlers
+    let (_, board, steps) = run(&["example", "reviews"], "");
+    assert_eq!(ok(&["new", "reviews"], &board).trim(), "reviews rev 1");
+    std::fs::write(decoy.join("reviews.feed.sh"), ok(&["example", "reviews", "--feed"], "")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(decoy.join("reviews.feed.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let data = ok(&["example", "reviews", "--data"], "");
+    std::fs::write(decoy.join("reviews.data.json"), &data).unwrap();
+    for needle in ["margin handler add reviews-refresh --on reviews.refresh --board reviews --owns pr -- ./reviews.feed.sh reviews.data.json", "margin handler add open --on '*.open' -- margin handle open"] {
+        let line = steps.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("the steps don't print: {needle}\n{steps}"));
+        let words: Vec<String> = line.trim_start_matches(['#', ' ']).split_whitespace().skip(1).map(|w| w.trim_matches('\'').to_string()).collect();
+        ok(&words.iter().map(String::as_str).collect::<Vec<_>>(), "");
+    }
+    wait_for("the daemon", 10, || daemon_pid().is_some());
+    assert!(ok(&["handler", "ls"], "").contains("daemon: running"));
+
+    // a fetch: the data gains a pull request, something outside emits the refresh event, and
+    // the handler's output puts the row on the board
+    let mut prs: serde_json::Value = serde_json::from_str(&data).unwrap();
+    prs.as_array_mut().unwrap().push(serde_json::json!({"number": 9001, "title": "A new one", "author": "ada", "url": "https://example.com/pulls/9001", "created_at": "2026-11-11T09:00:00Z", "body": "", "ci": []}));
+    std::fs::write(decoy.join("reviews.data.json"), prs.to_string()).unwrap();
+    let refresh: u64 = ok(&["emit", "reviews.refresh"], "").trim().parse().unwrap();
+    wait_for("the refresh handler", 15, || cursor("reviews-refresh") == Some(refresh));
+    let show = ok(&["show", "reviews", "--json"], "");
+    assert!(show.contains("pr-9001") && show.contains("\"by\": \"handler:reviews-refresh\""), "{show}");
+    assert!(opens().is_empty(), "a refresh opens nothing");
+
+    // open the review under the cursor: an event, dispatched to the handler, opened once
+    let first: u64 = ok(&["act", "reviews", "pr-4812", "open"], "").trim().parse().unwrap();
+    wait_for("the open handler", 15, || cursor("open") == Some(first));
+    assert_eq!(opens(), ["https://example.com/pulls/4812"]);
+    let e = &json_lines(&ok(&["events", "--name", "reviews.open", "--json"], ""))[0];
+    assert_eq!((e["id"].as_str(), e["by"].as_str(), e["via"].as_str(), e["value"]["target"].as_str()), (Some("pr-4812"), Some("you"), Some("act"), Some("https://example.com/pulls/4812")));
+    // a second act is a second event: it opens again
+    let second: u64 = ok(&["act", "reviews", "pr-4812", "open"], "").trim().parse().unwrap();
+    wait_for("the second open", 15, || cursor("open") == Some(second));
+    assert_eq!(opens(), ["https://example.com/pulls/4812", "https://example.com/pulls/4812"]);
+    // the selection route (a click, a Zellij double-click) is the same event
+    let (code, _, err) = run(&["select", "mg:open/reviews.pr-4807"], "");
+    assert_eq!(code, 0, "{err}");
+    wait_for("the selected open", 15, || opens().len() == 3);
+    assert_eq!(opens()[2], "https://example.com/pulls/4807");
+
+    // a clean stop: SIGTERM. The handlers are recorded as stopped, not failed, and nothing reopens
+    let pid = daemon_pid().unwrap();
+    unsafe { libc_kill(pid, 15) };
+    wait_for("the daemon to stop", 10, || daemon_pid().is_none());
+    assert!(ok(&["daemon", "status", "--unit-dir", &decoy.join("units").display().to_string()], "").contains("daemon: not running"));
+    let ls = ok(&["handler", "ls", "--json"], "");
+    assert!(ls.contains("\"state\":\"stopped\"") && !ls.contains("\"last_outcome\":\"failed\""), "{ls}");
+    // an event appended while it is down starts it again (a handler is registered), and is
+    // delivered once; what was handled before the stop is not handled again
+    let third: u64 = ok(&["act", "reviews", "pr-4795", "open"], "").trim().parse().unwrap();
+    wait_for("the daemon to come back for the event", 15, || cursor("open") == Some(third));
+    assert_eq!(opens().len(), 4, "{:?}", opens());
+    assert_eq!(opens()[3], "https://example.com/pulls/4795");
+
+    // an unclean stop: kill -9. No stale lock blocks the next daemon; the cursor is the memory
+    let pid = daemon_pid().unwrap();
+    unsafe { libc_kill(pid, 9) };
+    wait_for("the killed daemon to be gone", 10, || unsafe { libc_kill(pid, 0) } != 0);
+    let fourth: u64 = ok(&["act", "reviews", "pr-4780", "open"], "").trim().parse().unwrap();
+    wait_for("a new daemon after the kill", 15, || cursor("open") == Some(fourth));
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(opens(), ["https://example.com/pulls/4812", "https://example.com/pulls/4812", "https://example.com/pulls/4807", "https://example.com/pulls/4795", "https://example.com/pulls/4780"], "each event opened exactly once, across a stop and a kill");
+    let status = ok(&["daemon", "status", "--unit-dir", &decoy.join("units").display().to_string()], "");
+    assert!(status.contains("daemon: running for project p") && status.contains("open") && status.contains("waiting 0") && status.contains("ran "), "{status}");
+
+    // a row with nothing to open, and an action nobody declared, are refused where they are asked
+    let (code, _, err) = run(&["act", "reviews", "note1", "open"], "");
+    assert!(code == 1 && err.contains("has no target to open"), "{err}");
+    for h in ["open", "reviews-refresh"] {
+        ok(&["handler", "rm", h], "");
+    }
+    wait_for("the daemon to leave with its last handler", 10, || daemon_pid().is_none());
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}

@@ -1,8 +1,10 @@
-# dashboards: a standing board (tables, run strips, tabs, badges) that a feed keeps current
+# dashboards: a standing board (tables, run strips, tabs, badges) kept current by a handler, with keys on its rows
 
 A dashboard is an artifact that stays up and shows the state of something outside the chat: pull
 requests to review, services, a work tracker. It differs from a plan pane in who writes it: you
-design it once, and a script (a feed) keeps it current with no AI involved.
+design it once, and a script keeps it current with no AI involved. The script is a handler:
+margin runs it when a refresh event is appended, and whatever owns the schedule (cron, a
+systemd timer) appends that event. margin itself has no timer.
 
 ## The model
 
@@ -13,22 +15,27 @@ design it once, and a script (a feed) keeps it current with no AI involved.
 - **Ids are identity.** A write that carries a block with a known id updates that block where it
   stands; an unknown id is a new block; rewriting a parent without a child removes the child. So
   derive ids from the data (`pr-4812`, `svc-ingest-worker`), never from a position.
-- **A feed rewrites its blocks; the pane reconciles by id.** The script prints whole blocks; a
+- **The script rewrites its blocks; the pane reconciles by id.** It prints whole blocks; a
   row whose id persists changes in place and keeps the focus, and an unchanged run writes nothing.
-- **A feed owns an id prefix** (`--owns pr`: the ids `pr` and `pr-…`). Inside it only the feed
-  writes; every other id in the same artifact is yours. Lay the board out so that the machine-kept
-  parts sit under one prefix.
+- **Whoever keeps rows current owns an id prefix** (`--owns pr`: the ids `pr` and `pr-…`): a
+  handler, an outside program registered with `margin owner add`, or a feed. Inside it only that
+  owner writes; every other id in the same artifact is yours. Lay the board out so that the
+  machine-kept parts sit under one prefix.
+- **The pane runs nothing.** A key on a row appends an event (`<board>.<action>`; enter on a row
+  with a `target` appends `<board>.open`), and the handler registered for that name does the
+  work. So a board can offer "retry", "cancel", "open" without the pane knowing how.
 - **What {{user}} does is stored apart from the document**, by id: the fold of a section, the tab
   on show, the focus, a step marked next. A rewrite with the same ids keeps all of it.
-- **Artifacts and feeds belong to a project**: `$MARGIN_PROJECT`, else the repository root above
+- **Artifacts, handlers and events belong to a project**: `$MARGIN_PROJECT`, else the repository root above
   the working directory, else the directory. A board made in one directory is invisible from
-  another. For standing boards pick one name and pass it everywhere: `--project boards` on every
-  command (or export `MARGIN_PROJECT=boards`).
+  another, and a command run from cron lands in whatever project its directory maps to. For
+  standing boards pick one name and pass it everywhere: `--project boards` on every command,
+  the cron line included (or export `MARGIN_PROJECT=boards`).
 
 ## Recipe
 
-`margin example` lists three complete boards (`reviews`, `services`, `tracker`), each with its
-feed script and sample data. Start from the nearest one; `margin example <name>` prints the steps.
+`margin example` lists complete boards (`reviews`, `services`, `tracker`), each with the
+script that fetches its rows and sample data. Start from the nearest one; `margin example <name>` prints the steps.
 
 **(a) Design it.** Decide, before writing JSON:
 
@@ -36,8 +43,10 @@ feed script and sample data. Start from the nearest one; `margin example <name>`
 - Which component per fact (reference below): many items with the same fields → `table`; a few
   items with a sentence each → `row`s; recent outcomes → a `runs` strip or a `runs` column; two
   views of the same data ("Failing" / "All") → `tabs`; a break with a label → `rule`.
-- The ids: one prefix for everything the feed writes, with a root block whose id is the prefix
-  itself (`pr`) when the feed writes one block, or siblings `wk-now`, `wk-next` when it writes several.
+- The ids: one prefix for everything the script writes, with a root block whose id is the prefix
+  itself (`pr`) when it writes one block, or siblings `wk-now`, `wk-next` when it writes several.
+- What {{user}} should be able to do to a row, as `actions` (below): each is a key, a name and a
+  handler somebody registers.
 - Text someone wrote (a description, a note) goes where text wraps: `text`, `bullet`, a row's
   `detail`. Data from outside (a title, a branch name) goes in a table cell or a row's `text`,
   which are cut with `…` at the edge and shown in full when the row has the focus.
@@ -56,8 +65,7 @@ margin new reviews <<'EOF'
  "blocks": [
   {"type": "rule", "id": "waiting", "text": "Waiting on you"},
   {"type": "table", "id": "pr", "empty": "nothing to review",
-   "columns": [{"key": "pr", "title": "PR", "kind": "id"}, {"key": "title", "title": "Title"}]},
-  {"type": "feed", "id": "pr-feed", "name": "reviews", "state": "not registered"}]}
+   "columns": [{"key": "pr", "title": "PR", "kind": "id"}, {"key": "title", "title": "Title"}]}]}
 EOF
 margin render reviews --width 100 --height 40     # one frame as text: check it without a pane
 margin render services --section svc-all          # a `tabs` block's other section (default: its first)
@@ -65,21 +73,16 @@ margin render services --focus svc-db --focused   # the focus on a block; its se
 margin show reviews                               # the tree: type, id, text
 ```
 
-- Envelope keys: `title`, `purpose`, `hints`, `kind`, `blocks`, nothing else (`margin schema
+- Envelope keys: `title`, `purpose`, `hints`, `kind`, `actions`, `blocks`, nothing else (`margin schema
   document` describes each). It prints `reviews rev 1`.
 - From here on every write is an update, and an update never creates: `margin apply`, `add`,
-  `set`, a feed's run and the rest fail on a name with no artifact (`no artifact "reveiws" …:
+  `set`, a handler's run and the rest fail on a name with no artifact (`no artifact "reveiws" …:
   create it with margin new reveiws (did you mean "reviews"?)`). To redo the layout, replace the
   document with `margin apply reviews < doc.json` (a whole document replaces), or start over: `margin rm reviews --yes`, then `new`.
 - A schema error names the block and the field and writes nothing; `margin schema <type>` lists
   a type's fields.
-- The last block above places the feed's health line (state, trigger, last write, the error when
-  it crashes): `{"type": "feed", "id": "<prefix>-feed", "name": "<feed name>", "state": "not
-  registered"}`. The daemon fills it in once the feed is registered. Leave it out and the daemon
-  inserts it above the block whose id is the prefix (or at the end of the document), which
-  pushes it ahead of the content.
-- The feed-owned block starts empty and the feed fills it: the `table` above has no rows. For a
-  feed that writes a `tabs` block, the skeleton is the block with its sections, each empty:
+- The owned block starts empty and its script fills it: the `table` above has no rows. For a
+  script that writes a `tabs` block, the skeleton is the block with its sections, each empty:
 
 ```json
 {"type": "tabs", "id": "svc", "children": [
@@ -90,17 +93,30 @@ margin show reviews                               # the tree: type, id, text
 - The pane's bottom line reads `MARGIN <artifact> <project>`: the second field is the project
   the artifact belongs to (`--project`), not a directory.
 
-**(c) Write the feed script**: a program that prints `margin apply` input and exits 0. For a
-table that is one line: the table block with all its `tr` children. `margin help feeds` has the
-contract and a complete script; test it by hand with `./script | margin apply reviews`.
+**(c) Write the script that fetches the rows**: a program that prints `margin apply` input and
+exits 0. For a table that is one line: the table block with all its `tr` children.
+`margin help feeds` has the line grammar and a complete script; test it by hand with
+`./script | margin apply reviews`.
 
-**(d) Register it** (from the directory the script's relative paths start at). The artifact
-must exist by now: a feed updates its artifact and never creates it, at `feed add` or at a run.
+**(d) Register it as a handler, and schedule the event outside margin** (register from the
+directory the script's relative paths start at). The artifact must exist by now: a handler
+updates its board and never creates it.
 
 ```sh
-margin feed add reviews --every 2m --artifact reviews --owns pr -- ./reviews-feed.sh
-margin feed ls            # live / restarting, the last run (`ran 2s ago · unchanged`), the error
+margin handler add reviews-refresh --on reviews.refresh --board reviews --owns pr -- ./reviews-feed.sh
+margin emit reviews.refresh       # run it now; `margin handler ls` shows `ran 1s ago · ok`
+margin handler add open --on '*.open' -- margin handle open     # enter on a row opens its target
+crontab -e                        # the schedule: */2 * * * *  /path/to/margin emit reviews.refresh --project <project>
 ```
+
+- `margin help integrate` has the same as a systemd user timer, and on a file change
+  (`watchexec`, `entr`, a path unit). `margin help handlers` has the handler contract.
+- A program that already runs on its own can skip the handler and write its rows itself:
+  `margin owner add fetcher --board reviews --owns pr --expect-every 10m`, then `./fetch |
+  margin apply reviews --as fetcher`. The rows show as stale when it stops writing.
+- Optional convenience, the older runner: `margin feed add reviews --every 2m --artifact reviews
+  --owns pr -- ./reviews-feed.sh` schedules the script inside margin's daemon
+  (`margin help feeds`). One prefix has one owner: use it instead of the handler, not beside it.
 
 From now on the ids `pr` and `pr-…` are read-only for you, and a whole-document `margin apply`
 must carry them through unchanged, so change your own parts by id instead: `margin set reviews
@@ -125,15 +141,35 @@ margin view reviews services tracker          # the renderer itself, for a plain
   failed. The `✗` comes from a `row` with `"glyph": "fail"`, a table row whose `state` cell is
   `fail`, a `status` with `"state": "fail"` or a `todo` with status `blocked`.
 - Keys in the pane: arrows or `gt` / `gT` switch tabs; `]t` / `[t` switch a `tabs` block's
-  sections; `j` / `k` move the focus; enter opens the focused row's `target`; `d` opens the detail
-  panel (the focused row's `detail` and every field); `]c` / `[c` walk what changed; `zh` folds the
+  sections; `j` / `k` move the focus; enter on a row with a `target` appends `<board>.open` (the
+  `open` handler above opens it); a key from the row's `actions` appends that action's event; `d`
+  opens the detail panel (the focused row's `detail` and every field); `]c` / `[c` walk what changed; `zh` folds the
   pinned head; `za` folds a section; `?` lists the rest.
 
 - To take a board down: `margin rm <art>` prints what would go (title, rev, its feeds, the panes
   showing it) and removes nothing; `margin rm <art> --yes` unregisters its feeds and moves it to
   the project's `.archive/` directory (nothing is deleted). Ask {{user}} first.
 
-**(f) Purpose and hints** (in the envelope, or later; a whole-document write without them keeps them):
+**(f) Keys on rows: `actions`.** A table (for each of its rows), a `tr`, a `row`, a `status`, a
+`link` or the document itself declares what {{user}} can do there:
+
+```json
+{"type": "table", "id": "job", "actions": [{"key": "e", "name": "retry", "label": "retry the job"}],
+ "columns": [{"key": "name", "title": "Job"}], "children": []}
+```
+
+- With such a row focused, `e` appends the event `<board>.retry` with the row's id and a snapshot
+  of it (`cells`, `target`, `detail`); the hint row shows `e retry the job`, and the detail panel
+  lists it. A click on either does the same. `margin act <board> <id> retry` is the key from a script.
+- The handler registered `--on <board>.retry` does the work (`margin help handlers`, "Make a row
+  do something"). With none, the row says `nothing handles <board>.retry`.
+- `key` is one character the pane does not use itself (a write that takes one is refused and
+  lists them); `label` defaults to `name`. A row's own action wins over its table's, and the
+  table's over the document's. Document-level actions go in the envelope: `"actions": [{"key":
+  "u", "name": "refresh"}]` beside `title`.
+- `open` is never declared: every block with a `target` has it, on enter.
+
+**(g) Purpose and hints** (in the envelope, or later; a whole-document write without them keeps them):
 
 ```sh
 margin purpose reviews "Pull requests waiting on my review"   # one line, pinned at the top
@@ -182,7 +218,8 @@ its own id.
   `optional: true`: drop this column first when the pane is narrow. `summary: true` (a `runs`
   column only): each strip ends with its failure count.
 - Row fields: `cells` (an object keyed by column key; a missing key is a blank cell), `target` (a
-  URL or `mg:` token that enter or a click opens), `detail` (shown in the detail panel).
+  URL or `mg:` token: enter or a click appends `<board>.open` for the `open` handler), `detail`
+  (shown in the detail panel), `actions` (keys on this row; on the table: on every row).
 
 | kind | the cell holds | drawn as |
 |---|---|---|

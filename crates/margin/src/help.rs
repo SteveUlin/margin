@@ -13,6 +13,8 @@ pub const SKILL: &str = include_str!("../../../skill/SKILL.md");
 /// Topic name and its text. A topic's first line is `# name: what it covers`.
 pub const TOPICS: &[(&str, &str)] = &[
     ("dashboards", include_str!("../../../skill/topics/dashboards.md")),
+    ("handlers", include_str!("../../../skill/topics/handlers.md")),
+    ("integrate", include_str!("../../../skill/topics/integrate.md")),
     ("feeds", include_str!("../../../skill/topics/feeds.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
     ("diffs", include_str!("../../../skill/topics/diffs.md")),
@@ -172,7 +174,7 @@ mod tests {
     /// column kinds and the theme keys, and the two topics name each other.
     #[test]
     fn the_dashboard_kit_is_complete() {
-        for must in ["margin help dashboards", "margin example", "feed-kept"] {
+        for must in ["margin help dashboards", "margin example", "margin help\n  handlers"] {
             assert!(SKILL.contains(must), "the skill doesn't say {must:?}");
         }
         let d = topic("dashboards").unwrap();
@@ -186,7 +188,7 @@ mod tests {
         for key in ["zebra", "zebra_color", "rule_glyph", "rule_color", "emphasis", "who.glyphs", "who.colors", "who.names", "runs.gap"] {
             assert!(d.contains(key), "dashboards doesn't name the theme key {key}");
         }
-        for cmd in ["margin new", "margin apply", "margin feed add", "margin open", "margin tab", "margin view", "margin purpose", "margin hints", "margin render", "margin example", "margin help feeds", "--project"] {
+        for cmd in ["margin new", "margin apply", "margin handler add", "margin emit", "margin feed add", "margin open", "margin tab", "margin view", "margin purpose", "margin hints", "margin render", "margin example", "margin help feeds", "--project"] {
             assert!(d.contains(cmd), "dashboards doesn't show {cmd}");
         }
         let f = topic("feeds").unwrap();

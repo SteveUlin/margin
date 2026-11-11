@@ -26,7 +26,6 @@
           {"type": "tr", "id": "svc-s-report-mailer", "target": "https://example.com/services/report-mailer", "detail": "exit 2: template `weekly.html` not found", "cells": {"st": "fail", "name": "report mailer", "owner": "ada", "runs": ["ok", "fail", "ok", "ok", null, "ok", "ok", "ok", "ok", "ok", "ok", "fail"], "last": "2026-11-10T08:15:00Z"}}
         ]}
       ]}
-    ]},
-    {"type": "feed", "id": "svc-feed", "name": "services", "state": "not registered"}
+    ]}
   ]
 }

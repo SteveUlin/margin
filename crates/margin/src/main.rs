@@ -1892,6 +1892,10 @@ fn daemon_cmd(a: &Args) -> Result<(), String> {
         None => default_unit_dir(),
     };
     let unit = unit_name(&st.project);
+    if !a.pos.is_empty() {
+        // only the running daemon outlives its stdout; its subcommands end quietly on a closed pipe
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     match a.pos.first().map(String::as_str) {
         None => daemon::run(st, a.has("--stay")),
         Some("install") => {

@@ -19,7 +19,6 @@
       {"type": "tr", "id": "pr-4761", "target": "https://example.com/pulls/4761", "detail": "", "cells": {"pr": "#4761", "by": "dmitri", "title": "Docs: on-call runbook for queue backlog", "ci": ["ok", "ok"], "age": "2026-11-03T08:00:00Z"}}
     ]},
     {"type": "rule", "id": "notes", "text": "Notes"},
-    {"type": "text", "id": "note1", "text": "@[marcus] is out until Thursday; @[yuki] covers the reviews assigned to marcus."},
-    {"type": "feed", "id": "pr-feed", "name": "reviews", "state": "not registered"}
+    {"type": "text", "id": "note1", "text": "@[marcus] is out until Thursday; @[yuki] covers the reviews assigned to marcus."}
   ]
 }
