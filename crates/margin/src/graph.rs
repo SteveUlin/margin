@@ -38,6 +38,13 @@ pub struct Row {
     pub right: bool,
 }
 
+/// Does a line leave this cell downward? A passing lane and a branch do (a merge and a
+/// horizontal run end here), so a row taller than one line continues them with `V` below, and
+/// the lanes stay joined to the next row. The node's own cell is the caller's: `Row::down`.
+pub fn continues_down(c: char) -> bool {
+    matches!(c, V | TL | TR | DOWN_FROM_LEFT | DOWN_FROM_RIGHT)
+}
+
 /// The node glyph for a row: Flog's circles come in filled / hollow pairs, one per combination of
 /// stubs (none, R, L, LR, D, U, UD, RD, LD, UR, UL, UDR, UDL, LRD, LRU, LRUD).
 pub fn node_glyph(r: &Row, filled: bool) -> char {

@@ -907,10 +907,11 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             Drawn { grid: Some(g), ..Default::default() }
         }
         "todo" => {
-            // a step's text wraps (a graph row keeps to one line, so its lanes stay joined); the
-            // grid starts tall and is cut to the rows used
+            // a step's text wraps, in a dependency chain too: there the rows under the first carry
+            // the lanes that pass through, so they stay joined. The grid starts tall and is cut
+            // to the rows used
             const TODO_ROWS: u16 = 16;
-            let mut g = new_grid(w, if b.f.contains_key("_graph") { 1 } else { TODO_ROWS }, g0);
+            let mut g = new_grid(w, TODO_ROWS, g0);
             let st = todo_status(cx, b);
             let mine = decision(cx, &b.id).map(|d| crate::who::is_human(&d.by)).unwrap_or(false);
             let mut tick = None;
@@ -935,6 +936,9 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             // done, hollow open, coloured by status, with the lanes drawn around it (graph.rs)
             let lane = b.f.get("_graph").cloned();
             let gx0 = ind;
+            // the lanes that leave this row downward: (column, color), drawn again as plain
+            // verticals on every row the step takes under its first
+            let mut through: Vec<(u16, Rgb)> = Vec::new();
             let ind = match &lane {
                 Some(gv) => {
                     let colors: Vec<Option<Rgb>> = gv["colors"].as_array().map(|a| a.iter().map(|c| c.as_str().map(Rgb::hex)).collect()).unwrap_or_default();
@@ -956,6 +960,12 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
                         let ch = crate::graph::glyph(ch, cx.flog);
                         let mut buf = [0u8; 4];
                         put(&mut g, gx0 + i as u16, 0, ch.encode_utf8(&mut buf), stl);
+                        if crate::graph::continues_down(c) {
+                            through.push((gx0 + i as u16, lc));
+                        } else if c == crate::graph::NODE && row.down {
+                            // the edge that starts at this step starts in its color
+                            through.push((gx0 + i as u16, status_color(p, &st)));
+                        }
                     }
                     // the text starts after the lanes; the node column is the clickable glyph
                     (gx0 + row.cells.len() as u16).saturating_sub(TX)
@@ -1010,9 +1020,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             // the text's right limit: the control (a token keeps a cell more), then the duration
             let right_w = ctl_w + show_tok as u16 + took_w + (took_w > 0 && ctl_w == 1) as u16;
             let text_room = w.saturating_sub(tx + 1 + right_w) as usize;
-            let lines = if lane.is_some() {
-                vec![truncate_runs(markup(b.s("text")), text_room)]
-            } else {
+            let lines = {
                 let mut l = wrap_runs(&markup(b.s("text")), text_room.max(1));
                 l.truncate(TODO_ROWS as usize - 4);
                 if l.is_empty() { vec![vec![]] } else { l }
@@ -1083,7 +1091,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             if !aside.is_empty() {
                 // the note follows the text when it fits whole, else it takes its own lines below
                 let room = edge.saturating_sub(x + 2) as usize;
-                if lane.is_some() || width(aside) <= room {
+                if width(aside) <= room {
                     if room > 3 {
                         put(&mut g, x + 2, ly, &truncate(aside, room), Style::fg(p.grey1).on(g0));
                     }
@@ -1114,6 +1122,13 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             if let Some(d) = &took {
                 let dc = if st == "doing" { p.grey1 } else { p.grey0 };
                 put(&mut g, w.saturating_sub(ctl_w + took_w + (ctl_w > 1) as u16 - 1), 0, d, Style::fg(dc).on(g0));
+            }
+            // under the first row of a step in a chain: only the lanes that pass through
+            for y in 1..used {
+                for (lx, lc) in &through {
+                    let mut buf = [0u8; 4];
+                    put(&mut g, *lx, y, crate::graph::glyph(crate::graph::V, cx.flog).encode_utf8(&mut buf), Style::fg(*lc).on(g0));
+                }
             }
             if used < g.area().h {
                 let mut cut = new_grid(w, used, g0);

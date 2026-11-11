@@ -2787,6 +2787,45 @@ mod tests {
         assert_eq!(sc.hit_at(node_col, y), Some("mg:todo/c1=next"), "clicking the node cycles it");
     }
 
+    /// A step inside a dependency chain wraps like any other step (it was cut to one line with
+    /// `…`): its first row carries the lanes as laid out, each row under it only the verticals
+    /// of the lanes that pass through, and the text sits under the title. A note that does not
+    /// fit beside the last line drops below, between the same lanes.
+    #[test]
+    fn a_step_in_a_chain_wraps_and_its_lanes_stay_joined() {
+        let doc: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [{"type": "section", "id": "s", "title": "S", "children": [
+            {"type": "todo", "id": "c1", "text": "Rename the thing to board in every help text and hint", "status": "done"},
+            {"type": "todo", "id": "c2", "text": "Retire the feed runner from the main path", "status": "done", "after": ["c1"], "note": "the note drops below when it does not fit"},
+            {"type": "todo", "id": "c3", "text": "Wrap the steps of a chain so the lanes stay joined", "status": "done", "after": ["c1"]},
+            {"type": "todo", "id": "c4", "text": "Ship it", "after": ["c2", "c3"]}]}]})).unwrap();
+        let t = frame_text_w(&mut Scene::new(&Config::default()), &doc, 0.0, 44);
+        let rows: Vec<&str> = t.lines().skip_while(|l| !l.contains("c1 Rename")).take_while(|l| !l.trim().is_empty()).map(|l| l.trim_end()).collect();
+        assert_eq!(
+            rows[..8],
+            [
+                "    ●─╮ c1 Rename the thing to board in",
+                "    │ │    every help text and hint",
+                "    ● │ c2 Retire the feed runner from",
+                "    │ │    the main path",
+                "    │ │    the note drops below when it",
+                "    │ │    does not fit",
+                "    │ ● c3 Wrap the steps of a chain so",
+                "    │ │    the lanes stay joined",
+            ],
+            "{t}"
+        );
+        assert!(rows.len() == 9 && rows[8].starts_with("    ○─╯ c4 Ship it"), "{t}");
+        assert!(!t.contains('…'), "nothing is cut: {t}");
+        // a lane that ends at a row does not run on under it: the last step wraps bare
+        let last: Doc = serde_json::from_value(json!({"id": "a", "rev": 1, "blocks": [{"type": "section", "id": "s", "title": "S", "children": [
+            {"type": "todo", "id": "c1", "text": "first", "status": "done"},
+            {"type": "todo", "id": "c2", "text": "The last step of the chain is long enough to wrap onto a second row", "after": ["c1"]}]}]})).unwrap();
+        let t = frame_text_w(&mut Scene::new(&Config::default()), &last, 0.0, 44);
+        let rows: Vec<&str> = t.lines().skip_while(|l| !l.contains("c1 first")).take(3).map(|l| l.trim_end()).collect();
+        assert_eq!(rows[0], "    ● c1 first", "{t}");
+        assert!(rows[1].starts_with("    ○ c2 The last step") && rows[2].starts_with("         ") && !rows[2].trim().is_empty() && !rows[2].contains('│'), "{t}");
+    }
+
     #[test]
     fn graph_lines_blend_their_ends() {
         // a (done) → c (open) passes b's row halfway; a → b is done → done
