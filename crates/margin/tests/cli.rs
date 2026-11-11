@@ -431,9 +431,17 @@ fn the_skills_worked_example_runs_end_to_end() {
     let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
     assert!(o.status.success(), "the skill's example failed: {out}");
     assert_eq!(artifacts(&home), ["plan"]);
-    for must in ["plan \"fix the flake\"", "todo t1 [done]", "todo t2 [doing]", "todo t3 ", "question Q1 ", "claim A1 ", "decided D3 "] {
-        assert!(out.contains(must), "{must}: {out}");
+    // what `margin show plan` prints at the end is the present and nothing else: the live step,
+    // the next one promoted, the rule as last rewritten; no finished step, no answered card, no
+    // empty section, no archive
+    let shown = &out[out.rfind("plan \"fix the flake\"").expect("margin show plan")..];
+    for must in ["plan \"fix the flake\"", "section now ", "todo t3 [doing] Regression test for the seed", "todo t4 [todo] Run the suite 200 times in CI", "section rules  Rules in force", "bullet r1  1. **Seeds** come from the test name and the shard"] {
+        assert!(shown.contains(must), "{must}: {shown}");
     }
+    for gone in ["t1", "t2", "Q1", "A1", "section ask", "section next", "never the clock", "decided", "Done"] {
+        assert!(!shown.contains(gone), "{gone} is still on the pane: {shown}");
+    }
+    assert_eq!(shown.lines().count(), 7, "{shown}");
     // run again from the top, the create is refused and nothing after it runs
     let o = Command::new("sh").args(["-e", "-c", &block]).current_dir(&decoy).env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("XDG_CONFIG_HOME", decoy.join("config")).env("MARGIN_HOME", &home).env("MARGIN_PROJECT", "p").env("MARGIN_HOST", "plain").stdin(Stdio::null()).output().unwrap();
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("plan already exists"));

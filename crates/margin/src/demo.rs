@@ -72,7 +72,7 @@ fn plan(a: &std::path::Path) -> Result<Doc, String> {
                 {"type": "claim", "id": "A1", "text": "CI runs tests in one process"},
                 {"type": "claim", "id": "A2", "text": "Zellij runs over ssh, not locally"}
             ]},
-            {"type": "section", "id": "decided", "title": "Decided", "children": [
+            {"type": "section", "id": "decided", "title": "Rules in force", "children": [
                 {"type": "decided", "id": "D1", "text": "Seed from the test name", "by": "claude", "at": rfc3339(now - 600.0)},
                 {"type": "decided", "id": "D2", "text": "Rust for toolkit, app and plugin", "by": "you", "at": rfc3339(now - 3600.0)}
             ]},

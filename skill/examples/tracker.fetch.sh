@@ -12,7 +12,7 @@
 #
 # It prints THREE lines, one section each. A line is a whole component: margin replaces the one
 # with that id where it stands, so the sections keep the places `margin new` gave
-# them, and the `decided` section between and after them (not under `wk`) is never touched: the
+# them, and the `rules` section after them (not under `wk`) is never touched: the
 # handler owns `wk` and `wk-...`, Claude and the person own every other id in the same board.
 #
 # Now and Next are todos (one `doing` at most reads best); the item's key leads the text in

@@ -193,8 +193,9 @@ mod tests {
     /// column kinds and the theme keys, and the two topics name each other.
     #[test]
     fn the_dashboard_kit_is_complete() {
-        for must in ["margin help dashboards", "margin example", "margin help\n  handlers"] {
-            assert!(SKILL.contains(must), "the skill doesn't say {must:?}");
+        let flat = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        for must in ["margin help dashboards", "margin example", "margin help handlers", "margin data"] {
+            assert!(flat.contains(must), "the skill doesn't say {must:?}");
         }
         let d = topic("dashboards").unwrap();
         for kind in ["rule", "table", "tr", "runs", "row", "status", "link", "tabs", "section", "text", "bullet", "todo", "decided", "question", "claim"] {
@@ -215,6 +216,44 @@ mod tests {
         for must in ["--owns", "Exit 0", "jq -c", "\"op\": \"set\"", "\"op\": \"rm\"", "\"op\": \"move\"", "\"op\": \"add\"", "\"parent\"", "an array of ops", "\"toast\"", "\"emit\"", "Print the whole thing every run", "Write times, not ages", "margin handler run", "margin handler logs", "margin help integrate"] {
             assert!(h.contains(must), "handlers doesn't cover {must:?}");
         }
+    }
+
+    /// A pane shows what is true now: the skill's shape has no Done and no Decided section, says
+    /// what replaces what, and carries the rules on wrapping, color and counted lists; its
+    /// worked example builds no archive either.
+    #[test]
+    fn the_skill_teaches_a_pane_that_holds_the_present() {
+        let flat = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        for must in [
+            "## The pane shows what is true now",
+            "No Done section and no log of finished threads",
+            "no archive of resolved questions",
+            "never a \"superseded\" or \"earlier\" version",
+            "History is in version control and the event log",
+            "Before adding anything, ask what it replaces, and remove that.",
+            "fold the answer into the content it affects",
+            "Remove it when it is empty",
+            "**Rules in force** (`section rules`)",
+            "rewrite its bullet in place",
+            "write the new text under the same id",
+            "**One pane per chat.**",
+            "**Authored text wraps, so never pre-truncate it.**",
+            "whatever the pane cuts opens in full on focus",
+            "**Color only where it tells things apart.**",
+            "never for decoration",
+            "bullets whose text starts `1.`, `2.`",
+            "the pane draws the number in place of the bullet",
+        ] {
+            assert!(flat.contains(must), "the skill doesn't say {must:?}");
+        }
+        for gone in ["section done", "section decided", "\"Decided\"", "move that row to Decided", "one row in Done", "decided D"] {
+            assert!(!SKILL.contains(gone), "the skill still teaches {gone:?}");
+        }
+        let example = SKILL.split("```fish\n").nth(1).unwrap().split("```").next().unwrap();
+        for must in ["margin rm plan ask", "section rules title=\"Rules in force\"", "bullet r1 \"1. ", "margin set plan r1 text=\"1. ", "margin rm plan t1"] {
+            assert!(example.contains(must), "the worked example doesn't show {must:?}");
+        }
+        assert!(!example.contains("…\"") && !example.to_lowercase().contains("done\"") && !example.contains("tone"), "no cut text, no Done section, no decoration");
     }
 
     /// The parked components (diff, image, dependency lanes, `demo live`) are not taught: the
