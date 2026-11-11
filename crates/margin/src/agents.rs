@@ -143,6 +143,9 @@ struct Cached {
 
 static CACHE: Mutex<Option<HashMap<PathBuf, Cached>>> = Mutex::new(None);
 /// The subagents of a session, grouped by the turn that spawned them, newest group first.
+/// How long a finished agent stays listed in the pane.
+pub const KEEP_FINISHED: f64 = 5.0 * 60.0;
+
 /// Finished groups older than `keep` seconds are left out.
 pub fn groups(dir: &Path, now: f64, keep: f64) -> Vec<Group> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -161,7 +164,10 @@ pub fn groups(dir: &Path, now: f64, keep: f64) -> Vec<Group> {
         }
     }
     let age = |g: &Group| g.agents.iter().filter_map(|a| crate::util::parse_rfc3339(&a.started)).fold(0.0f64, f64::max);
-    out.retain(|g| g.done() < g.agents.len() || now - age(g) < keep);
+    // a finished group leaves `keep` seconds after its last agent ENDED: long enough to see how
+    // it went, short enough that the block lists what is running, not what once ran
+    let ended = |g: &Group| g.agents.iter().filter_map(|a| crate::util::parse_rfc3339(&a.ended)).fold(0.0f64, f64::max);
+    out.retain(|g| g.done() < g.agents.len() || now - ended(g).max(age(g)) < keep);
     out.sort_by(|a, b| age(b).partial_cmp(&age(a)).unwrap_or(std::cmp::Ordering::Equal));
     out
 }
@@ -172,7 +178,7 @@ pub fn for_pane(st: &crate::store::Store, art: &str) -> Vec<Group> {
     let mut out: Vec<Group> = crate::link::all(st)
         .into_iter()
         .filter(|l| l.art == art && !l.transcript.is_empty())
-        .flat_map(|l| groups(&dir_for(Path::new(&l.transcript)), now, 30.0 * 60.0))
+        .flat_map(|l| groups(&dir_for(Path::new(&l.transcript)), now, KEEP_FINISHED))
         .collect();
     // each agent's plan progress, with every artifact that holds a plan loaded once
     let mut docs: HashMap<String, Option<(crate::doc::Doc, crate::store::State)>> = HashMap::new();

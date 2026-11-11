@@ -383,8 +383,9 @@ fn draw_plot(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     let g0 = p.bg0;
     let st = PlotStyle::new(p);
     let kind = if b.s("kind").is_empty() { "line" } else { b.s("kind") };
-    // series: label, values (null is a gap), color
-    let raw: Vec<(String, Vec<f64>, Option<Rgb>)> = b
+    let pw = w.saturating_sub(ind + 1);
+    // what the series entries say: label, values (null is a gap), color
+    let listed: Vec<(String, Vec<f64>, Option<Rgb>)> = b
         .f
         .get("series")
         .and_then(|v| v.as_array())
@@ -397,10 +398,58 @@ fn draw_plot(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
                 .collect()
         })
         .unwrap_or_default();
+    // bound to a dataset: one series per field of `y`, from the newest records; `series` then
+    // only renames and colors them, by position
+    let mut ends = b.strs("x");
+    let mut labels = b.strs("labels");
+    let mut tick = None;
+    let raw: Vec<(String, Vec<f64>, Option<Rgb>)> = match b.opt("data") {
+        None => listed,
+        Some(name) => {
+            let snap = crate::data::current();
+            let set = match snap.get(name) {
+                Ok(s) => s,
+                Err(why) => return note_line(cx, &why, w, ind),
+            };
+            let n = crate::data::plot_last(b, pw);
+            let recs = &set.records[set.records.len().saturating_sub(n)..];
+            if recs.is_empty() {
+                return note_line(cx, &format!("dataset {name:?} has no records yet"), w, ind);
+            }
+            let xf = b.f.get("x").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let fields: Vec<String> = match b.f.get("y") {
+                Some(serde_json::Value::String(f)) => vec![f.clone()],
+                Some(serde_json::Value::Array(_)) => b.strs("y"),
+                _ => crate::data::numeric_fields(recs, xf),
+            };
+            ends.clear();
+            if let Some(xf) = xf {
+                if matches!(kind, "bars" | "columns") {
+                    labels = recs.iter().map(|r| r.get(xf).map(|v| cell_text(Some(v))).unwrap_or_default()).collect();
+                } else if let (Some(t0), Some(t1)) = (crate::data::time_of(&recs[0], xf), crate::data::time_of(&recs[recs.len() - 1], xf)) {
+                    // the ends as ages: the newest reads "now" while it is no older than the
+                    // records are apart, so a provider that stopped shows in the label
+                    let step = if recs.len() > 1 { (t1 - t0) / (recs.len() - 1) as f64 } else { 0.0 };
+                    let age = |t: f64| format!("-{}", age_short((cx.wall - t).max(0.0)));
+                    let newest = cx.wall - t1;
+                    ends = vec![age(t0), if newest <= step.max(2.0) { "now".to_string() } else { age(t1) }];
+                    tick = Some(age_tick((cx.wall - t1).max(0.0)).max(1.0));
+                }
+            }
+            let over = |i: usize| listed.get(i);
+            if fields.is_empty() {
+                vec![(over(0).map(|s| s.0.clone()).unwrap_or_default(), crate::data::column(recs, None), over(0).and_then(|s| s.2))]
+            } else {
+                fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (over(i).map(|s| s.0.clone()).filter(|l| !l.is_empty()).unwrap_or_else(|| f.clone()), crate::data::column(recs, Some(f)), over(i).and_then(|s| s.2)))
+                    .collect()
+            }
+        }
+    };
     let color_of = |i: usize| raw[i].2.unwrap_or_else(|| st.series_color(i));
-    let pw = w.saturating_sub(ind + 1);
     let rows = b.num("height").map(|h| h as u16).unwrap_or(8).clamp(2, 40);
-    let labels = b.strs("labels");
     let h = match kind {
         "spark" | "heat" => raw.len().max(1) as u16,
         "bars" => raw.first().map(|s| s.1.len()).unwrap_or(1).max(1) as u16,
@@ -441,7 +490,6 @@ fn draw_plot(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
         }
         _ => {
             let series: Vec<Series> = raw.iter().enumerate().map(|(i, s)| Series::new(&s.0, &s.1).color(color_of(i))).collect();
-            let ends = b.strs("x");
             let mut lp = LinePlot::new(&series).fill(kind == "area").legend(b.flag("legend"));
             if ends.len() == 2 {
                 lp = lp.x(XAxis::Ends(&ends[0], &ends[1]));
@@ -452,11 +500,37 @@ fn draw_plot(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
             lp.draw(&mut g, r, &st, g0, clip);
         }
     }
+    Drawn { grid: Some(g), tick, ..Default::default() }
+}
+
+/// What a component bound to a dataset draws when there is nothing to draw from: one dim line
+/// in its place (the dataset is not registered, cannot be read, or is empty). It wraps, and the
+/// rest of the board draws as usual.
+fn note_line(cx: &Ctx, text: &str, w: u16, ind: u16) -> Drawn {
+    let (p, g0) = (cx.p, cx.p.bg0);
+    let lines = wrap(text, w.saturating_sub(ind + 1).max(8) as usize);
+    let mut g = new_grid(w, lines.len().clamp(1, 6) as u16, g0);
+    for (i, l) in lines.iter().take(6).enumerate() {
+        put(&mut g, ind, i as u16, l, Style::fg(p.grey1).on(g0).italic());
+    }
     Drawn { grid: Some(g), ..Default::default() }
 }
 
 fn color_of_or(raw: &[(String, Vec<f64>, Option<Rgb>)], st: &vellum::plot::PlotStyle, i: usize) -> Rgb {
     raw.get(i).and_then(|s| s.2).unwrap_or_else(|| st.series_color(i))
+}
+
+/// The width of the id column a block shares with its siblings of the same kinds: the widest id
+/// among them, so `c9` and `c10` (or `dc1` and `dc12`) start their text in the same place.
+/// `short_only`: count only ids short enough to be shown (steps hide long slugs).
+fn id_column(cx: &Ctx, id: &str, kinds: &[&str], short_only: bool) -> u16 {
+    let shown = |i: &str| !short_only || short_id(i);
+    let own = if shown(id) { width(id) as u16 } else { 0 };
+    let siblings: Vec<&Block> = match cx.doc.parent_of(id) {
+        Some(par) => par.children.iter().collect(),
+        None => cx.doc.blocks.iter().collect(),
+    };
+    siblings.iter().filter(|c| kinds.contains(&c.kind.as_str()) && shown(&c.id)).map(|c| width(&c.id) as u16).max().unwrap_or(0).max(own)
 }
 
 /// A list item that opens with its own number: `1. text`, `12) text`, or the same inside a bold
@@ -508,6 +582,9 @@ pub enum Span {
 /// Anything else is not a sparkline and stays as typed.
 fn inline_spark(body: &str) -> Option<(String, Rgb)> {
     let p = &vellum::color::EVERFOREST;
+    if body.starts_with('@') {
+        return inline_data(body);
+    }
     let (nums, color) = match body.rsplit_once('|') {
         Some((n, c)) => (n, theme::color(p, c)?),
         None => (body, p.aqua),
@@ -520,6 +597,11 @@ fn inline_spark(body: &str) -> Option<(String, Rgb)> {
     if vals.len() < 2 || vals.len() > 60 {
         return None;
     }
+    Some((spark_cells(&vals)?, color))
+}
+
+/// Values as sparkline cells: eighth blocks scaled to the values' own range, a dot for a gap.
+fn spark_cells(vals: &[f64]) -> Option<String> {
     let (lo, hi) = vellum::plot::finite_range(vals.iter().copied())?;
     let cells = vals.iter().map(|v| {
         if !v.is_finite() {
@@ -530,7 +612,31 @@ fn inline_spark(body: &str) -> Option<(String, Rgb)> {
             vellum::plot::EIGHTHS_UP[4]
         }
     });
-    Some((cells.collect(), color))
+    Some(cells.collect())
+}
+
+/// `~[@name]`, `~[@name.field|color]`, `~[@name.field:24]`: the newest values of a dataset as a
+/// sparkline in the line of text (data.rs `inline_ref`; 12 cells unless it says). Without a
+/// field it reads bare numbers, else the first numeric field. A dataset that is not there, or
+/// has no numbers yet, says so in dim words where the strip would be.
+fn inline_data(body: &str) -> Option<(String, Rgb)> {
+    let p = &vellum::color::EVERFOREST;
+    let (name, field, n, color) = crate::data::inline_ref(body)?;
+    let color = match color {
+        Some(c) => theme::color(p, c)?,
+        None => p.aqua,
+    };
+    let snap = crate::data::current();
+    let set = match snap.get(name) {
+        Ok(s) => s,
+        Err(_) => return Some((format!("no dataset {name:?}"), p.grey1)),
+    };
+    let recs = &set.records[set.records.len().saturating_sub(n)..];
+    let field = field.map(String::from).or_else(|| crate::data::numeric_fields(recs, None).into_iter().next());
+    match spark_cells(&crate::data::column(recs, field.as_deref())) {
+        Some(cells) => Some((cells, color)),
+        None => Some(("·".into(), p.grey1)),
+    }
 }
 
 /// A name `@[…]` may hold: short, on one line, and free of the other markers.
@@ -859,11 +965,13 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             let node_x = lane.as_ref().map(|gv| gx0 + gv["node"].as_u64().unwrap_or(0) as u16).unwrap_or(gx0);
             // its id, dim, the way claims show theirs: what Claude names in chat, sulin can see.
             // A long id (a slug made from the text) stays hidden; `i` shows every id
-            let tx = if short_id(&b.id) {
-                put(&mut g, ind + TX, 0, &b.id, Style::fg(p.grey0).on(g0)) + 1
-            } else {
-                ind + TX
-            };
+            // The ids of one section's steps share a column as wide as the widest of them, so
+            // `c9` and `c10` start their text in the same place
+            let idw = id_column(cx, &b.id, &["todo"], true);
+            if short_id(&b.id) {
+                put(&mut g, ind + TX, 0, &b.id, Style::fg(p.grey0).on(g0));
+            }
+            let tx = if idw > 0 { ind + TX + idw + 1 } else { ind + TX };
             // sulin's controls. With the mouse on they are buttons on every open row, always in
             // reach (they act on release without a drag, so a stray press-and-drag hits nothing);
             // with the mouse off the one `mg:todo` token is the double-click route
@@ -1199,7 +1307,8 @@ fn decided_row(cx: &Ctx, ind: u16, id: &str, text: &str, answer: Option<(&str, b
     let g0 = p.bg0;
     let when = at.and_then(parse_rfc3339).map(local_hm).unwrap_or_default();
     let rw = width(&when) as u16 + 3;
-    let tx = ind + TX + width(id) as u16 + 1;
+    // decided rows and answered questions beside each other share one id column
+    let tx = ind + TX + id_column(cx, id, &["decided", "question"], false) + 1;
     let room = w.saturating_sub(tx + 1 + rw) as usize;
     let lines = wrap_runs(&markup(text), room.max(1));
     let last_w = lines.last().map(|l| l.iter().map(|(s, _)| width(s)).sum::<usize>()).unwrap_or(0);
@@ -1429,7 +1538,7 @@ fn draw_claim(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     let right_w = if cx.mouse { 1 } else { width(&t) as u16 + 2 };
     let (gl, gc) = if struck { (icon::BLOCKED, p.red) } else { (icon::BULB, p.yellow) };
     // the text wraps under itself, clear of the control on the right, with `**bold**` and `code`
-    let x = ind + TX + width(&b.id) as u16;
+    let x = ind + TX + id_column(cx, &b.id, &["claim"], false);
     let room = w.saturating_sub(x + 2 + right_w) as usize;
     let lines = wrap_runs(&markup(b.s("text")), room.max(1));
     let rows = (lines.len() as u16).max(1);
@@ -1772,8 +1881,8 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
 /// (as a ghost, while it animates out) in the columns it had.
 #[derive(Default)]
 struct TableCache {
-    /// (doc address, doc id, rev, grid width, theme generation)
-    key: Option<(usize, String, u64, u16, u64)>,
+    /// (doc address, doc id, rev, grid width, theme generation, dataset generation)
+    key: Option<(usize, String, u64, u16, u64, u64)>,
     tables: HashMap<String, Rc<TableLayout>>,
     /// row id → its table's layout and its index among the rows
     rows: HashMap<String, (Rc<TableLayout>, usize)>,
@@ -1789,12 +1898,13 @@ thread_local! {
 
 /// Run `f` on the table cache, rebuilt first if the doc, the width or the theme changed.
 fn with_tables<R>(cx: &Ctx, w: u16, f: impl FnOnce(&TableCache) -> R) -> R {
-    let key = (cx.doc as *const Doc as usize, cx.doc.id.clone(), cx.doc.rev, w, theme::generation());
+    // a table bound to a dataset gets new rows without a new revision (data.rs `expand`)
+    let key = (cx.doc as *const Doc as usize, cx.doc.id.clone(), cx.doc.rev, w, theme::generation(), crate::data::current().gen);
     TABLES.with(|c| {
         let mut c = c.borrow_mut();
         if c.key.as_ref() != Some(&key) {
             // another revision (or another doc): what was laid out is now the past
-            if c.key.as_ref().map(|k| (&k.1, k.2)) != Some((&key.1, key.2)) {
+            if c.key.as_ref().map(|k| (&k.1, k.2, k.5)) != Some((&key.1, key.2, key.5)) {
                 c.old_tables = std::mem::take(&mut c.tables);
                 c.old_rows = std::mem::take(&mut c.rows);
             }
@@ -1821,6 +1931,9 @@ fn with_tables<R>(cx: &Ctx, w: u16, f: impl FnOnce(&TableCache) -> R) -> R {
 fn draw_table(cx: &Ctx, b: &Block, w: u16, depth: usize) -> Drawn {
     let g0 = cx.p.bg0;
     let th = theme::current();
+    if let Some(Err(why)) = b.opt("rows").map(|name| crate::data::current().get(name).map(|_| ())) {
+        return note_line(cx, &why, w, indent(depth));
+    }
     let lay = with_tables(cx, w, |c| c.tables.get(&b.id).or_else(|| c.old_tables.get(&b.id)).cloned())
         // a table that isn't in the doc (a ghost from before this pane opened) lays itself out
         .unwrap_or_else(|| Rc::new(table_layout_of(b, depth, w, &th)));
@@ -1915,7 +2028,19 @@ fn draw_runs(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     let th = theme::current();
     let mut g = new_grid(w, 1, g0);
     let a = g.area();
-    let vals = outcomes(b.f.get("values"));
+    let vals = match b.opt("data") {
+        None => outcomes(b.f.get("values")),
+        Some(name) => {
+            let snap = crate::data::current();
+            let set = match snap.get(name) {
+                Ok(s) => s,
+                Err(why) => return note_line(cx, &why, w, ind),
+            };
+            let n = b.num("last").filter(|n| *n >= 1.0).map(|n| n as usize).unwrap_or(w as usize);
+            let field = b.opt("y").unwrap_or("outcome");
+            set.records[set.records.len().saturating_sub(n)..].iter().map(|r| Outcome::parse(r.get(field).and_then(|v| v.as_str())).unwrap_or(Outcome::None)).collect()
+        }
+    };
     let edge = w.saturating_sub(1);
     let end = if b.flag("summary") { edge.saturating_sub(SUMMARY_W + 2) } else { edge };
     // the label keeps up to half the line; the strip takes the rest, newest runs first
@@ -2080,6 +2205,24 @@ mod cycle_tests {
 }
 
 #[cfg(test)]
+mod id_column_tests {
+    #[test]
+    fn step_ids_of_one_section_share_a_column() {
+        let d = super::dash_tests::doc(1, serde_json::json!([{"type": "section", "id": "s", "title": "S", "children": [
+            {"type": "todo", "id": "c9", "text": "ninth"}, {"type": "todo", "id": "c10", "text": "tenth"}]}]));
+        let (text, _) = super::dash_tests::render_at(&d, 40, false, 0.0);
+        let col = |text: &str, w: &str| text.lines().find(|l| l.contains(w)).map(|l| l[..l.find(w).unwrap()].chars().count()).unwrap();
+        assert_eq!(col(&text, "ninth"), col(&text, "tenth"), "{text}");
+        let d = super::dash_tests::doc(1, serde_json::json!([
+            {"type": "decided", "id": "dc1", "text": "first", "by": "you"}, {"type": "decided", "id": "dc12", "text": "twelfth", "by": "you"},
+            {"type": "claim", "id": "A1", "text": "alpha"}, {"type": "claim", "id": "A10", "text": "kappa"}]));
+        let (text, _) = super::dash_tests::render_at(&d, 40, false, 0.0);
+        assert_eq!(col(&text, "first"), col(&text, "twelfth"), "decided rows: {text}");
+        assert_eq!(col(&text, "alpha"), col(&text, "kappa"), "claims: {text}");
+    }
+}
+
+#[cfg(test)]
 mod spark_tests {
     use super::{markup, Span};
 
@@ -2121,7 +2264,7 @@ mod dash_tests {
 
     /// Draw every block of `doc` the way the scene stacks them (each at its depth, top to
     /// bottom), with the clock at `wall`. Returns the text and each block's `Drawn` by id.
-    fn render_at(doc: &Doc, w: u16, mouse: bool, wall: f64) -> (String, HashMap<String, Drawn>) {
+    pub(super) fn render_at(doc: &Doc, w: u16, mouse: bool, wall: f64) -> (String, HashMap<String, Drawn>) {
         let state = State::default();
         let (flash, progress, images, pulse) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let cx = Ctx {
@@ -2146,7 +2289,7 @@ mod dash_tests {
         render_at(doc, w, false, 0.0).0
     }
 
-    fn doc(rev: u64, blocks: serde_json::Value) -> Doc {
+    pub(super) fn doc(rev: u64, blocks: serde_json::Value) -> Doc {
         let d: Doc = serde_json::from_value(json!({"id": "dash", "rev": rev, "blocks": blocks})).unwrap();
         d.blocks.iter().for_each(|b| crate::doc::check_block(b).unwrap());
         d
@@ -2212,6 +2355,97 @@ mod dash_tests {
         for w in 4..40 {
             assert_eq!(render(&d, w).lines().count(), 5, "width {w}");
         }
+    }
+
+    /// A plot bound to a dataset draws the newest `last` records of the fields `y` names, one
+    /// series a field, labeled by the field unless `series` renames it; bare numbers are one
+    /// unnamed series; an `x` field labels the ends with ages.
+    #[test]
+    fn a_plot_bound_to_a_dataset_draws_the_last_n_of_the_named_fields() {
+        let recs: Vec<serde_json::Value> = (0..10).map(|i| json!({"t": 1000 + i * 60, "rps": if i < 6 { 100 } else { [1, 8, 1, 8][i - 6] }, "errors": if i == 9 { 9 } else { 0 }, "host": "a"})).collect();
+        crate::data::tests::install_sets(&[("requests", recs), ("bare", vec![json!(5), json!(1), json!(8), json!(1), json!(8)])]);
+        let d = doc(1, json!([
+            {"type": "plot", "id": "p", "kind": "spark", "data": "requests", "y": ["rps", "errors"], "last": 4},
+            {"type": "plot", "id": "q", "kind": "spark", "data": "requests", "y": "rps", "last": 2, "series": [{"label": "req/s"}]},
+            {"type": "plot", "id": "b", "kind": "spark", "data": "bare", "last": 4},
+            {"type": "plot", "id": "all", "kind": "spark", "data": "requests", "last": 3},
+            {"type": "plot", "id": "ln", "data": "requests", "y": ["rps"], "x": "t", "height": 4}]));
+        let (_, dr) = render_at(&d, 40, false, 1000.0 + 9.0 * 60.0 + 200.0);
+        let text = |id: &str| dr[id].grid.as_ref().unwrap().to_text().lines().map(|l| l.trim_end().to_string()).collect::<Vec<_>>();
+        // the last four: 1 8 1 8 (not the 100s before them), and errors 0 0 0 9
+        let words = |id: &str| text(id).iter().map(|l| l.split_whitespace().map(String::from).collect::<Vec<_>>()).collect::<Vec<_>>();
+        assert_eq!(words("p"), [["rps", "▁█▁█"], ["errors", "▁▁▁█"]]);
+        assert_eq!(words("q"), [["req/s", "▁█"]], "the last two, under the label the series gives");
+        assert_eq!(words("b"), [["▁█▁█"]], "bare numbers: one unnamed series");
+        assert_eq!(text("all").len(), 3, "no y: every numeric field, the text one left out: {:?}", text("all"));
+        let ln = text("ln").join("\n");
+        assert!(ln.contains("-12m") && ln.contains("-3m") && !ln.contains("now"), "ages at the ends, and a provider that is minutes late is not `now`:\n{ln}");
+        assert!(dr["ln"].tick.is_some(), "the ages are redrawn as they change");
+        let (_, dr) = render_at(&d, 40, false, 1000.0 + 9.0 * 60.0 + 5.0);
+        assert!(dr["ln"].grid.as_ref().unwrap().to_text().contains("now"));
+        // the default is the plot's width in cells: 6 cells wide, six records
+        let d = doc(2, json!([{"type": "plot", "id": "w", "kind": "spark", "data": "requests", "y": "t"}]));
+        let (t, _) = render_at(&d, 12, false, 0.0);
+        assert_eq!(crate::data::plot_last(&d.blocks[0], 9), 9);
+        let strip = t.split_whitespace().last().unwrap_or("");
+        assert!(strip.starts_with('▁') && strip.ends_with('█') && strip.chars().count() <= 10, "the newest records, as many as the plot has cells: {t:?}");
+    }
+
+    /// A component bound to a dataset that is not registered draws one dim line in its place,
+    /// naming the command that registers it, and the rest of the board draws.
+    #[test]
+    fn a_missing_dataset_draws_a_hint_line_not_an_error() {
+        crate::data::tests::install_sets(&[("empty", vec![])]);
+        let d = doc(1, json!([
+            {"type": "text", "id": "before", "text": "above"},
+            {"type": "plot", "id": "p", "data": "requests", "y": ["rps"]},
+            {"type": "table", "id": "t", "rows": "prs", "columns": [{"key": "title", "title": "Title"}]},
+            {"type": "runs", "id": "r", "data": "nightly", "label": "nightly"},
+            {"type": "plot", "id": "e", "data": "empty"},
+            {"type": "text", "id": "after", "text": "below ~[@requests.rps] end"}]));
+        let lines: Vec<String> = render(&d, 70).lines().map(String::from).collect();
+        assert_eq!(lines, [
+            " above",
+            " no dataset \"requests\" (margin data add requests)",
+            " no dataset \"prs\" (margin data add prs)",
+            " no dataset \"nightly\" (margin data add nightly)",
+            " dataset \"empty\" has no records yet",
+            " below no dataset \"requests\" end"]);
+        // a narrow pane wraps the line: nothing a person needs is cut
+        let narrow = render(&doc(2, json!([{"type": "plot", "id": "p", "data": "requests"}])), 30);
+        assert!(narrow.lines().count() >= 2 && narrow.replace('\n', "").split_whitespace().collect::<Vec<_>>().join(" ").contains("(margin data add requests)"), "{narrow}");
+    }
+
+    /// `~[@name]` in a line of text is the dataset's newest values as a sparkline: 12 cells unless
+    /// it gives a width, a field when it names one, a color after `|`.
+    #[test]
+    fn an_inline_sparkline_reads_a_dataset() {
+        let nums: Vec<serde_json::Value> = (0..30).map(|i| json!(i % 8)).collect();
+        let recs: Vec<serde_json::Value> = (0..30).map(|i| json!({"host": "a", "ms": i % 8, "err": if i == 29 { 5 } else { 1 }})).collect();
+        crate::data::tests::install_sets(&[("lat", nums), ("svc", recs)]);
+        let cells = |s: &str| markup(s).into_iter().find(|(_, sp)| matches!(sp, Span::Who(_))).unwrap();
+        let (c, sp) = cells("p50 ~[@lat] ms");
+        assert_eq!((c.chars().count(), sp), (12, Span::Who(EVERFOREST.aqua)));
+        assert_eq!(c, "▃▄▅▆▇█▁▂▃▄▅▆", "the newest twelve of 0..8 repeating: 18..30 mod 8");
+        assert_eq!(cells("~[@lat:4]").0, "▁▃▆█", "four cells, scaled to their own range");
+        assert_eq!(cells("~[@svc.err:3|red]"), ("▁▁█".to_string(), Span::Who(EVERFOREST.red)));
+        assert_eq!(cells("~[@svc:2]").0.chars().count(), 2, "no field: the first numeric one");
+        assert_eq!(cells("~[@nope]"), ("no dataset \"nope\"".to_string(), Span::Who(EVERFOREST.grey1)));
+        // not a reference: left as typed
+        assert_eq!(markup("~[@a b]"), vec![("~[@a b]".to_string(), Span::Plain)]);
+    }
+
+    /// A run strip bound to a dataset reads its outcomes from the records.
+    #[test]
+    fn a_run_strip_reads_its_outcomes_from_a_dataset() {
+        let recs: Vec<serde_json::Value> = ["ok", "ok", "fail", "skip", "running"].iter().map(|o| json!({"outcome": o, "state": "fail"})).collect();
+        crate::data::tests::install_sets(&[("nightly", recs)]);
+        let inline = doc(1, json!([{"type": "runs", "id": "r", "label": "nightly", "values": ["ok", "ok", "fail", "skip", "running"], "summary": true}]));
+        let bound = doc(2, json!([{"type": "runs", "id": "r", "label": "nightly", "data": "nightly", "y": "outcome", "summary": true}]));
+        assert_eq!(render(&bound, 60), render(&inline, 60));
+        assert!(render(&bound, 60).contains("1/5 failed"));
+        let last2 = doc(3, json!([{"type": "runs", "id": "r", "data": "nightly", "y": "state", "last": 2, "summary": true}]));
+        assert!(render(&last2, 60).contains("2/2 failed"), "{}", render(&last2, 60));
     }
 
     #[test]
