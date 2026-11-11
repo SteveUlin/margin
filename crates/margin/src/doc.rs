@@ -159,10 +159,10 @@ pub const SCHEMA: &[Kind] = &[
 /// The fields of the document itself: the envelope a whole-document `margin apply` takes
 /// (main.rs `apply_cmd`). `id`, `rev`, `updated` and `by` are margin's and never written.
 pub const DOC_FIELDS: &[(&str, Ty, &str)] = &[
-    ("title", Ty::Text, "the pane's title line and its tab's name (margin title; default: the artifact id)"),
+    ("title", Ty::Text, "the pane's title line and its tab's name (margin title; default: the board's name)"),
     ("purpose", Ty::Text, "what the pane is for, one line pinned at the top (margin purpose)"),
     ("hints", Ty::List, "reminders at the pane's bottom, one each; `key  text` (two spaces) draws a key (margin hints)"),
-    ("kind", Ty::Text, "a free label for what the artifact is (plan, dashboard); listed by margin ls --json, never drawn"),
+    ("kind", Ty::Text, "a free label for what the board is (plan, dashboard); listed by margin ls --json, never drawn"),
     ("actions", Ty::Any, "list of {key, name, label?}: actions of the whole board, offered on every block that has none of its own under that key (see a row's actions)"),
     ("blocks", Ty::Any, "the top-level components, in order: a list of {type, id, fields…, children}"),
     ("v", Ty::Num, "the format version, optional: 1"),
@@ -514,7 +514,7 @@ fn pick(only: Option<&str>) -> Result<Vec<&'static Kind>, String> {
 
 /// `document` is not a component type: `margin schema document` prints the envelope's fields.
 const DOCUMENT: &str = "document";
-const DOCUMENT_ABOUT: &str = "the artifact itself: the envelope of a whole-document `margin apply <art>`; a write without purpose or hints keeps the ones it has";
+const DOCUMENT_ABOUT: &str = "the board itself: the envelope of a whole-document `margin apply <board>`; a write without purpose or hints keeps the ones it has";
 
 fn field_json(fields: &[(&str, Ty, &str)]) -> Map<String, Value> {
     fields
@@ -545,7 +545,7 @@ pub fn schema_text(only: Option<&str>) -> Result<String, String> {
         if only.is_some() {
             return Ok(out);
         }
-        out += "every component below also takes: type, id (letters, digits, - and _; unique in the artifact), and children where it holds them\n";
+        out += "every component below also takes: type, id (letters, digits, - and _; unique in the board), and children where it holds them\n";
     }
     for k in pick(only)? {
         let action = if k.action.is_empty() { String::new() } else { format!("; sulin: {}", k.action) };
@@ -712,7 +712,7 @@ pub fn walk<'a>(blocks: &'a [Block], f: &mut dyn FnMut(&'a Block, Option<&'a Blo
 }
 
 impl Doc {
-    /// An artifact with nothing in it yet, titled by its id: what `margin new <art>` creates
+    /// An artifact with nothing in it yet, titled by its id: what `margin new <board>` creates
     /// when it is given no document.
     #[cfg(test)]
     pub fn empty(id: &str) -> Doc {

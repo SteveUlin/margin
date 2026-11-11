@@ -66,7 +66,7 @@ fn plan(a: &std::path::Path) -> Result<Doc, String> {
             {"type": "section", "id": "inbox", "title": "Open questions", "note": "pick an answer, or talk about it; the robot marks Claude's suggestion", "children": [
                 {"type": "question", "id": "Q1", "text": "MCP server in v0, or CLI only?", "options": ["cli", "mcp", "both"], "suggest": "cli",
                  "why": "CLI works today with zero config; MCP adds typed tools"},
-                {"type": "question", "id": "Q2", "text": "Keep artifacts after a session?", "options": ["keep", "30d", "drop"]}
+                {"type": "question", "id": "Q2", "text": "Keep build logs after a session?", "options": ["keep", "30d", "drop"]}
             ]},
             {"type": "section", "id": "assume", "title": "Assumptions", "note": "strike to correct", "children": [
                 {"type": "claim", "id": "A1", "text": "CI runs tests in one process"},

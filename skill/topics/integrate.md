@@ -9,7 +9,7 @@ Scheduling is outside margin in both cases: whatever owns the clock emits an eve
 Every command below takes `--project NAME` (and `--home DIR`). A board belongs to a project,
 which margin derives from the working directory (the repository root's path as a slug), so a
 command run from cron or another directory must name it: the pane's bottom line reads `MARGIN
-<artifact> <project>`, and `echo $MARGIN_PROJECT` or `margin ls` run beside the board agree.
+<board> <project>`, and `echo $MARGIN_PROJECT` or `margin ls` run beside the board agree.
 
 ## Queries (read-only, JSON)
 
@@ -25,7 +25,7 @@ margin data show NAME --last 5 --json     # {"v":1,"name","records":[…],…}: 
 margin daemon status --json
 ```
 
-Exit codes: 0 done; 1 refused, invalid or failed; 3 not found (no such artifact, component,
+Exit codes: 0 done; 1 refused, invalid or failed; 3 not found (no such board, component,
 handler, owner or dataset). The message is on stderr, and stdout stays empty on failure.
 
 ## Submit work or news from anywhere
@@ -171,7 +171,7 @@ margin events --follow --cursor mytool --name 'reviews.*' --json --no-commit --p
 Block until one question is answered (what `margin wait` did):
 
 ```sh
-margin events --follow --name pick --artifact plan --json | jq -r --unbuffered 'select(.id == "Q1") | .value' | head -n1
+margin events --follow --name pick --board plan --json | jq -r --unbuffered 'select(.id == "Q1") | .value' | head -n1
 ```
 
 ## Own rows on a board

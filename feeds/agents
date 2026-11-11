@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # margin feed: a monitor of the Claude Code sessions on this machine. Read-only.
 #
-#   margin feed add agents --stream --artifact agents -- /path/to/margin/feeds/agents
+#   margin feed add agents --stream --board agents -- /path/to/margin/feeds/agents
 #
 # A stream feed: it loops every AGENTS_EVERY seconds (default 2) and prints the whole `ag` section
 # only when something changed, so margin writes a revision only on real change; the rows' ages

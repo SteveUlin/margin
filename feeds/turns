@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # margin feed: a ledger of the current Claude Code session's turns, one folded section per turn.
 #
-#   margin feed add turns --stream --artifact live --owns tn -- /path/to/margin/feeds/turns [SESSION]
+#   margin feed add turns --stream --board live --owns tn -- /path/to/margin/feeds/turns [SESSION]
 #
 # A turn starts at a prompt (typed, a slash command, or a delivered notification) and ends at the
 # assistant's `end_turn`. Each section's header reads `#n  14:02  @kxyz  <prompt's first line>` with a note

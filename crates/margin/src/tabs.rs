@@ -108,7 +108,7 @@ pub fn edit(view: &mut View, primary: &str, op: &str, art: &str) -> Result<bool,
     match (op, at) {
         ("add", None) => set.push(art.to_string()),
         ("add", Some(_)) => {}
-        ("rm", Some(0)) => return Err(format!("{art} is the pane's own artifact: close the pane instead (margin close {art})")),
+        ("rm", Some(0)) => return Err(format!("{art} is the pane's own board: close the pane instead (margin close {art})")),
         ("rm", Some(i)) => {
             set.remove(i);
             // the tab on screen went: its left neighbour comes forward

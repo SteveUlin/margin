@@ -2,13 +2,13 @@
 
 *A hands-on guide, checked against the debug build on 2026-11-06; the walkthrough commands, their output and the screenshots were re-run on 2026-11-10. Headings marked (fold) are reference sections you can skip on a first read; numbered `[ ]` steps are a checklist.*
 
-margin is a folder of JSON files plus programs that write and draw it. You, Claude and small scripts all write into one artifact, and a pane draws it live. Your ticks and picks flow back to Claude on its next turn. Learn the model below, then type the four walkthroughs: about 30 minutes, no Claude needed until the third.
+margin is a folder of JSON files plus programs that write and draw it. You, Claude and small scripts all write into one board, and a pane draws it live. Your ticks and picks flow back to Claude on its next turn. Learn the model below, then type the four walkthroughs: about 30 minutes, no Claude needed until the third.
 
 ## The model
 
 ![Diagram: Claude and feed scripts write ops into doc.json; margin view watches the store and draws the pane; you act with a key or an mg: token, which writes state.json and events.jsonl; the hooks read unread events and hand them to Claude as margin: lines](img/guide/model.png "One loop: writers change content, the renderer draws it, your decisions go to their own file, and the hooks carry them back to Claude.")
 
-- **The store is the truth.** Each artifact is a folder under `~/.local/state/margin/<project>/`. `doc.json` holds content, `state.json` your decisions, `view/<pane>.json` each pane's folds and scroll, and the project's `events.jsonl` logs everything you did.
+- **The store is the truth.** Each board is a folder under `~/.local/state/margin/<project>/`. `doc.json` holds content, `state.json` your decisions, `view/<pane>.json` each pane's folds and scroll, and the project's `events.jsonl` logs everything you did.
 - **Writers send ops, never files.** Claude runs `margin add/set/rm …` through its Bash tool. A feed prints the same ops as JSON lines, and the daemon applies them. You write only decisions: a key in the pane, or a double-clicked `mg:` token.
 - **The view only reads.** `margin view` watches the store and redraws. Nothing ever talks to the pane, so a hundred writes cost no pane churn.
 - **The return path is the hooks.** Claude Code runs `margin hook prompt` before each of your messages and `margin hook post-tool` after each tool call. Each prints your unread events as `margin:` lines, once per session.[^hook]
@@ -18,15 +18,15 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 
 | word | means |
 |---|---|
-| artifact | one document, named by you: `plan`, `tour`, `agents` |
-| project | the jj/git root you ran `margin` in, as a slug; artifacts belong to it, not to a session |
+| board | one document, named by you: `plan`, `tour`, `agents` |
+| project | the jj/git root you ran `margin` in, as a slug; boards belong to it, not to a session |
 | component | a typed block with an `id`: `{"type":"todo","id":"t1","text":"…"}` |
 | op | one change to content: `add` `set` `rm` `move` `title` `replace` |
-| rev | the artifact's revision; every content write bumps it |
+| rev | the board's revision; every content write bumps it |
 | owner | who may write a field: Claude, you, the pane, or a feed |
 | event | one line in `events.jsonl`: what you did, when, through what |
 | token | `mg:verb/id=value`: text that acts when selected |
-| feed | a registered script whose stdout keeps part of an artifact current |
+| feed | a registered script whose stdout keeps part of a board current |
 | daemon | the per-project process that runs feeds |
 | host | where panes go: Zellij or plain |
 
@@ -61,7 +61,7 @@ Four owners, enforced by the store on every write (`store.rs` `check_owner`):
 - **Claude** (any `margin` CLI write, whoever types it) owns content in `doc.json`.
 - **You** own decisions in `state.json`: ticks, picks, strikes, verdicts, pins. The CLI can't write them.
 - **The pane** owns `view/<pane>.json`: folds, focus, scroll. A content rewrite never resets them, because the renderer matches components by id.
-- **A feed** owns the ids `P` and `P-…` for its `--owns` prefix `P` in its artifact (`ci` owns `ci-1`, not `city`). Claude's writes there fail, and its writes elsewhere fail.
+- **A feed** owns the ids `P` and `P-…` for its `--owns` prefix `P` in its board (`ci` owns `ci-1`, not `city`). Claude's writes there fail, and its writes elsewhere fail.
 
 Todo `status` is the one shared field: Claude's `margin set plan t1 status done` and your space bar both land in `state.json`, and the latest wins. Both use one vocabulary: `todo doing done blocked skipped next` (and `clear` drops your mark).
 
@@ -77,16 +77,16 @@ The ops, as JSON. `margin apply` reads them on stdin, and a feed prints them, on
 {"v":1,"title":"plan","blocks":[…]}
 ```
 
-A bare component is an upsert: it replaces the component with that id in place, or adds it to `parent` (default: the top level). The last line is a whole document (`apply` only): it replaces the one there. All of these are updates to an artifact that exists; `margin new` is the one command that creates one, and a write that names a missing artifact fails with `create it with margin new <art>` and the nearest existing name. `set` with a `null` value removes the field; `"field":"note","value":"…"` still works for one field. Several lines, or an array, are one write: all land or none do. `margin schema` lists every type's fields and allowed values, and a write that names an unknown field or value fails with a suggestion. Any write can carry `--base-rev N`; if the artifact moved on, the write fails instead of landing on the wrong thing:
+A bare component is an upsert: it replaces the component with that id in place, or adds it to `parent` (default: the top level). The last line is a whole document (`apply` only): it replaces the one there. All of these are updates to a board that exists; `margin new` is the one command that creates one, and a write that names a missing board fails with `create it with margin new <board>` and the nearest existing name. `set` with a `null` value removes the field; `"field":"note","value":"…"` still works for one field. Several lines, or an array, are one write: all land or none do. `margin schema` lists every type's fields and allowed values, and a write that names an unknown field or value fails with a suggestion. Any write can carry `--base-rev N`; if the board moved on, the write fails instead of landing on the wrong thing:
 
 ```text
-margin set: stale base: you edited rev 3 but the artifact is at rev 9;
+margin set: stale base: you edited rev 3 but the board is at rev 9;
 run `margin show` and redo the change on rev 9
 ```
 
 ### Tokens and events (fold)
 
-A token is `mg:<verb>/[<artifact>.]<id>[=<value>]`. The pane prints the short form (no artifact) and resolves it to the artifact holding that id.
+A token is `mg:<verb>/[<board>.]<id>[=<value>]`. The pane prints the short form (no board) and resolves it to the board holding that id.
 
 | token | does |
 |---|---|
@@ -95,11 +95,11 @@ A token is `mg:<verb>/[<artifact>.]<id>[=<value>]`. The pane prints the short fo
 | `mg:strike/A1=it-is-hourly` | strikes a claim; dashes in the reason become spaces; again unstrikes |
 | `mg:approve/d1` `mg:reject/d1` `mg:ask/d1` | a verdict on a diff |
 | `mg:pin/x` | toggles a pin |
-| `mg:open/L1` | opens a link's URL or runs its token; an artifact name opens its pane |
+| `mg:open/L1` | opens a link's URL or runs its token; a board name opens its pane |
 
 Each one appends an event. Passive kinds (`view`, `fold`, `seen`, `open`, `feed`) are logged but never handed to Claude; `margin events --all` shows them.
 
-## Walkthrough 1: an artifact by hand
+## Walkthrough 1: a board by hand
 
 No Claude, no Zellij. You need two terminals.
 
@@ -110,12 +110,12 @@ No Claude, no Zellij. You need two terminals.
    mkdir -p /tmp/margin-tour; cd /tmp/margin-tour
    ```
 
-2. [ ] **Create the artifact.** `new` makes it (and refuses a name that already has one); `add` creates one component at a time. Each prints the new rev. Every write after `new` is an update and fails on a name with no artifact, so a typo can't make a second board.
+2. [ ] **Create the board.** `new` makes it (and refuses a name that already has one); `add` creates one component at a time. Each prints the new rev. Every write after `new` is an update and fails on a name with no board, so a typo can't make a second board.
 
    ```fish
    margin new tour --title "margin tour"
    margin add tour - section steps title=Steps
-   margin add tour steps todo t1 "Make an artifact"
+   margin add tour steps todo t1 "Make a board"
    margin add tour steps todo t2 "Open it in a pane"
    margin add tour steps todo t3 "Tick a todo from the pane"
    margin add tour - progress p of=steps
@@ -144,7 +144,7 @@ No Claude, no Zellij. You need two terminals.
 
    Run that in the second terminal (with the binary's full path if `margin` isn't on PATH there). `q` quits.
 
-   ![The tour artifact in the pane: Steps with one done, one doing, one open; a progress bar at 1/3; the Q1 card with jj and services, services marked as the default](img/guide/a-open.png "What step 4 shows. The default is already selected; Claude would carry on with it. Real render through pyte, not Ghostty.")
+   ![The tour board in the pane: Steps with one done, one doing, one open; a progress bar at 1/3; the Q1 card with jj and services, services marked as the default](img/guide/a-open.png "What step 4 shows. The default is already selected; Claude would carry on with it. Real render through pyte, not Ghostty.")
 
 5. [ ] **Tick t3 and pick an option with keys.** `j`/`k` move focus, and the help line at the bottom shows what the focused component takes: `space` on a todo, `1`–`9` on a question, `x` on a claim. With the plain host the mouse is on, so a click on a token works too.
 
@@ -198,7 +198,7 @@ A feed is any program that prints JSON lines. This one turns a `services.json`, 
 
    ```fish
    margin feed add services --watch services.json \
-     --artifact tour --owns svc -- ./services-feed
+     --board tour --owns svc -- ./services-feed
    ```
 
    It prints `feed services: watch services.json → tour (owns "svc"); daemon started`. The command runs from this directory, without a shell.
@@ -214,7 +214,7 @@ A feed is any program that prints JSON lines. This one turns a `services.json`, 
    2026-11-10T19:34:12Z start: ./services-feed (watch services.json)
    ```
 
-5. [ ] **Pause, resume or remove it.** `margin feed pause services`, `resume`, `rm`. After `rm` the last output stays in the artifact and the health line says "removed"; the daemon exits when no feed is left.
+5. [ ] **Pause, resume or remove it.** `margin feed pause services`, `resume`, `rm`. After `rm` the last output stays in the board and the health line says "removed"; the daemon exits when no feed is left.
 
 ### Line formats (fold)
 
@@ -260,7 +260,7 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 
    ```text
    margin: the user acted in the margin pane since your last look (2 events).
-   Their decisions are binding; `margin show <artifact>` for context.
+   Their decisions are binding; `margin show <board>` for context.
    - the user marked tour.t3 “Tick a todo from the pane” done: they did it themselves, so don't redo it
    - the user picked services for tour.Q1 “Which feed do you write first?”
    ```
@@ -270,16 +270,16 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 ### What the skill tells Claude (fold)
 
 - **Content is Claude's, decisions are yours.** To change something you decided, it says so in chat.
-- **Never block on a reversible fork.** It posts `margin ask … --default X --applies "<when>"`, carries on with the default, and checks events at that point. To block on an answer from a script, follow the log: `margin events --follow --name pick --artifact plan --json` (see `margin help integrate`).
-- **A struck claim gets an answer:** re-check, then `margin set <art> <id> ack "…"`.
+- **Never block on a reversible fork.** It posts `margin ask … --default X --applies "<when>"`, carries on with the default, and checks events at that point. To block on an answer from a script, follow the log: `margin events --follow --name pick --board plan --json` (see `margin help integrate`).
+- **A struck claim gets an answer:** re-check, then `margin set <board> <id> ack "…"`.
 - **Address by id, base on a rev** (`--base-rev`), and treat `margin:` lines as your input.
 - **Feed-owned ids are read-only,** and anything you want kept current becomes a feed, not a poll each turn.
 
-## Walkthrough 4: a feed and Claude in one artifact
+## Walkthrough 4: a feed and Claude in one board
 
 Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The prefix is the whole contract.
 
-1. [ ] **Give the feed a prefix nothing else uses.** `--owns svc` gives it every id starting `svc`, including its health line `svc-feed`. Leave out `--owns` and the prefix is the feed's name; `--owns '*'` takes the whole artifact.
+1. [ ] **Give the feed a prefix nothing else uses.** `--owns svc` gives it every id starting `svc`, including its health line `svc-feed`. Leave out `--owns` and the prefix is the feed's name; `--owns '*'` takes the whole board.
 2. [ ] **Keep Claude's ids outside it.** `margin show tour` starts with `(feed services owns the ids svc and svc-…: read-only for you)`, and a write inside fails with the way out:
 
    ```text
@@ -290,7 +290,7 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
    `margin feed rm services`)
    ```
 
-3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the feed's section; a whole-artifact `put` must carry the feed's components through unchanged. Registering a feed over ids Claude already wrote hands them over, with a note (`note: feed clk now owns 3 existing ids (…)`).
+3. [ ] **Let Claude arrange around it.** Claude can add, move and remove its own components above or below the feed's section; a whole-document `apply` must carry the feed's components through unchanged. Registering a feed over ids Claude already wrote hands them over, with a note (`note: feed clk now owns 3 existing ids (…)`).
 
 ## Cheat sheet
 
@@ -298,13 +298,13 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
 
 | command | does |
 |---|---|
-| `margin new A [--title T] [--purpose P] [< doc.json]` | create an artifact: empty, or from a whole doc (a bare array is the block list); refuses one that exists |
+| `margin new A [--title T] [--purpose P] [< doc.json]` | create a board: empty, or from a whole doc (a bare array is the block list); refuses one that exists |
 | `margin apply A [--base-rev N] [--json] < in` | update (state from a script): ops, components (upsert by id), or a whole doc (replaces); all or none; A must exist |
 | `margin schema [TYPE] [--json]` | the component types, fields and allowed values every write is checked against |
 | `margin add A PARENT\|- TYPE ID [text…] [k=v…]` | create a component (an id that exists is refused); every bare word is text; `--before X`/`--after X` |
 | `margin set A ID FIELD VALUE` or `A ID k=v…` | change a component's fields (a missing id is refused), typed by the schema (text stays text) |
 | `margin rm A ID` | remove (decisions on it show as orphaned) |
-| `margin rm A [--yes]` | remove a whole artifact: a preview without `--yes`; with it, its feeds are unregistered and it moves to `.archive/` |
+| `margin rm A [--yes]` | remove a whole board: a preview without `--yes`; with it, its feeds are unregistered and it moves to `.archive/` |
 | `margin move A ID --before X\|--after X\|--parent P` | reorder |
 | `margin title A "T"` | rename |
 | `margin ask A ID "Q" opt… --default D` | a question; `--why` `--applies` `--parent` |
@@ -320,7 +320,7 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 
 | command | does |
 |---|---|
-| `margin events` | your actions; `--unread --session S`, `--artifact`, `--since N`, `--kind K`, `--all`, `--json` |
+| `margin events` | your actions; `--unread --session S`, `--board`, `--since N`, `--kind K`, `--all`, `--json` |
 | `margin hook prompt\|post-tool` | the hooks (JSON on stdin) |
 | `margin open A [--float\|--split\|--stacked] [--tab-id N]` | place the pane (Zellij) or print the view command (plain; an absolute path when `margin` isn't on PATH) |
 | `margin panes A` / `margin close A` | where it shows / close it |
@@ -334,7 +334,7 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 
 | command | does |
 |---|---|
-| `margin feed add N --every 10s\|--watch P…\|--stream -- CMD…` | register; `--artifact` (it must exist: a feed never creates one) `--owns` `--min-gap` `--timeout` `--replace` |
+| `margin feed add N --every 10s\|--watch P…\|--stream -- CMD…` | register; `--board` (it must exist: a feed never creates one) `--owns` `--min-gap` `--timeout` `--replace` |
 | `margin feed ls` | state, trigger, restarts, last run and its outcome |
 | `margin feed run N` | once, in the foreground; leaves the daemon's status alone |
 | `margin feed logs N [--follow] [--lines N]` | stderr and the daemon's notes |
@@ -396,7 +396,7 @@ Claude stops at that step and waits for your pick; **release** lets the default 
 
 ### Toasts (fold)
 
-`margin toast <art> "text" [--at ID] [--level ok|info|warn|error] [--ttl SECS]`: a message that
+`margin toast <board> "text" [--at ID] [--level ok|info|warn|error] [--ttl SECS]`: a message that
 goes away by itself. It's a full-width box with a border in its level's colour, at the bottom of
 the pane over the content; two show at once, the oldest lowest and the newer one above. Its bottom
 edge drains as time runs out; the time starts once the pane has been on screen; an error waits for
@@ -451,7 +451,7 @@ Environment: `MARGIN_DIFFT` names difftastic outright; `MARGIN_HOST`, `MARGIN_MO
 ~/.local/state/margin/<project>/
   events.jsonl (+ events.1.jsonl, events.seq)  .lock  cursors/<name>  delivered/<session>
   feeds.json  feeds/<name>.log  daemon.lock
-  <artifact>/doc.json  state.json
+  <board>/doc.json  state.json
             view/<pane>.json
   select.log   (at the top: every selection)
 ```
@@ -481,7 +481,7 @@ The daemon runs argv with no shell, in the directory you added it from, and read
 ## Limits today
 
 - **A dev build of `margin` is on PATH only inside the repo** (through direnv) until you install it. `margin init` writes absolute paths into the hooks and the skill, so nothing depends on PATH; `margin open` under the plain host prints the absolute path when `margin` isn't on PATH.
-- **Hooks need `margin init`.** It installs them for every project ([install.md](install.md)). A session without them writes artifacts fine, but your clicks reach it only through `margin events`.
+- **Hooks need `margin init`.** It installs them for every project ([install.md](install.md)). A session without them writes boards fine, but your clicks reach it only through `margin events`.
 - **Double-click tokens need `margin session`.** In a plain Zellij session the selection is only copied. In the plain host, keys and mouse clicks in the pane work.
 - **`margin diff` needs difftastic.** The nix build wraps it in; a dev build looks in `$MARGIN_DIFFT`, then PATH, then config `difft`, then the nix profile dirs, and names those fixes when it finds none.
 - **Nothing is checked in Ghostty yet.** Every render here went through pyte, a fake terminal: kitty images, colours and the feel of double-click need your eyes.

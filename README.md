@@ -21,7 +21,7 @@ Claude Code hooks as one line of context.
   a click. Claude keeps working on whatever does not depend on the answer.
 - **Hooks that hand decisions back.** `margin init` installs Claude Code hooks. Your clicks reach
   Claude at its next prompt, after its next tool call, or wake it when it is idle.
-- **Tabs.** One pane shows several artifacts (`margin view plan reviews`, `margin tab`).
+- **Tabs.** One pane shows several boards (`margin view plan reviews`, `margin tab`).
 - **Tables, run strips and name badges** for dashboards: a pull-request queue, service health, a
   work tracker (`margin example` prints three complete ones; see [docs/dashboards.md](docs/dashboards.md)).
 - **A detail panel** for the focused row: a pull request's description, a failing service's error.
@@ -64,7 +64,7 @@ alone; `--dry-run` prints the changes first). Restart Claude Code afterwards.
 With Claude: say "start a margin for this" in a Claude Code session. By hand, in any directory:
 
 ```sh
-margin new plan --title "Fix the flake"     # create: the only command that makes an artifact
+margin new plan --title "Fix the flake"     # create: the only command that makes a board
 margin add plan - section steps title=Steps
 margin add plan steps todo t1 "Reproduce the flaky test"
 margin ask plan Q1 "Seed from the test name?" yes no --suggest yes
@@ -73,12 +73,12 @@ margin set plan t1 status done
 margin events           # what you did in the pane, as Claude will read it
 ```
 
-Creating and changing are different commands: `margin new` creates an artifact and refuses one
-that exists; every other write refuses a name with no artifact (and suggests the nearest), so a
+Creating and changing are different commands: `margin new` creates a board and refuses one
+that exists; every other write refuses a name with no board (and suggests the nearest), so a
 typo is an error, never a second board. `margin demo` writes a larger sample plan (it needs
 difftastic), `margin example reviews | margin new reviews` a sample dashboard, and `margin help`
 lists every command and reference topic.
-[docs/guide.md](docs/guide.md) walks through an artifact, a feed, and a session with Claude;
+[docs/guide.md](docs/guide.md) walks through a board, a feed, and a session with Claude;
 `margin help dashboards` and `margin help handlers` cover standing boards.
 
 ## Requirements
@@ -88,7 +88,7 @@ lists every command and reference topic.
 - **Claude Code**, for the hooks and the skill. The pane itself runs without it.
 - **Zellij 0.45 or newer is optional.** Inside Zellij, `margin open` places the pane beside the
   chat without moving focus, and `margin session` makes a double-click on a token act. Without
-  Zellij, run `margin view <artifact>` in any terminal; keys and mouse clicks work there.
+  Zellij, run `margin view <board>` in any terminal; keys and mouse clicks work there.
 - **A Nerd Font is recommended** for the state glyphs; a terminal with the kitty graphics
   protocol (Ghostty, kitty) for images.
 - Optional tools: `difft` (difftastic) for `margin diff` and the demo; `bash`, `jq` and `jj` for
@@ -104,7 +104,8 @@ lists every command and reference topic.
 | [docs/design.md](docs/design.md) | the original design: owners, events, the toolkit, panes, feeds (the runner that handlers, owners and datasets have since replaced as the main path) |
 | [docs/research.md](docs/research.md), [docs/landscape.md](docs/landscape.md), [docs/research/](docs/research/) | the measurements and prior art behind the design |
 
-The design and research documents are dated notes from the build. Where they disagree with
+The design and research documents are dated notes from the build; they say "artifact" for what
+the tool now calls a board. Where they disagree with
 `margin help` or the guide, the tool is right.
 
 ## Status

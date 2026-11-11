@@ -10,7 +10,7 @@ it.
   brief: "Before each phase of the work, write one short sentence saying what you're about to do
   (not which tool)."** Those sentences are the chain.
 - **Give an implementation or review subagent a section to keep its own plan in**: tell it to run
-  `margin add <art> - section ag-<name> title="<what it's for>"`, add its steps as todos under it,
+  `margin add <board> - section ag-<name> title="<what it's for>"`, add its steps as todos under it,
   and tick them as it goes. Ids go under `ag-<name>-`, so parallel subagents never write the same
   ids; every write takes the store's lock, so they never lose each other's.
 - A subagent stopped from the pane is told to report what it has and end; don't restart it unless

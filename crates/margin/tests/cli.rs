@@ -246,7 +246,7 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
     let run = |argv: &[&str], stdin: &str| at(&decoy, &home, argv, stdin);
     // nothing exists yet: no near name to suggest
     let (ok, out) = run(&["add", "plan", "-", "todo", "t1", "one"], "");
-    assert!(!ok && out.trim() == "margin add: no artifact \"plan\" in project p: create it with margin new plan", "{out}");
+    assert!(!ok && out.trim() == "margin add: no board \"plan\" in project p: create it with margin new plan", "{out}");
     // new: empty (stdin closed at once), then refused a second time, with or without a document
     let (ok, out) = run(&["new", "plan", "--title", "Plan", "--purpose", "walk it"], "");
     assert!(ok && out.trim() == "plan rev 1", "{out}");
@@ -262,7 +262,7 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
     let (ok, out) = run(&["apply", "plan"], r#"{"blocks":[]}"#);
     assert!(ok, "{out}");
     let png = decoy.join("x.png");
-    let want = "no artifact \"paln\" in project p: create it with margin new paln (did you mean \"plan\"?)";
+    let want = "no board \"paln\" in project p: create it with margin new paln (did you mean \"plan\"?)";
     let png_s = png.display().to_string();
     let walk: Vec<(Vec<&str>, &str)> = vec![
         (vec!["apply", "paln"], DOC),
@@ -308,14 +308,14 @@ fn a_feed_run_against_a_missing_artifact_fails_without_creating_it() {
     let run = |argv: &[&str], stdin: &str| at(&decoy, &home, argv, stdin);
     assert!(run(&["new", "board"], "").0);
     // registered paused-free but with a long interval; the daemon it starts leaves with the feed
-    let (ok, out) = run(&["feed", "add", "f", "--every", "1h", "--artifact", "board", "--owns", "fd", "--", "printf", r#"{"type":"text","id":"fd","text":"hi"}\n"#], "");
+    let (ok, out) = run(&["feed", "add", "f", "--every", "1h", "--board", "board", "--owns", "fd", "--", "printf", r#"{"type":"text","id":"fd","text":"hi"}\n"#], "");
     assert!(ok, "{out}");
     let (ok, out) = run(&["feed", "run", "f"], "");
     assert!(ok && (out.contains("board rev") || out.contains("board unchanged")), "{out}");
     // the artifact goes (by hand: `margin rm board --yes` would unregister the feed with it)
     std::fs::rename(home.join("p/board"), home.join("gone")).unwrap();
     let (ok, out) = run(&["feed", "run", "f"], "");
-    assert!(!ok && out.contains("margin feed: no artifact \"board\" in project p: create it with margin new board"), "{out}");
+    assert!(!ok && out.contains("margin feed: no board \"board\" in project p: create it with margin new board"), "{out}");
     assert!(artifacts(&home).is_empty(), "the run created {:?}", artifacts(&home));
     let (ok, out) = run(&["feed", "rm", "f"], "");
     assert!(ok, "{out}");
@@ -484,7 +484,7 @@ fn emit_appends_a_named_event_and_prints_its_seq() {
         (vec!["emit", "x", "not json"], "", "the value is not JSON"),
         (vec!["emit", "x", "-"], "{", "stdin is not one JSON value"),
         (vec!["emit", "two words"], "", "bad event name"),
-        (vec!["emit", "x", "1", "--board", "nope"], "", "no artifact \"nope\""),
+        (vec!["emit", "x", "1", "--board", "nope"], "", "no board \"nope\""),
         (vec!["emit", "job.failed"], "", "the runner's own"),
         (vec!["emit"], "", "missing <name>"),
     ] {
@@ -497,6 +497,10 @@ fn emit_appends_a_named_event_and_prints_its_seq() {
     assert_eq!(evs[0], serde_json::json!({"v": 1, "seq": 1, "at": evs[0]["at"], "artifact": "", "id": "", "kind": "deploy.finished", "value": {"sha": "abc", "ok": true}, "by": "you", "via": "emit", "rev": 0}));
     assert_eq!((&evs[1]["artifact"], &evs[1]["id"], &evs[1]["value"], &evs[1]["rev"]), (&serde_json::json!("ci"), &serde_json::json!("x"), &serde_json::json!([1, 2]), &serde_json::json!(1)));
     assert!(evs[2]["value"].is_null());
+    // one board's events: --board, and --artifact (the older spelling) still means the same
+    let (ok, new, _) = run(&["events", "--name", "*", "--json", "--board", "ci"], "");
+    let (ok2, old, _) = run(&["events", "--name", "*", "--json", "--artifact", "ci"], "");
+    assert!(ok && ok2 && new == old && json_lines(&new).len() == 1 && json_lines(&new)[0]["artifact"] == "ci", "{new}{old}");
     // the human listing names the event, what it is about and who sent it
     let (_, out, _) = run(&["events"], "");
     assert!(out.contains("deploy.finished") && out.contains("ci.report ci.x") && out.contains("via emit"), "{out}");

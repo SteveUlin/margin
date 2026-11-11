@@ -1,5 +1,5 @@
 {
-  description = "margin — live artifacts beside the chat, on our own terminal toolkit (vellum)";
+  description = "margin — live boards beside the chat, on our own terminal toolkit (vellum)";
 
   # Pinned in flake.lock. rust-overlay supplies a stable toolchain with the
   # wasm32-wasip1 target, so a later Zellij plugin crate builds from the same

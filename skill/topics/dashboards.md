@@ -1,6 +1,6 @@
 # dashboards: a standing board (tables, run strips, tabs, badges) kept current by a handler, with keys on its rows
 
-A dashboard is an artifact that stays up and shows the state of something outside the chat: pull
+A dashboard is a board that stays up and shows the state of something outside the chat: pull
 requests to review, services, a work tracker. It differs from a plan pane in who writes it: you
 design it once, and a script keeps it current with no AI involved. The script is a handler:
 margin runs it when a refresh event is appended, and whatever owns the schedule (cron, a
@@ -8,10 +8,10 @@ systemd timer) appends that event. margin itself has no timer.
 
 ## The model
 
-- **One artifact = one dashboard = one tab.** An artifact is a named document (`reviews`); a pane
+- **One board = one dashboard = one tab.** A board is a named document (`reviews`); a pane
   shows one, or several as tabs along its title line.
 - **A document is a tree of blocks**, each `{"type": …, "id": …, fields…, "children": […]}`. Ids are
-  yours to choose (letters, digits, `-`, `_`) and unique in the artifact.
+  yours to choose (letters, digits, `-`, `_`) and unique in the board.
 - **Ids are identity.** A write that carries a block with a known id updates that block where it
   stands; an unknown id is a new block; rewriting a parent without a child removes the child. So
   derive ids from the data (`pr-4812`, `svc-ingest-worker`), never from a position.
@@ -19,14 +19,14 @@ systemd timer) appends that event. margin itself has no timer.
   row whose id persists changes in place and keeps the focus, and an unchanged run writes nothing.
 - **Whoever keeps rows current owns an id prefix** (`--owns pr`: the ids `pr` and `pr-…`): a
   handler, an outside program registered with `margin owner add`, or a feed. Inside it only that
-  owner writes; every other id in the same artifact is yours. Lay the board out so that the
+  owner writes; every other id in the same board is yours. Lay the board out so that the
   machine-kept parts sit under one prefix.
 - **The pane runs nothing.** A key on a row appends an event (`<board>.<action>`; enter on a row
   with a `target` appends `<board>.open`), and the handler registered for that name does the
   work. So a board can offer "retry", "cancel", "open" without the pane knowing how.
 - **What {{user}} does is stored apart from the document**, by id: the fold of a section, the tab
   on show, the focus, a step marked next. A rewrite with the same ids keeps all of it.
-- **Artifacts, handlers and events belong to a project**: `$MARGIN_PROJECT`, else the repository root above
+- **Boards, handlers and events belong to a project**: `$MARGIN_PROJECT`, else the repository root above
   the working directory, else the directory. A board made in one directory is invisible from
   another, and a command run from cron lands in whatever project its directory maps to. For
   standing boards pick one name and pass it everywhere: `--project boards` on every command,
@@ -56,7 +56,7 @@ script that fetches its rows and sample data. Start from the nearest one; `margi
 - A symbol is followed by a space (`✗ failed`, never `✗failed`) in any text you write.
 
 **(b) Create it**: `margin new` with a whole document on stdin. This fixes the layout and the
-parts you own. `new` is the only command that creates an artifact, and it refuses one that exists.
+parts you own. `new` is the only command that creates a board, and it refuses one that exists.
 
 ```sh
 margin new reviews <<'EOF'
@@ -76,7 +76,7 @@ margin show reviews                               # the tree: type, id, text
 - Envelope keys: `title`, `purpose`, `hints`, `kind`, `actions`, `blocks`, nothing else (`margin schema
   document` describes each). It prints `reviews rev 1`.
 - From here on every write is an update, and an update never creates: `margin apply`, `add`,
-  `set`, a handler's run and the rest fail on a name with no artifact (`no artifact "reveiws" …:
+  `set`, a handler's run and the rest fail on a name with no board (`no board "reveiws" …:
   create it with margin new reveiws (did you mean "reviews"?)`). To redo the layout, replace the
   document with `margin apply reviews < doc.json` (a whole document replaces), or start over: `margin rm reviews --yes`, then `new`.
 - A schema error names the block and the field and writes nothing; `margin schema <type>` lists
@@ -90,8 +90,8 @@ margin show reviews                               # the tree: type, id, text
   {"type": "section", "id": "svc-all", "title": "All", "children": []}]}
 ```
 
-- The pane's bottom line reads `MARGIN <artifact> <project>`: the second field is the project
-  the artifact belongs to (`--project`), not a directory.
+- The pane's bottom line reads `MARGIN <board> <project>`: the second field is the project
+  the board belongs to (`--project`), not a directory.
 
 **(c) Write the script that fetches the rows**: a program that prints `margin apply` input and
 exits 0. For a table that is one line: the table block with all its `tr` children.
@@ -99,7 +99,7 @@ exits 0. For a table that is one line: the table block with all its `tr` childre
 `./script | margin apply reviews`.
 
 **(d) Register it as a handler, and schedule the event outside margin** (register from the
-directory the script's relative paths start at). The artifact must exist by now: a handler
+directory the script's relative paths start at). The board must exist by now: a handler
 updates its board and never creates it.
 
 ```sh
@@ -114,7 +114,7 @@ crontab -e                        # the schedule: */2 * * * *  /path/to/margin e
 - A program that already runs on its own can skip the handler and write its rows itself:
   `margin owner add fetcher --board reviews --owns pr --expect-every 10m`, then `./fetch |
   margin apply reviews --as fetcher`. The rows show as stale when it stops writing.
-- Optional convenience, the older runner: `margin feed add reviews --every 2m --artifact reviews
+- Optional convenience, the older runner: `margin feed add reviews --every 2m --board reviews
   --owns pr -- ./reviews-feed.sh` schedules the script inside margin's daemon
   (`margin help feeds`). One prefix has one owner: use it instead of the handler, not beside it.
 
@@ -126,7 +126,7 @@ note1 text="…"`, `margin add reviews - text note2 "…" --after note1`, `margi
 
 ```sh
 margin open reviews --tabs services,tracker   # a pane on reviews, the others as tabs beside it
-margin tab reviews add services               # add a tab to the pane whose own artifact is reviews
+margin tab reviews add services               # add a tab to the pane whose own board is reviews
 margin tab reviews rm services | margin tab reviews show services | margin tab reviews
 margin view reviews services tracker          # the renderer itself, for a plain terminal
 ```
@@ -146,8 +146,8 @@ margin view reviews services tracker          # the renderer itself, for a plain
   opens the detail panel (the focused row's `detail` and every field); `]c` / `[c` walk what changed; `zh` folds the
   pinned head; `za` folds a section; `?` lists the rest.
 
-- To take a board down: `margin rm <art>` prints what would go (title, rev, its feeds, the panes
-  showing it) and removes nothing; `margin rm <art> --yes` unregisters its feeds and moves it to
+- To take a board down: `margin rm <board>` prints what would go (title, rev, its feeds, the panes
+  showing it) and removes nothing; `margin rm <board> --yes` unregisters its feeds and moves it to
   the project's `.archive/` directory (nothing is deleted). Ask {{user}} first.
 
 **(f) Keys on rows: `actions`.** A table (for each of its rows), a `tr`, a `row`, a `status`, a
@@ -266,7 +266,7 @@ on the right an aside and a live age. `detail` wraps under the row (three lines 
 "result": "exit 2", "spark": [1, 3, 2], "target": "https://…"}`. `state`: `running` `pass` `fail`.
 
 **link**: `{"type": "link", "id": "l1", "text": "runbook", "target": "https://…"}`. A target is a
-URL, or `mg:open/<artifact>` to open another artifact.
+URL, or `mg:open/<board>` to open another board.
 
 **tabs**: views of one board. Its children are `section`s; their titles form a strip and one
 section's content shows at a time (`]t` / `[t`, or a click). The first is the default. It takes

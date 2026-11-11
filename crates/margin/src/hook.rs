@@ -201,7 +201,7 @@ pub fn brief(st: &Store, evs: &[Event]) -> String {
     let evs = &rest[..];
     let n = evs.len() + notes.len();
     let mut lines = vec![format!(
-        "margin: sulin acted in the margin pane since your last look ({} event{}). Their decisions are binding; `margin show <artifact>` for context.",
+        "margin: sulin acted in the margin pane since your last look ({} event{}). Their decisions are binding; `margin show <board>` for context.",
         n,
         if n == 1 { "" } else { "s" }
     )];

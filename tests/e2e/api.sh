@@ -20,7 +20,7 @@ expect() {
 }
 
 # new creates (once); apply updates: a component upsert with parent, a multi-field set, all-or-nothing
-expect "apply refuses a missing artifact" 'no artifact "p" in project e2e: create it with margin new p' "$M" apply p <<<'{"title":"plan","blocks":[]}'
+expect "apply refuses a missing board" 'no board "p" in project e2e: create it with margin new p' "$M" apply p <<<'{"title":"plan","blocks":[]}'
 expect "new from a whole doc" '"rev":1' "$M" new p --json <<<'{"v":1,"title":"plan","blocks":[{"type":"section","id":"steps","children":[{"type":"todo","id":"t1","text":"a"}]}]}'
 expect "new refuses a second time" 'p already exists (rev 1); change it with margin apply/add/set, or remove it with margin rm p --yes' "$M" new p </dev/null
 expect "apply upsert" "p rev 2" "$M" apply p <<<'{"type":"todo","id":"t2","text":"b","parent":"steps"}'
@@ -35,7 +35,7 @@ expect "...nothing was made" "p " "$M" ls
 expect "new empty" "fresh rev 1" "$M" new fresh --title Fresh </dev/null
 expect "then apply updates" "fresh rev 2" "$M" apply fresh <<<'{"type":"row","id":"r1","text":"hi"}'
 expect "a whole-doc apply is an update" "fresh rev 3" "$M" apply fresh <<<'{"title":"Fresh","blocks":[]}'
-if [[ $("$M" ls | wc -l) == 2 ]]; then ok "two artifacts, no strays"; else bad "strays: $("$M" ls)"; fi
+if [[ $("$M" ls | wc -l) == 2 ]]; then ok "two boards, no strays"; else bad "strays: $("$M" ls)"; fi
 
 # schema: unknown fields and values rejected with a suggestion; text stays text; add keeps words
 expect "unknown field" 'did you mean text?' "$M" set p t1 txt hi

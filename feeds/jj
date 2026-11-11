@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # margin feed: the current jj repo's recent changes as a ledger.
 #
-#   margin feed add jj --watch .jj/repo/op_heads/heads --artifact changes -- /path/to/margin/feeds/jj
+#   margin feed add jj --watch .jj/repo/op_heads/heads --board changes -- /path/to/margin/feeds/jj
 #
 # Prints one line: the whole `jj` section (rows `jj-c-<change>`, plus a `jj-wc` section listing the
 # working copy's files), which margin applies as a replace of the component with id "jj". The

@@ -87,7 +87,7 @@ impl ToolExample {
         let n = self.name;
         format!(
             "# {n}: {about}
-# stdout is the artifact, a whole document. This example shows a SEPARATE TOOL working with a board:
+# stdout is the board, a whole document. This example shows a SEPARATE TOOL working with a board:
 # it follows the event log, makes every decision itself, and writes the rows it owns. margin runs
 # nothing for it, and no margin daemon or handler is involved.
 #   1. create the board
@@ -120,7 +120,7 @@ pub fn list() -> String {
         s += &format!("  {:<9} {}\n", e.name, e.about);
     }
     s += &format!("  {:<9} {}\n", RUNS.name, RUNS.about);
-    s += "\n  margin example <name>          the artifact: a whole document, ready for `margin new <art>`\n";
+    s += "\n  margin example <name>          the board: a whole document, ready for `margin new <board>`\n";
     s += "  margin example <name> --feed   the script that keeps it current (bash + jq)\n";
     s += "  margin example <name> --data   a sample of the data that script reads\n";
     s += "  margin example runs --tool     the outside tool of the runs example (it has no --feed or --data)\n";
@@ -135,8 +135,8 @@ impl Example {
         let n = self.name;
         format!(
             "# {n}: {about}
-# stdout is the artifact, a whole document: {{title, purpose, hints, blocks}}. From here to a live board:
-#   1. create the artifact (prints `{n} rev 1`), and look at one frame of it as text
+# stdout is the board, a whole document: {{title, purpose, hints, blocks}}. From here to a live board:
+#   1. create the board (prints `{n} rev 1`), and look at one frame of it as text
 #        margin example {n} | margin new {n}
 #        margin render {n} --width 100 --height 40
 #   2. take the script that fetches its rows, and the sample data it reads
@@ -153,17 +153,17 @@ impl Example {
 #        margin handler add open --on '*.open' -- margin handle open
 #   6. keep it current: margin has no timer. Whatever runs on a schedule emits the event (from any
 #      directory: --project names the board's project; `margin ls` run beside the board prints nothing
-#      about it, the pane's bottom line does: MARGIN <artifact> <project>)
+#      about it, the pane's bottom line does: MARGIN <board> <project>)
 #        cron:           */5 * * * *  margin emit {n}.refresh --project <project>
 #        systemd timer:  a user timer whose service runs the same line (margin help integrate has both units)
 #        a file change:  watchexec -w {n}.data.json -- margin emit {n}.refresh --project <project>
 #   7. show it: its own pane, or a tab of a pane that is already open
-#        margin open {n}        |        margin tab <that pane's artifact> add {n}
+#        margin open {n}        |        margin tab <that pane's board> add {n}
 # The handler owns the ids `{owns}` and `{owns}-...`: once it is registered they are read-only for you (test a
-# changed script with `margin handler run {n}-refresh --dry-run`). Every other id in the artifact is yours to write.
+# changed script with `margin handler run {n}-refresh --dry-run`). Every other id in the board is yours to write.
 #
 # Optional convenience, instead of steps 4 and 6: the older feed runner schedules the script itself ({trigger_words})
-#        margin feed add {n} {trigger} --artifact {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
+#        margin feed add {n} {trigger} --board {n} --owns {owns} -- ./{n}.feed.sh {n}.data.json
 {more}",
             more = self.more,
             trigger_words = if self.trigger.starts_with("--watch") { "here: whenever the data file changes" } else { "here: on an interval" },
@@ -236,11 +236,11 @@ mod tests {
             assert!(!g.is_empty(), "{}: the feed prints nothing", e.name);
             st.create(Doc::empty("empty")).unwrap();
             let (rev, errs) = st.feed_write("empty", &g, &w, &[]);
-            assert!(rev.is_some() && errs.is_empty(), "{} into an empty artifact: {errs:?}", e.name);
+            assert!(rev.is_some() && errs.is_empty(), "{} into an empty board: {errs:?}", e.name);
             st.put(doc(e), None).unwrap();
             let (rev, errs) = st.feed_write(e.name, &g, &w, &[]);
             assert!(errs.is_empty(), "{}: {errs:?}", e.name);
-            assert_eq!(rev, None, "{}.json and {}.feed.out disagree: regenerate the artifact from the feed", e.name, e.name);
+            assert_eq!(rev, None, "{}.json and {}.feed.out disagree: regenerate the board from the feed", e.name, e.name);
             let _ = std::fs::remove_dir_all(&st.home);
         }
     }

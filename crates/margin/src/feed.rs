@@ -169,7 +169,7 @@ impl Registry {
             return Err(format!("bad feed name {:?}: letters, digits, - and _", f.name));
         }
         if !valid_id(&f.artifact) {
-            return Err(format!("bad artifact id {:?}", f.artifact));
+            return Err(format!("bad board id {:?}", f.artifact));
         }
         if f.owns != "*" && !valid_id(&f.owns) {
             return Err(format!("bad --owns prefix {:?}: an id prefix (letters, digits, - and _) or *", f.owns));
@@ -1291,7 +1291,7 @@ mod tests {
         f.min_gap = 0.0;
         f.cmd = vec!["printf".into(), r#"{"type":"section","id":"jj","title":"t"}\n"#.into()];
         let mut w = Worker::new(Store::new(st.home.clone(), st.project.clone()), f.clone(), Arc::new(Ctl::default()), false);
-        let want = "no artifact \"plans\" in project proj: create it with margin new plans (did you mean \"plan\"?)";
+        let want = "no board \"plans\" in project proj: create it with margin new plans (did you mean \"plan\"?)";
         assert_eq!(w.run_once(), Err(want.to_string()));
         w.set_state("live", None, None);
         w.write_health();

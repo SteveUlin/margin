@@ -15,7 +15,7 @@ needs a state: a plan in a pane stays current, and a question on a card never ta
 ## The pane's shape
 
 One shape for every plan pane, top to bottom. Orientation is one `purpose` line (`margin purpose
-plan "…"`) pinned above the content; long reasoning goes in its own artifact (a tab).
+plan "…"`) pinned above the content; long reasoning goes in its own board (a tab).
 
 1. **Now** (`section now`): the current thread, at most about seven todos, exactly one `doing`.
 2. **Needs you** (`section ask`): only open questions, claims and diffs. Leave it out when empty.
@@ -28,15 +28,15 @@ plan "…"`) pinned above the content; long reasoning goes in its own artifact (
   lead-in, sub-bullets for detail, `folded: true` on sections opened only on demand. **Why:** a pane
   of every past step read as "cluttered and not super useful" (2026-11-08).
 - **Long-form goes beside the chat.** An overview, proposal, comparison or any reply longer than
-  a screen goes in its own artifact, a tab of the pane: `margin new <notes>` once, `margin doc
-  <notes> <id> < notes.md` (markdown, in bullets, one idea each), `margin tab <art> add <notes>`; chat
+  a screen goes in its own board, a tab of the pane: `margin new <notes>` once, `margin doc
+  <notes> <id> < notes.md` (markdown, in bullets, one idea each), `margin tab <board> add <notes>`; chat
   gets its conclusion in two or three lines plus "it's in the pane". Revise it under the same id
-  (change bars show what moved); `margin tab <art> rm <notes>` when the topic closes. Chat keeps
+  (change bars show what moved); `margin tab <board> rm <notes>` when the topic closes. Chat keeps
   direct answers, reasoning, what you did and how you know, disagreement, and anything that needs
-  a reply now. Reference material (reviews, research, logs) gets its own artifact too, and a `link`
-  row (`target: mg:open/<art>`). **Why:** in chat a long piece scrolls away while they answer it.
+  a reply now. Reference material (reviews, research, logs) gets its own board too, and a `link`
+  row (`target: mg:open/<board>`). **Why:** in chat a long piece scrolls away while they answer it.
 - **Keep the next item explained.** The top item of Next gets a folded explainer section right
-  after Next (`margin doc <art> <id>x --title "About <id>: …"`); a `+ more` note asks for one.
+  after Next (`margin doc <board> <id>x --title "About <id>: …"`); a `+ more` note asks for one.
 - **Name a row by an id {{user}} can see, plus a few words of its text**: "t3 (seed the RNG)",
   never a bare hash. Todos, questions, claims and decided rows show short ids (8 characters or
   fewer, no dash), so give those ids like `t3`, `Q1`, `A1`; quote any other row's text.
@@ -44,8 +44,8 @@ plan "…"`) pinned above the content; long reasoning goes in its own artifact (
 ## The turn loop
 
 ```fish
-margin ls                                  # this project's artifacts (they outlive sessions)
-margin new plan <<'EOF'                    # create: the only command that makes an artifact
+margin ls                                  # this project's boards (they outlive sessions)
+margin new plan <<'EOF'                    # create: the only command that makes a board
 {"title": "fix the flake", "purpose": "CI green: the flaky test passes 200 runs", "blocks": [
   {"type": "section", "id": "now", "title": "Now", "children": [
     {"type": "todo", "id": "t1", "text": "Reproduce the flaky test"},
@@ -60,15 +60,15 @@ margin add plan - section ask title="Needs you" --after now     # only now that 
 margin ask plan Q1 "Which store?" sqlite files --suggest files --why "files need no daemon" --parent ask
 margin add plan ask claim A1 "CI runs tests in one process"
 margin move plan Q1 --parent decided       # once answered; `margin rm plan ask` when nothing else waits there
-margin add plan decided decided D3 "Keep artifacts 30 days" by=claude
+margin add plan decided decided D3 "Keep boards 30 days" by=claude
 margin show plan                           # the pane as text, with {{user}}'s decisions merged in
 ```
 
 1. **One pane per chat.** If a hook line names your pane, use it. Else `margin new` the shape and
-   `margin open <art>` once (outside Zellij it prints a `margin view …` line for {{user}} to
+   `margin open <board>` once (outside Zellij it prints a `margin view …` line for {{user}} to
    run). After that, change the pane or add a tab to it; never open a second one for a new topic.
-2. **Each turn begins with the hook's lines.** `margin: your pane is <art> · doing … · N open` is
-   the pane linked to your session (`margin link <art>` switches it); the other `margin:` lines are
+2. **Each turn begins with the hook's lines.** `margin: your pane is <board> · doing … · N open` is
+   the pane linked to your session (`margin link <board>` switches it); the other `margin:` lines are
    what {{user}} did in the pane. Treat them as their own input. `margin events --unread` lists
    any you haven't been handed.
 3. **Exactly one todo is `doing`; tick it as the step lands.** The pane's live strip already shows
@@ -76,7 +76,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
 4. **Never spend a tool call on margin alone.** Chain the write onto the step's real command or
    send it with the next real call; after 10 tool calls with no pane write the hook nudges you to.
    **Why:** a standalone call re-reads the whole context (est. 3× a task's tokens vs 1.1× chained).
-5. **Creating and changing are different commands.** `new` creates an artifact and refuses one that
+5. **Creating and changing are different commands.** `new` creates a board and refuses one that
    exists; every other write refuses one that doesn't ("create it with margin new", plus the nearest
    name), so a typo never makes a second board. Inside one: `add`/`ask` create (an id there is
    refused), `set`/`move`/`rm` change (a missing id is refused). `apply` is state from a script: a
@@ -102,7 +102,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
   leave the card open.
 - **State an assumption as a `claim` when being wrong would change your plan.** Clicking a claim
   strikes it. On a strike: re-check, re-plan any step listed as resting on it, then
-  `margin set <art> <id> ack "…"`.
+  `margin set <board> <id> ack "…"`.
 - **Stop means stop.** `S` in the pane (or `margin stop`) refuses your next tool call. Run
   nothing: say in two or three lines where you are and what you were about to do, and wait. It
   lifts with their next message.
@@ -111,7 +111,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
   exception is a step that is theirs (`"owner": "you"`, or claimed in the pane): don't do it or
   route around it; say "your step: t4", work on what doesn't depend on it, and continue when
   their finish arrives.
-- **Row notes are a review.** They arrive as `{{user}} reviewed <art>: less <id> …; disagree <id>
+- **Row notes are a review.** They arrive as `{{user}} reviewed <board>: less <id> …; disagree <id>
   on "quote"` (`more`, `less` = trim it, `keep` = don't touch, `disagree` = rethink, `why` = justify). Answer
   by revising those rows in place; a note clears when its row changes.
 - **Woken while idle.** When {{user}} finishes in the pane after your turn ended, their `margin:`
@@ -123,7 +123,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
   is the cheapest correction.
 - **Brief subagents for the pane.** Put this in every subagent's brief: "Before each phase of the
   work, write one short sentence saying what you're about to do (not which tool)." Give an
-  implementation or review subagent its own section: `margin add <art> - section ag-<name>
+  implementation or review subagent its own section: `margin add <board> - section ag-<name>
   title="…"`, steps as todos with ids under `ag-<name>-`, ticked as it goes.
 - **Owned ids are read-only**: a write into rows a handler, a feed or an outside owner keeps fails
   with "belongs to …"; ask before removing the owner. **Don't poll what an event could refresh.**

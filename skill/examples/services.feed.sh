@@ -2,10 +2,10 @@
 # margin feed for the `services` example: a JSON file of background services -> the tabs `svc`
 # ("Failing" and "All").
 #
-#   margin example services | margin new services                   # the artifact it updates (a feed never creates one)
+#   margin example services | margin new services                   # the board it updates (a feed never creates one)
 #   ./services.feed.sh services.data.json                           # look at the line it prints
 #   ./services.feed.sh services.data.json | margin apply services   # apply it by hand (before registering)
-#   margin feed add services --every 30s --artifact services --owns svc \
+#   margin feed add services --every 30s --board services --owns svc \
 #       -- ./services.feed.sh services.data.json
 #
 # It prints ONE line: the whole `tabs` component, id `svc`. Its two children are sections; the

@@ -235,7 +235,7 @@ pub fn check_owner(op: &Op, doc: &Doc, w: &Writer, claims: &[Claim]) -> Result<(
     match prefixed {
         Some((who, p)) => {
             if matches!(op, Op::Title { .. }) && p != "*" {
-                return Err(format!("{who} owns the ids {p} and {p}-…, not the artifact title"));
+                return Err(format!("{who} owns the ids {p} and {p}-…, not the board's title"));
             }
             if let Some(id) = ids.iter().find(|id| !owns(p, id)) {
                 return Err(format!("{who} may only write the ids {p} and {p}-…; {id:?} is outside its prefix"));
@@ -262,7 +262,7 @@ pub fn check_owner(op: &Op, doc: &Doc, w: &Writer, claims: &[Claim]) -> Result<(
 }
 
 fn feed_owned_msg(what: &str, c: &Claim, board: &str) -> String {
-    let span = if c.owns == "*" { "this whole artifact".to_string() } else { format!("the ids {0} and {0}-… here", c.owns) };
+    let span = if c.owns == "*" { "this whole board".to_string() } else { format!("the ids {0} and {0}-… here", c.owns) };
     let n = &c.feed;
     match c.kind {
         "handler" => format!("{what} belongs to handler `{n}`, which owns {span} and writes it when its events arrive; write outside that prefix, or remove the handler first (`margin handler rm {n}`)"),
@@ -493,7 +493,7 @@ impl Store {
             .filter(|(d, _)| *d <= 2)
             .min();
         let hint = near.map(|(_, n)| format!(" (did you mean {n:?}?)")).unwrap_or_default();
-        format!("no artifact {a:?} in project {}: create it with margin new {a}{hint}", self.project)
+        format!("no board {a:?} in project {}: create it with margin new {a}{hint}", self.project)
     }
 
     /// The ids of this project's artifacts, from the directory alone (no document is parsed).
@@ -606,7 +606,7 @@ impl Store {
 
     fn put_locked(&self, mut d: Doc, base_rev: Option<u64>) -> Result<u64, String> {
         if !crate::util::valid_id(&d.id) {
-            return Err(format!("bad artifact id {:?}", d.id));
+            return Err(format!("bad board id {:?}", d.id));
         }
         if d.v != 1 {
             return Err(format!("document version {}: this margin reads v 1", d.v));
@@ -1387,7 +1387,7 @@ fn check_base(old: Option<&Doc>, base: Option<u64>) -> Result<(), String> {
         let cur = old.map(|d| d.rev).unwrap_or(0);
         if cur != b {
             return Err(format!(
-                "stale base: you edited rev {b} but the artifact is at rev {cur}; run `margin show` and redo the change on rev {cur}"
+                "stale base: you edited rev {b} but the board is at rev {cur}; run `margin show` and redo the change on rev {cur}"
             ));
         }
     }
@@ -1577,9 +1577,9 @@ pub mod tests {
         let s = temp_store();
         s.create(plan()).unwrap();
         s.create(Doc::empty("reviews")).unwrap();
-        let plain = "no artifact \"scratch\" in project proj: create it with margin new scratch";
+        let plain = "no board \"scratch\" in project proj: create it with margin new scratch";
         assert_eq!(s.missing("scratch"), plain);
-        assert_eq!(s.missing("paln"), "no artifact \"paln\" in project proj: create it with margin new paln (did you mean \"plan\"?)");
+        assert_eq!(s.missing("paln"), "no board \"paln\" in project proj: create it with margin new paln (did you mean \"plan\"?)");
         assert!(s.missing("review").ends_with("(did you mean \"reviews\"?)"));
         assert!(s.missing("plans2").ends_with("(did you mean \"plan\"?)") && !s.missing("planning").contains("did you mean"), "within two edits, no further");
         let set = Op::Set { id: "t1".into(), field: "text".into(), value: json!("x") };
@@ -1803,7 +1803,7 @@ pub mod tests {
         for bad in ["", "two words", "-x", "a/b", "a=b"] {
             assert!(s.emit(bad, "", "", Value::Null, "you", "emit").unwrap_err().contains("bad event name"), "{bad}");
         }
-        assert!(s.emit("x", "nope", "", Value::Null, "you", "emit").unwrap_err().contains("no artifact"));
+        assert!(s.emit("x", "nope", "", Value::Null, "you", "emit").unwrap_err().contains("no board"));
         assert_eq!(s.events().len(), 2);
         // an emitted event is nobody's decision: the hooks never hand it to a Claude session
         assert!(s.events().iter().all(|e| !is_decision(e)));

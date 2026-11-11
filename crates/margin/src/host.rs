@@ -173,7 +173,7 @@ impl Host for PlainHost {
         Selection::InPane
     }
     fn session(&self, _name: &str) -> Result<(), String> {
-        Err("host is plain (no multiplexer): run `margin view <artifact>` in any terminal; set host to \"zellij\" for a wired session".into())
+        Err("host is plain (no multiplexer): run `margin view <board>` in any terminal; set host to \"zellij\" for a wired session".into())
     }
 }
 

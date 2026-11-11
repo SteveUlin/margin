@@ -5,8 +5,8 @@ integrate`): margin then runs a command only for an event. The feed runner below
 is not going away in this version; its line grammar is what handlers and `margin apply` take too.
 
 A feed is a command margin's daemon runs for you; what it prints on stdout is `margin apply`
-input: an update to an artifact that exists (create it first, with `margin new`; a feed never
-creates one). It keeps part of an artifact current with no AI in the loop, so it costs no tokens and
+input: an update to a board that exists (create it first, with `margin new`; a feed never
+creates one). It keeps part of a board current with no AI in the loop, so it costs no tokens and
 keeps going after the session ends. Register one only when {{user}} asked for something kept live.
 
 ## The contract of a feed script
@@ -25,21 +25,21 @@ keeps going after the session ends. Register one only when {{user}} asked for so
   with a known id updates in place, a new id appears, a missing id is removed. The script needs
   no memory and never deletes. When nothing differs from what is there, nothing is written.
 - **Every id it writes is inside its prefix.** `--owns PREFIX` (default: the feed's name) owns the
-  ids `PREFIX` and `PREFIX-…` in `--artifact` (`ci` owns `ci-1`, never `city`). A line that writes
+  ids `PREFIX` and `PREFIX-…` in `--board` (`ci` owns `ci-1`, never `city`). A line that writes
   an id outside it is rejected. Make ids from the data (`pr-4812`), restricted to letters,
   digits, `-` and `_`.
 - **Exit 0.** A non-zero exit (or a timeout, `--timeout`, default 60 s) drops the whole run: the
-  artifact keeps its last content, the feed's health line shows `crashed · restart in 4s` with
+  board keeps its last content, the feed's health line shows `crashed · restart in 4s` with
   the last line of stderr, and the daemon retries with backoff (1 s … 60 s). So fail loudly
   (`set -euo pipefail`) and say why on stderr; never print a half-built board.
 - **A bad line is skipped alone**: a line that isn't JSON or fails the schema is rejected and
   logged, and the other lines of the run still land. `margin feed logs <name>` shows `rejected: …`
   and `stderr: …` lines.
 - **It runs with no shell and no terminal**: the command after `--` is executed directly, in the
-  directory `feed add` was run from, with stdin closed. It gets `MARGIN_FEED`, `MARGIN_ARTIFACT`,
+  directory `feed add` was run from, with stdin closed. It gets `MARGIN_FEED`, its board's name,
   `MARGIN_OWNS`, `MARGIN_PROJECT` and `MARGIN_HOME`. Pipes and redirections belong inside the script.
 - **Write times, not ages**: a row's `since` or an `age` cell takes an RFC 3339 time and the pane
-  ticks it. An age string would change every run and rewrite the artifact for nothing.
+  ticks it. An age string would change every run and rewrite the board for nothing.
 
 ## When it runs
 
@@ -95,11 +95,11 @@ Test it by hand before registering it, then register it and watch one change go 
 
 ```sh
 chmod +x prs-feed.sh
-margin new reviews --title "Reviews" --purpose "Pull requests waiting on my review"   # 0. the artifact
+margin new reviews --title "Reviews" --purpose "Pull requests waiting on my review"   # 0. the board
 ./prs-feed.sh prs.json                        # 1. one line of JSON on stdout, exit 0
 ./prs-feed.sh prs.json | margin apply reviews # 2. `reviews rev 2`: it passes the schema
 margin render reviews --width 90 --height 12  # 3. the table as text
-margin feed add reviews --watch prs.json --artifact reviews --owns pr -- ./prs-feed.sh prs.json
+margin feed add reviews --watch prs.json --board reviews --owns pr -- ./prs-feed.sh prs.json
 margin feed ls                                # 4. `reviews  live  watch prs.json  reviews/pr … ran 2s ago · unchanged`
 margin feed logs reviews                      # 5. a line per run, its stderr, rejected lines, restarts
 ```
@@ -107,10 +107,10 @@ margin feed logs reviews                      # 5. a line per run, its stderr, r
 - Step 2 works only before the feed is registered; afterwards the ids are the feed's and the
   write fails with "belongs to feed". Test a changed script with `margin feed run reviews`
   instead: one run in the foreground, as the feed (`reviews rev N` or `reviews unchanged`).
-- Step 0 is not optional. A feed's output is an update: `feed add` refuses an `--artifact` that
-  doesn't exist, and a run whose artifact has gone fails with `no artifact "reviews" …: create it
+- Step 0 is not optional. A feed's output is an update: `feed add` refuses a `--board` that
+  doesn't exist, and a run whose board has gone fails with `no board "reviews" …: create it
   with margin new reviews` (in `margin feed ls` and the log) instead of making one. Here the
-  artifact starts empty; better, give `new` the layout as a whole document and let the feed fill
+  board starts empty; better, give `new` the layout as a whole document and let the feed fill
   its part (`margin help dashboards`, step b).
 - `margin example` has three larger ones (a table, tabs with rows and run strips, sections of
   todos), each with a script and sample data; `margin help dashboards` covers the components.
@@ -118,7 +118,7 @@ margin feed logs reviews                      # 5. a line per run, its stderr, r
 ## Managing feeds
 
 ```sh
-margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
+margin feed add <name> [--every 10s | --watch <path>... | --stream] [--board B] [--owns PREFIX]
                 [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
 margin feed ls                      # state, trigger, restarts, last run and how it went
 margin feed add --help              # each subcommand has its own (the trigger flags, a line each)
@@ -128,34 +128,34 @@ margin feed pause <name> | resume <name> | rm <name>
 ```
 
 - `--replace` changes a registered feed's command or trigger in place. Two feeds can't own
-  overlapping prefixes in one artifact.
-- **Feed-owned components are read-only for you.** `margin show <art>` lists each feed and its
-  prefix. A write there fails with "belongs to feed `x`"; write elsewhere in the artifact, or ask
+  overlapping prefixes in one board.
+- **Feed-owned components are read-only for you.** `margin show <board>` lists each feed and its
+  prefix. A write there fails with "belongs to feed `x`"; write elsewhere in the board, or ask
   {{user}} before `margin feed pause|rm x`. A whole-document `margin apply` must carry the feed's
   components through unchanged, so edit your own parts by id (`margin set|add|rm`). **Why:** the
   feed rewrites those ids on its own, so your edit would vanish at its next run, or fight it.
-- You can share an artifact with a feed: your ids outside the prefix, its ids inside.
+- You can share a board with a feed: your ids outside the prefix, its ids inside.
 - **The health line** is a `feed` component with the id `<prefix>-feed` (state, trigger, last
   write, the error). The daemon inserts it above the component whose id is the prefix, else at the
   end of the document. To choose its place, put `{"type": "feed", "id": "<prefix>-feed", "name":
   "<feed name>", "state": "not registered"}` where you want it before registering: the daemon
   then updates it there.
-- `margin feed rm` leaves the feed's last output in the artifact, unowned, and sets the health
-  line to `removed` itself (daemon or not); delete what you don't want with `margin rm <art> <id>`.
+- `margin feed rm` leaves the feed's last output in the board, unowned, and sets the health
+  line to `removed` itself (daemon or not); delete what you don't want with `margin rm <board> <id>`.
 - **Don't poll something a feed could watch.** **Why:** every refresh you do costs a turn; a feed
   costs nothing and keeps going after you stop.
 
 ## Feeds that ship with margin
 
 ```sh
-margin new changes && margin new agents && margin new live     # the artifacts they update, once
+margin new changes && margin new agents && margin new live     # the boards they update, once
 # the repo's recent jj changes, rerun whenever jj records an operation
-margin feed add jj --watch .jj/repo/op_heads/heads --artifact changes -- {{feeds}}/jj
+margin feed add jj --watch .jj/repo/op_heads/heads --board changes -- {{feeds}}/jj
 # Claude Code sessions on this machine: who's working, who needs {{user}}, queued messages
-margin feed add agents --stream --artifact agents --owns ag -- {{feeds}}/agents
+margin feed add agents --stream --board agents --owns ag -- {{feeds}}/agents
 # this session's queued messages (waiting → absorbed → answered) and its turn ledger
-margin feed add queue --stream --artifact live --owns q -- {{feeds}}/queue
-margin feed add turns --stream --artifact live --owns tn -- {{feeds}}/turns
+margin feed add queue --stream --board live --owns q -- {{feeds}}/queue
+margin feed add turns --stream --board live --owns tn -- {{feeds}}/turns
 ```
 
 - `queue` and `turns` read the newest transcript of the directory they were added from (pass a

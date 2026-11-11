@@ -63,7 +63,7 @@ there, or a session in that project runs both sets.
 Restart any running Claude Code session first: hooks and skills load at session start.
 
 ```sh
-margin demo            # writes a sample plan artifact for the current directory's project
+margin demo            # writes a sample plan board for the current directory's project
 margin open plan       # inside Zellij: a split beside the chat, focus stays where it was
 margin demo live       # plays a turn against it: steps tick, a card resolves
 ```

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # margin feed: your queued messages in the current Claude Code session, as a board.
 #
-#   margin feed add queue --stream --artifact live --owns q -- /path/to/margin/feeds/queue [SESSION]
+#   margin feed add queue --stream --board live --owns q -- /path/to/margin/feeds/queue [SESSION]
 #
 # A message typed while Claude works waits in Claude Code's queue. The transcript records each step
 # (research.md §7b): `queue-operation` enqueue (with the text) when you hit enter; a `queued_command`

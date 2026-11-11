@@ -122,7 +122,7 @@ pub fn resolve(tok: &Token) -> Option<(Store, String)> {
 }
 
 pub fn apply_token(tok: &Token, via: &str, cfg: &Config) -> Result<Outcome, String> {
-    let (st, art) = resolve(tok).ok_or_else(|| format!("no artifact holds {:?}", tok.id))?;
+    let (st, art) = resolve(tok).ok_or_else(|| format!("no board holds {:?}", tok.id))?;
     apply_in(&st, &art, tok, via, cfg)
 }
 

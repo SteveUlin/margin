@@ -44,31 +44,31 @@ use serde_json::{json, Value};
 use std::io::Read;
 use store::Store;
 
-const HELP: &str = "margin: live artifacts beside the chat
+const HELP: &str = "margin: live boards beside the chat
 
-content (Claude): creating and changing are different commands, for an artifact and inside one
-  create   margin new (an artifact)    margin add, margin ask (a component; an id that exists is refused)
+content (Claude): creating and changing are different commands, for a board and inside one
+  create   margin new (a board)    margin add, margin ask (a component; an id that exists is refused)
   change   margin set, move, rm, title, purpose, hints (what they name must exist)
-  state from a script   margin apply (components upsert by id; the artifact must exist)
-  margin new <art> [--title T] [--purpose P] [--kind K] [< doc.json]   create an artifact (empty, or from a
-                                                       whole doc); one that exists is refused
-  margin apply <art> [--base-rev N] [--json] < input   update: ops, components (upsert by id), or a whole doc
-  margin schema [type|document] [--json]              the document's fields, component types, fields, values
-  margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]   create a component
-  margin set <art> <id> <field> <value> | <field>=<value>... [--base-rev N]   change one (typed by the schema)
-  margin rm <art> <id>          margin move <art> <id> --before X|--after X|--parent P
-  margin rm <art> [--yes]                              remove a whole artifact (to .archive/; without --yes: a preview)
-  margin title <art> <title>                                        rename the artifact
-  margin hints <art> [text...]                                      reminders at the pane's bottom (none: clear)
-  margin purpose <art> [\"text\"]                                     the pane's one line of orientation (none: clear)
-  margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W]
-  margin propose <art> <id> <verb> [value] [--why W]                 offer a change to one of his decisions
-  margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]
-  margin diff <art> <id> --rev R [--to R2] <file> [--parent P]      jj revisions
-  margin image <art> <id> <png> [--alt A] [--parent P] [--rows N]
-  margin doc <art> <id> [--title T] < notes.md                      long-form markdown as a section
-  margin toast <art> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
-  margin show <art> [<id>] [--json]    margin ls [--json]    margin gc    margin doctor [--fix]
+  state from a script   margin apply (components upsert by id; the board must exist)
+  margin new <board> [--title T] [--purpose P] [--kind K] [< doc.json]   create a board (empty, or from a
+                                                         whole doc); one that exists is refused
+  margin apply <board> [--base-rev N] [--json] < input   update: ops, components (upsert by id), or a whole doc
+  margin schema [type|document] [--json]                 the document's fields, component types, fields, values
+  margin add <board> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]   create a component
+  margin set <board> <id> <field> <value> | <field>=<value>... [--base-rev N]   change one (typed by the schema)
+  margin rm <board> <id>        margin move <board> <id> --before X|--after X|--parent P
+  margin rm <board> [--yes]                              remove a whole board (to .archive/; without --yes: a preview)
+  margin title <board> <title>                           rename the board
+  margin hints <board> [text...]                         reminders at the pane's bottom (none: clear)
+  margin purpose <board> [\"text\"]                        the pane's one line of orientation (none: clear)
+  margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W]
+  margin propose <board> <id> <verb> [value] [--why W]   offer a change to one of the person's decisions
+  margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]
+  margin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions
+  margin image <board> <id> <png> [--alt A] [--parent P] [--rows N]
+  margin doc <board> <id> [--title T] < notes.md         long-form markdown as a section
+  margin toast <board> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
+  margin show <board> [<id>] [--json]    margin ls [--json]    margin gc    margin doctor [--fix]
 
 return channel:
   margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--follow] [--json]   the event log
@@ -90,20 +90,20 @@ datasets (values a board displays, outside the document; the pane reads them whe
   margin data set <name> ... | append <name> <VALUE|JSON|-> | put <name> < records | show <name> [--last N] | ls [--json] | rm <name>
 
 feeds (the older runner: scripts on a timer, a file watch or as a stream; margin help feeds):
-  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
+  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--board B] [--owns PREFIX]
                   [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
   margin feed ls | rm <name> | pause <name> | resume <name> | logs <name> [--follow] [--lines N]
   margin feed run <name>        once, in the foreground (stream: until it exits or ctrl-c)
 
 panes and screen (host: zellij or plain; config key host):
-  margin open <art> [--float|--split|--stacked] [--tab-id N] [--session S]   anchored to Claude's tab, no focus change
+  margin open <board> [--float|--split|--stacked] [--tab-id N] [--session S]   anchored to Claude's tab, no focus change
                                 --stacked: onto the tab's margin pane (focus returns where it was)
                                 plain host: prints the `margin view` command to run in a terminal
-  margin close <art>            margin panes <art>   (where it's showing)
-  margin link [<art>]           the pane this Claude session keeps (margin unlink to drop it)
-  margin view <art> [<art>...]  the live renderer (what the pane runs); more artifacts are tabs (gt / gT)
-  margin tab <art> [add|rm|show <tab-art>] [--pane P]   the tabs of the pane showing <art>
-  margin render <art> [--width W] [--height H] [--section ID] [--focus ID] [--ansi]   one frame, no pane
+  margin close <board>          margin panes <board>   (where it's showing)
+  margin link [<board>]         the pane this Claude session keeps (margin unlink to drop it)
+  margin view <board>...        the live renderer (what the pane runs); more boards are tabs (gt / gT)
+  margin tab <board> [add|rm|show <tab-board>] [--pane P]   the tabs of the pane showing <board>
+  margin render <board> [--width W] [--height H] [--section ID] [--focus ID] [--ansi]   one frame, no pane
   margin select [TEXT]          Zellij copy_command target (stdin if no TEXT)
   margin session [NAME]         start a Zellij session wired for margin (copy_command)
   margin demo [live [--speed X]]
@@ -111,7 +111,7 @@ panes and screen (host: zellij or plain; config key host):
 setup and reference:
   margin init [--user-name NAME] [--claude-dir DIR] [--dry-run]   name, skill and hooks: one command per machine
   margin skill                  the skill Claude loads, rendered for this machine
-  margin example [<name> [--feed|--data]]   complete dashboards to copy from: artifact, feed script, sample data
+  margin example [<name> [--feed|--data]]   complete dashboards to copy from: board, feed script, sample data
   margin help [<command>|<topic>]
 
 global, before or after the command: --home DIR  --project NAME  --by you|claude|NAME
@@ -143,54 +143,54 @@ global flags (before or after the command):
 ";
 
 const CMDS: &[Cmd] = &[
-    Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  state from a script: update an artifact that exists. stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a feed prints \"this is the state now\"); the\n  artifact itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n  --as OWNER   write as a registered owner (margin owner add): only inside its id prefix, ops and\n               components only, and its last-write time moves even when nothing changed\n", flags: &["--base-rev", "--json", "--title", "--kind", "--as"], max_pos: Some(1) },
-    Cmd { name: "new", help: "margin new <art> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes an artifact. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal or\n  an empty stdin it starts empty, titled <art> unless --title says otherwise. An artifact that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <art> --yes. Every\n  other writing command refuses an artifact that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
+    Cmd { name: "apply", help: "margin apply <board> [--base-rev N] [--json] < input\n  state from a script: update a board that exists. stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a feed prints \"this is the state now\"); the\n  board itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n  --as OWNER   write as a registered owner (margin owner add): only inside its id prefix, ops and\n               components only, and its last-write time moves even when nothing changed\n", flags: &["--base-rev", "--json", "--title", "--kind", "--as"], max_pos: Some(1) },
+    Cmd { name: "new", help: "margin new <board> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes a board. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal or\n  an empty stdin it starts empty, titled <board> unless --title says otherwise. A board that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <board> --yes. Every\n  other writing command refuses a board that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
     Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
-    Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the artifact must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
-    Cmd { name: "set", help: "margin set <art> <id> <field> <value> [--base-rev N]\nmargin set <art> <id> <field>=<value>... [--base-rev N]\n  change: set fields of a component that exists (a missing id is refused; create it with margin add); text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
-    Cmd { name: "rm", help: "margin rm <art> <id> [--base-rev N] [--json]\n  change: remove a component that exists, and its children\nmargin rm <art> [--yes]\n  remove a whole artifact. Without --yes it prints what would go (title, rev, the feeds\n  registered on it, the panes showing it) and removes nothing. With --yes the artifact moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and its feeds are unregistered. Panes are left\n  open: margin close <art>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
-    Cmd { name: "move", help: "margin move <art> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n  change: move a component that exists\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
-    Cmd { name: "title", help: "margin title <art> <title> [--base-rev N]\n  change: rename an artifact that exists (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
-    Cmd { name: "hints", help: "margin hints <art> [text...] [--json]\n  change: the reminders of an artifact that exists, a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
-    Cmd { name: "purpose", help: "margin purpose <art> [\"text\"] [--json]\n  change: what the pane of an artifact that exists is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
-    Cmd { name: "ask", help: "margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  create: a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  An id that exists is refused (change it with margin set); the artifact must exist (margin new)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
-    Cmd { name: "propose", help: "margin propose <art> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
-    Cmd { name: "diff", help: "margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <art> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
-    Cmd { name: "image", help: "margin image <art> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
-    Cmd { name: "show", help: "margin show <art> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <art> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such artifact,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
-    Cmd { name: "ls", help: "margin ls [--json]\n  this project's artifacts (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
-    Cmd { name: "gc", help: "margin gc [--days N]\n  archive artifacts untouched for N days (default: config archive_days), and remove the cursors of\n  Claude sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
-    Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
+    Cmd { name: "add", help: "margin add <board> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the board must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
+    Cmd { name: "set", help: "margin set <board> <id> <field> <value> [--base-rev N]\nmargin set <board> <id> <field>=<value>... [--base-rev N]\n  change: set fields of a component that exists (a missing id is refused; create it with margin add); text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
+    Cmd { name: "rm", help: "margin rm <board> <id> [--base-rev N] [--json]\n  change: remove a component that exists, and its children\nmargin rm <board> [--yes]\n  remove a whole board. Without --yes it prints what would go (title, rev, the feeds\n  registered on it, the panes showing it) and removes nothing. With --yes the board moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and its feeds are unregistered. Panes are left\n  open: margin close <board>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
+    Cmd { name: "move", help: "margin move <board> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n  change: move a component that exists\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
+    Cmd { name: "title", help: "margin title <board> <title> [--base-rev N]\n  change: rename a board that exists (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
+    Cmd { name: "hints", help: "margin hints <board> [text...] [--json]\n  change: the reminders of a board that exists, a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
+    Cmd { name: "purpose", help: "margin purpose <board> [\"text\"] [--json]\n  change: what the pane of a board that exists is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
+    Cmd { name: "ask", help: "margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  create: a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  An id that exists is refused (change it with margin set); the board must exist (margin new)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
+    Cmd { name: "propose", help: "margin propose <board> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
+    Cmd { name: "diff", help: "margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
+    Cmd { name: "image", help: "margin image <board> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
+    Cmd { name: "show", help: "margin show <board> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <board> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such board,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
+    Cmd { name: "ls", help: "margin ls [--json]\n  this project's boards (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
+    Cmd { name: "gc", help: "margin gc [--days N]\n  archive boards untouched for N days (default: config archive_days), and remove the cursors of\n  Claude sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
+    Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--board", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
     Cmd { name: "emit", help: "margin emit <name> [JSON | -] [--board B] [--id ID]\n  append a named event to the project's log and print its seq. Anything can call it: cron, CI,\n  a script, a job. <name> is letters, digits and . _ - : (deploy.finished, ci.red); the value is one\n  JSON value (- reads it from stdin; text that is not JSON is an error; none: null)\n  --board B   the board it is about (must exist); --id ID a block in it\n  The event is logged as by you (or --by NAME), via emit. margin events --name 'deploy.*' reads\n  them, and a job registered with --on 'deploy.*' is run for them (margin help jobs)\n  The project comes from the working directory: from cron or another directory pass --project NAME\n    margin emit deploy.finished '{\"sha\":\"abc123\",\"ok\":true}' --project boards\n    jq -c .summary report.json | margin emit ci.report - --board ci\n", flags: &["--board", "--id"], max_pos: Some(2) },
     Cmd { name: "act", help: "margin act <board> <id> <action> [VALUE]\n  what an action's key does in the pane, from the command line: append the event\n  <board>.<action> with id <id> and a snapshot of that block (a table row's cells, target and\n  detail; any other block's fields), and print its seq. <id> - is the board itself. VALUE (JSON,\n  or text) rides along as value.arg. A job registered with --on '<board>.<action>' handles it\n  (margin help jobs). Works on feed-owned rows: it changes no content\n  refused, with exit 1 and the reason: a missing board or id, an action the block does not offer\n    margin act reviews pr-4812 open\n", flags: &["--json"], max_pos: Some(4) },
     Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify|end\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
-    Cmd { name: "doc", help: "margin doc <art> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
-    Cmd { name: "toast", help: "margin toast <art> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
-    Cmd { name: "stop", help: "margin stop [<art>]\n  the stop signal: Claude's tool calls in this project are refused until sulin next sends a\n  message (the pane's S key does the same)\n", flags: &[], max_pos: Some(1) },
-    Cmd { name: "link", help: "margin link [<art>] [--session S]\n  the artifact this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
+    Cmd { name: "doc", help: "margin doc <board> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
+    Cmd { name: "toast", help: "margin toast <board> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
+    Cmd { name: "stop", help: "margin stop [<board>]\n  the stop signal: Claude's tool calls in this project are refused until sulin next sends a\n  message (the pane's S key does the same)\n", flags: &[], max_pos: Some(1) },
+    Cmd { name: "link", help: "margin link [<board>] [--session S]\n  the board this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "unlink", help: "margin unlink [--session S]\n  drop this session's link\n", flags: &["--session"], max_pos: Some(0) },
-    Cmd { name: "open", help: "margin open <art> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the artifact in a pane anchored to Claude's tab, without moving focus\n  --tabs B,C: with those artifacts as tabs beside it (added to the pane if it is already open)\n  --stacked: onto the tab's margin pane (focus returns where it was)\n  an artifact already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
-    Cmd { name: "tab", help: "margin tab <art> [--pane P] [--session S]\n  the tabs of the pane whose own artifact is <art>\nmargin tab <art> add|rm|show <tab-art> [--pane P] [--session S]\n  add an artifact as a tab, remove one, or bring one on screen. The pane follows without a\n  restart: the set lives in its view file. --pane names the pane (zj-12, tty) when it can't be\n  found by its title. In the pane: click a tab, gt / gT, or 3gt for the third\n", flags: &["--pane", "--session"], max_pos: Some(3) },
-    Cmd { name: "close", help: "margin close <art> [--session S]\n  close the panes showing it\n", flags: &["--session"], max_pos: Some(1) },
-    Cmd { name: "panes", help: "margin panes <art> [--session S]\n  where it's showing (pane ids, or pids under the plain host)\n", flags: &["--session"], max_pos: Some(1) },
-    Cmd { name: "view", help: "margin view <art> [<art>...]\n  the live renderer (what a margin pane runs). More artifacts show as tabs on the title line\n  (click, gt / gT, 3gt); with one artifact the pane shows the tabs its view file remembers\n", flags: &[], max_pos: None },
+    Cmd { name: "open", help: "margin open <board> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the board in a pane anchored to Claude's tab, without moving focus\n  --tabs B,C: with those boards as tabs beside it (added to the pane if it is already open)\n  --stacked: onto the tab's margin pane (focus returns where it was)\n  a board already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
+    Cmd { name: "tab", help: "margin tab <board> [--pane P] [--session S]\n  the tabs of the pane whose own board is <board>\nmargin tab <board> add|rm|show <tab-board> [--pane P] [--session S]\n  add a board as a tab, remove one, or bring one on screen. The pane follows without a\n  restart: the set lives in its view file. --pane names the pane (zj-12, tty) when it can't be\n  found by its title. In the pane: click a tab, gt / gT, or 3gt for the third\n", flags: &["--pane", "--session"], max_pos: Some(3) },
+    Cmd { name: "close", help: "margin close <board> [--session S]\n  close the panes showing it\n", flags: &["--session"], max_pos: Some(1) },
+    Cmd { name: "panes", help: "margin panes <board> [--session S]\n  where it's showing (pane ids, or pids under the plain host)\n", flags: &["--session"], max_pos: Some(1) },
+    Cmd { name: "view", help: "margin view <board> [<board>...]\n  the live renderer (what a margin pane runs). More boards show as tabs on the title line\n  (click, gt / gT, 3gt); with one board the pane shows the tabs its view file remembers\n", flags: &[], max_pos: None },
     Cmd { name: "render", help: RENDER_HELP, flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus", "--section"], max_pos: None },
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "daemon", help: DAEMON_HELP, flags: &["--stay", "--unit-dir", "--json"], max_pos: Some(1) },
     Cmd { name: "doctor", help: "margin doctor [--fix] [--days N]\n  what was left behind by a session, a pane or a daemon that went without saying so, and what on\n  a board cannot work yet. Lists, and removes nothing without --fix:\n    stale  rewake and review marks whose process is gone; the cursor, activity entry and pane view\n           of a session or pane untouched for N days (default: config archive_days, else 30); the\n           pid file of a daemon that is not running; a handler recorded as running when none is\n    note   a board whose rows have targets or actions that no handler takes (with the line that\n           registers one); history.jsonl files, which margin no longer writes (delete them by hand)\n  --fix removes the stale items. It never touches a board, an event, a named cursor (a tool's or a\n  handler's) or a registration, and it is safe to run at any time. margin help lifecycle\n", flags: &["--fix", "--days"], max_pos: Some(0) },
     Cmd { name: "handler", help: HANDLER_HELP, flags: &[], max_pos: None },
-    Cmd { name: "handle", help: "margin handle open\n  a ready-made handler command: reads events on stdin (one JSON object per line) and opens each\n  event's value.target: a URL with the configured opener (config key opener; default xdg-open, or\n  `opener` over ssh), an mg: token by applying it, mg:open/<artifact> by showing that artifact.\n  With $MARGIN_DRY_OPEN=FILE it appends each target to FILE and opens nothing. A target that fails\n  to open is reported on stderr and the run still exits 0 (a retry would open the others twice)\n  The pane never opens anything itself: enter or a click on a row with a target appends the event\n  <board>.open, and this is the handler for it. Register it once per project:\n    margin handler add open --on '*.open' -- margin handle open\n", flags: &[], max_pos: Some(1) },
+    Cmd { name: "handle", help: "margin handle open\n  a ready-made handler command: reads events on stdin (one JSON object per line) and opens each\n  event's value.target: a URL with the configured opener (config key opener; default xdg-open, or\n  `opener` over ssh), an mg: token by applying it, mg:open/<board> by showing that board.\n  With $MARGIN_DRY_OPEN=FILE it appends each target to FILE and opens nothing. A target that fails\n  to open is reported on stderr and the run still exits 0 (a retry would open the others twice)\n  The pane never opens anything itself: enter or a click on a row with a target appends the event\n  <board>.open, and this is the handler for it. Register it once per project:\n    margin handler add open --on '*.open' -- margin handle open\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "data", help: DATA_HELP, flags: &["--cap", "--file", "--owner", "--expect-every", "--as", "--last", "--json"], max_pos: Some(3) },
     Cmd { name: "owner", help: OWNER_HELP, flags: &["--board", "--owns", "--expect-every", "--json"], max_pos: Some(2) },
-    Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo artifact `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
+    Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo board `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
     Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
     Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
-    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data | --tool]\n  print one: the artifact (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data", "--tool"], max_pos: Some(1) },
+    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--feed | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --feed: the script that keeps it current; --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--feed", "--data", "--tool"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
 
-const EVENTS_HELP: &str = "margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--kind K] [--artifact A]
+const EVENTS_HELP: &str = "margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--kind K] [--board B]
               [--follow] [--all] [--json]
 margin events --cursor NAME --commit SEQ
 margin events --unread [--session S]
@@ -199,8 +199,8 @@ margin events --unread [--session S]
   --name GLOB    events whose kind matches (quote it: 'reviews.*'), whoever made them
   --kind K       one kind, exactly
   --all          everyone's events and the passive kinds too (view, seen, fold...)
-  --artifact A   one board's
-  --json         one JSON object per line: {v, seq, at, artifact, id, kind, value, by, via, rev}
+  --board B      one board's
+  --json         one JSON object per line: {\"v\", \"seq\", \"at\", \"artifact\" (the board's name), \"id\", \"kind\", \"value\", \"by\", \"via\", \"rev\"}
   --since N      the events after seq N (--since 0: everything still kept)
   --follow       keep running and print each new event as it arrives; ctrl-c or a closed
                  stdout ends it with exit 0
@@ -218,7 +218,7 @@ margin events --unread [--session S]
     margin events --follow --cursor mine --json | while read -r e; do handle \"$e\"; done
     margin events --follow --cursor mine --no-commit --json | while read -r e; do
       handle \"$e\" && margin events --cursor mine --commit \"$(jq .seq <<<\"$e\")\"; done
-  A registered job does the second for you (margin help jobs). The log rotates past a few MB and
+  A handler does the second for you (margin help handlers). The log rotates past a few MB and
   keeps two older generations; seq goes on counting, so a cursor stays valid across a rotation
   --unread       what a Claude session has not been handed yet (--session S, default this one)
 ";
@@ -352,7 +352,7 @@ const DATA_HELP: &str = "datasets: values a board displays, kept outside the doc
   revision, no change bar, no unseen count
 ";
 
-const RENDER_HELP: &str = "margin render <art> [<art>...] [--width W] [--height H] [--section ID]... [--focus ID] [--focused]
+const RENDER_HELP: &str = "margin render <board> [<board>...] [--width W] [--height H] [--section ID]... [--focus ID] [--focused]
               [--detail] [--tab ART] [--ansi] [--at SECS] [--motion on|off] [--pane P]
   one frame to stdout, with no pane and no terminal: what the pane would draw
   --width W      the frame's width in cells (default 62)
@@ -360,10 +360,10 @@ const RENDER_HELP: &str = "margin render <art> [<art>...] [--width W] [--height 
   --section ID   show this section of a `tabs` block instead of its first (repeat it for
                  nested or several tabs blocks); an id that is not such a section is an error
   --focus ID     put the focus on a block; a block inside a hidden section of a `tabs` block
-                 brings that section on show. An id the artifact doesn't have is an error
+                 brings that section on show. An id the board doesn't have is an error
   --focused      draw as the pane that has the keyboard: the focus ring, the focused row in full
   --detail       open the detail panel (the focused row's `detail` and fields)
-  --tab ART      with several artifacts (a tab bar on the title line): the one on screen
+  --tab BOARD    with several boards (a tab bar on the title line): the one on screen
   --ansi         ANSI escapes with colors and attributes, for a terminal; without it plain
                  text, where Nerd Font icons are replaced by ordinary characters (a check, a cross)
   --at SECS      the animation clock, seconds since the pane started (default 10: all settled)
@@ -371,8 +371,8 @@ const RENDER_HELP: &str = "margin render <art> [<art>...] [--width W] [--height 
   --pane P       draw with pane P's saved view: folds, focus, scroll (default tty)
 ";
 
-const FEED_HELP: &str = "feeds: scripts that keep an artifact current without Claude
-  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
+const FEED_HELP: &str = "feeds: scripts that keep a board current without Claude
+  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--board B] [--owns PREFIX]
                   [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
   margin feed ls
   margin feed rm <name>
@@ -386,7 +386,7 @@ const FEED_HELP: &str = "feeds: scripts that keep an artifact current without Cl
 /// `margin feed <sub> --help`: that subcommand's own usage.
 fn feed_sub_help(sub: &str) -> Option<&'static str> {
     Some(match sub {
-        "add" => "margin feed add <name> (--every 10s | --watch <path>... | --stream) [--artifact A] [--owns PREFIX]
+        "add" => "margin feed add <name> (--every 10s | --watch <path>... | --stream) [--board B] [--owns PREFIX]
                 [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
   register a script whose stdout is `margin apply` input; the daemon runs it from here on
   pick one trigger:
@@ -395,8 +395,8 @@ fn feed_sub_help(sub: &str) -> Option<&'static str> {
                      (a file replaced by rename is still watched)
   --stream           start it once and keep it running; lines land as they arrive, and it is
                      restarted with backoff when it exits
-  --artifact A       the artifact it updates (default: <name>); it must exist (margin new):
-                     a feed never creates its artifact
+  --board B          the board it updates (default: <name>); it must exist (margin new):
+                     a feed never creates its board
   --owns PREFIX      the id prefix it owns there: PREFIX and PREFIX-… (default: <name>; * = all)
   --min-gap 1s       at least this long between two writes
   --timeout 60s      a run of --every / --watch is stopped after this long
@@ -405,13 +405,13 @@ fn feed_sub_help(sub: &str) -> Option<&'static str> {
   margin help feeds has the script contract and a complete example
 ",
         "ls" => "margin feed ls
-  each feed: its state (live, restarting, paused), trigger, artifact/prefix, restarts, and its
+  each feed: its state (live, restarting, paused), trigger, board/prefix, restarts, and its
   last run: `ran 2s ago · unchanged`, `ran 2s ago · wrote`, or `failed 5s ago: <last stderr line>`
   (unchanged: it ran and printed what is already there, so nothing was written)
   margin help feeds has the rest
 ",
         "rm" => "margin feed rm <name>
-  unregister a feed. Its last output stays in the artifact, unowned (the health line says
+  unregister a feed. Its last output stays in the board, unowned (the health line says
   removed); the daemon exits when no unpaused feed is left
   margin help feeds has the rest
 ",
@@ -430,7 +430,7 @@ margin feed resume <name>
 ",
         "run" => "margin feed run <name>
   run a registered feed once, in the foreground, as the feed (a stream: until it exits or
-  ctrl-c); prints `<art> rev N` or `<art> unchanged`, and leaves the daemon's status alone
+  ctrl-c); prints `<board> rev N` or `<board> unchanged`, and leaves the daemon's status alone
   margin help feeds has the rest
 ",
         _ => return None,
@@ -440,7 +440,7 @@ margin feed resume <name>
 /// Flags each `feed` subcommand takes, and its most positionals.
 fn feed_spec(sub: &str) -> Option<(&'static [&'static str], Option<usize>)> {
     Some(match sub {
-        "add" => (&["--every", "--watch", "--stream", "--artifact", "--owns", "--min-gap", "--timeout", "--replace"][..], None),
+        "add" => (&["--every", "--watch", "--stream", "--board", "--artifact", "--owns", "--min-gap", "--timeout", "--replace"][..], None),
         "ls" => (&[][..], Some(1)),
         "rm" | "pause" | "resume" | "run" => (&[][..], Some(2)),
         "logs" => (&["--follow", "--lines"][..], Some(2)),
@@ -840,7 +840,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "apply" if a.has("--as") => {
             let st = store(a);
-            let (art, name) = (a.pos(0, "artifact")?, a.get("--as").ok_or("--as needs an owner's name (margin owner ls)")?);
+            let (art, name) = (a.pos(0, "board")?, a.get("--as").ok_or("--as needs an owner's name (margin owner ls)")?);
             let input = stdin();
             let whole = matches!(serde_json::from_str::<Value>(input.trim()), Ok(Value::Object(m)) if m.get("op").is_none() && m.get("type").is_none());
             if whole {
@@ -855,7 +855,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "apply" => {
             let st = store(a);
-            apply_cmd(&st, a.pos(0, "artifact")?, &stdin(), a, false, Whole::Replace)?;
+            apply_cmd(&st, a.pos(0, "board")?, &stdin(), a, false, Whole::Replace)?;
         }
         "new" => {
             let st = store(a);
@@ -863,11 +863,11 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             // wait for a ctrl-d nobody knows to type)
             use std::io::IsTerminal;
             let input = if std::io::stdin().is_terminal() { String::new() } else { stdin() };
-            new_cmd(&st, a.pos(0, "artifact")?, &input, a)?;
+            new_cmd(&st, a.pos(0, "board")?, &input, a)?;
         }
         "add" => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             let parent = a.pos(1, "parent")?;
             let kind = a.pos(2, "type")?;
             let id = a.pos(3, "id")?;
@@ -897,7 +897,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "set" => {
             let st = store(a);
-            let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+            let (art, id) = (a.pos(0, "board")?, a.pos(1, "id")?);
             // the value is typed by the schema: a text field keeps "2026" as text
             let k = st.load(art)?.find(id).map(|b| b.kind.clone()).ok_or_else(|| format!("no component {id:?} in {art}"))?;
             let rest = &a.pos[2..];
@@ -917,16 +917,16 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "rm" if a.pos.len() == 1 => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             let panes = host::pick(&cfg, None).find(&st, art).unwrap_or_default();
             print!("{}", rm_artifact(&st, art, a.has("--yes"), &panes)?);
         }
         "rm" => {
             if a.has("--yes") {
-                return Err("--yes is for removing a whole artifact: margin rm <art> --yes".into());
+                return Err("--yes is for removing a whole board: margin rm <board> --yes".into());
             }
             let st = store(a);
-            patch(&st, a.pos(0, "artifact")?, vec![Op::Rm { id: a.pos(1, "id")?.into() }], a)?;
+            patch(&st, a.pos(0, "board")?, vec![Op::Rm { id: a.pos(1, "id")?.into() }], a)?;
         }
         "move" => {
             let st = store(a);
@@ -936,28 +936,28 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 after: a.get("--after").map(String::from),
                 parent: a.get("--parent").map(String::from),
             };
-            patch(&st, a.pos(0, "artifact")?, vec![op], a)?;
+            patch(&st, a.pos(0, "board")?, vec![op], a)?;
         }
         "title" => {
             let st = store(a);
-            patch(&st, a.pos(0, "artifact")?, vec![Op::Title { value: a.pos(1, "title")?.into() }], a)?;
+            patch(&st, a.pos(0, "board")?, vec![Op::Title { value: a.pos(1, "title")?.into() }], a)?;
         }
         "hints" => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             let rev = set_hints(&st, art, a.pos[1..].iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())?;
             report(art, rev, a);
         }
         "purpose" => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             let text = a.pos.get(1).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
             let rev = set_doc_field(&st, art, |d| if d.purpose == text { false } else { d.purpose = text.clone(); true })?;
             report(art, rev, a);
         }
         "ask" => {
             let st = store(a);
-            let (art, id, q) = (a.pos(0, "artifact")?, a.pos(1, "id")?, a.pos(2, "question")?);
+            let (art, id, q) = (a.pos(0, "board")?, a.pos(1, "id")?, a.pos(2, "question")?);
             let opts: Vec<String> = a.pos[3..].to_vec();
             if opts.len() < 2 {
                 return Err("ask needs at least two options".into());
@@ -994,7 +994,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "propose" => {
             // a change to one of the person's decisions, offered on the component; his accept applies it
             let st = store(a);
-            let (art, id, verb) = (a.pos(0, "artifact")?, a.pos(1, "id")?, a.pos(2, "verb")?);
+            let (art, id, verb) = (a.pos(0, "board")?, a.pos(1, "id")?, a.pos(2, "verb")?);
             if !crate::select::PROPOSABLE.contains(&verb) {
                 return Err(format!("propose takes one of {}, not {verb:?}", crate::select::PROPOSABLE.join(", ")));
             }
@@ -1015,7 +1015,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "diff" => {
             let st = store(a);
-            let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+            let (art, id) = (a.pos(0, "board")?, a.pos(1, "id")?);
             // before difft runs: a missing artifact is the first thing wrong
             if !st.exists(art) {
                 return Err(st.missing(art));
@@ -1056,7 +1056,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "image" => {
             let st = store(a);
-            let (art, id, png) = (a.pos(0, "artifact")?, a.pos(1, "id")?, a.pos(2, "png")?);
+            let (art, id, png) = (a.pos(0, "board")?, a.pos(1, "id")?, a.pos(2, "png")?);
             if !st.exists(art) {
                 return Err(st.missing(art));
             }
@@ -1075,7 +1075,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "show" => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             let d = st.load(art)?;
             let s = st.state(art);
             if let Some(id) = a.pos.get(1) {
@@ -1167,7 +1167,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         },
         "doc" => {
             let st = store(a);
-            let (art, id) = (a.pos(0, "artifact")?, a.pos(1, "id")?);
+            let (art, id) = (a.pos(0, "board")?, a.pos(1, "id")?);
             let mut sec = mdoc::to_section(id, a.get("--title"), &stdin());
             // keep what this section holds that doc didn't write (a question or claim posted
             // into it): a revision replaces the prose, never sulin's cards
@@ -1192,7 +1192,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "toast" => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             let text = a.pos.get(1..).map(|w| w.join(" ")).unwrap_or_default();
             let ttl = a.get("--ttl").map(|t| t.trim_end_matches('s').parse::<f64>().map_err(|_| format!("bad --ttl {t:?}: seconds"))).transpose()?;
             let by = if st.author == crate::who::HUMAN { "you".to_string() } else { st.author.clone() };
@@ -1212,7 +1212,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "stop" => {
             let st = store(a);
-            let art = a.pos.first().cloned().or_else(|| st.list().into_iter().next().map(|d| d.id)).ok_or("no artifact to log the stop in")?;
+            let art = a.pos.first().cloned().or_else(|| st.list().into_iter().next().map(|d| d.id)).ok_or("no board to log the stop in")?;
             st.stop(&art, "cli")?;
             println!("{}", who::say("stopped: Claude's tool calls are refused until sulin's next message"));
         }
@@ -1236,7 +1236,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "open" => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             // a session with no pane yet makes this one its own (a stack opened later doesn't take over)
             if let Ok(sess) = std::env::var("CLAUDE_CODE_SESSION_ID") {
                 if !a.has("--stacked") && link::get(&st, &sess).is_none() {
@@ -1295,7 +1295,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "panes" => {
             let st = store(a);
             let h = host::pick(&cfg, a.get("--session"));
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             for p in h.find(&st, art)? {
                 println!("{p}");
             }
@@ -1305,7 +1305,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "close" => {
             let st = store(a);
-            let art = a.pos(0, "artifact")?;
+            let art = a.pos(0, "board")?;
             let h = host::pick(&cfg, a.get("--session"));
             let n = h.close(&st, art)?;
             println!("closed {n}");
@@ -1318,7 +1318,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "tab" => {
             let st = store(a);
-            let primary = a.pos(0, "artifact")?;
+            let primary = a.pos(0, "board")?;
             if !st.exists(primary) {
                 return Err(st.missing(primary));
             }
@@ -1338,7 +1338,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                     }
                     Some((op.as_str(), art.as_str()))
                 }
-                (Some(op), None) => return Err(format!("margin tab {primary} {op} <artifact>")),
+                (Some(op), None) => return Err(format!("margin tab {primary} {op} <board>")),
             };
             for p in panes {
                 let mut v = st.view(primary, &p);
@@ -1356,7 +1356,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let st = store(a);
             let h = host::pick(&cfg, None);
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let art = a.pos(0, "artifact")?.to_string();
+            let art = a.pos(0, "board")?.to_string();
             if app::run(st, art.clone(), a.pos[1..].to_vec(), cfg, h)? {
                 // the terminal is restored (app::run's Terminal dropped); become the new build.
                 // Only the pane's own artifact is named again: the tab set is in the view file by
@@ -1388,7 +1388,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 v
             });
             let tab = a.get("--tab").map(|t| set.iter().position(|x| x == t).ok_or_else(|| format!("--tab {t}: not one of {}", set.join(" ")))).transpose()?.unwrap_or(0);
-            let art = set.get(tab).map(|s| s.as_str()).ok_or("missing <artifact>")?;
+            let art = set.get(tab).map(|s| s.as_str()).ok_or("missing <board>")?;
             let w: u16 = a.get("--width").and_then(|x| x.parse().ok()).unwrap_or(62);
             // the datasets the board reads, as the pane would read them now (data.rs)
             let d = st.load(art)?;
@@ -1486,7 +1486,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 }
                 _ => {
                     let rev = demo::setup(&st)?;
-                    println!("plan rev {rev} in project {} (the demo's own artifact: run again, it resets it)", st.project);
+                    println!("plan rev {rev} in project {} (the demo's own board: run again, it resets it)", st.project);
                     println!("next: margin open plan    (in Zellij a split; elsewhere it prints the view command), then: margin demo live");
                 }
             }
@@ -1564,7 +1564,7 @@ fn follow_wait(ms: i32) -> bool {
 /// `margin events`: read the log, from a seq or a named cursor, once or following.
 fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
     use std::io::Write;
-    for f in ["--cursor", "--since", "--name", "--kind", "--artifact", "--commit"] {
+    for f in ["--cursor", "--since", "--name", "--kind", "--board", "--artifact", "--commit"] {
         if a.has(f) && a.get(f).is_none() {
             return Err(format!("{f} needs a value"));
         }
@@ -1601,7 +1601,7 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
     let at = cursor.map(|c| st.cursor_or_create(c));
     let mut from = seq("--since")?.or(at).unwrap_or(0);
     let keep = |e: &store::Event| {
-        a.get("--artifact").map(|x| e.artifact == x).unwrap_or(true)
+        a.get("--board").or(a.get("--artifact")).map(|x| e.artifact == x).unwrap_or(true)
             && a.get("--kind").map(|k| e.kind == k).unwrap_or(true)
             && a.get("--name").map(|g| util::glob_match(g, &e.kind)).unwrap_or(true)
             // by default the person's decisions only: the passive kinds (view, seen, fold…) and
@@ -1653,7 +1653,7 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
 /// handler, an owner, a feed), 1 for everything else (refused, invalid, failed). A script can
 /// tell "not created yet" from "something is wrong" without reading the message.
 fn exit_code(e: &str) -> i32 {
-    if ["no artifact ", "no component ", "no handler ", "no owner ", "no feed ", "no dataset "].iter().any(|p| e.starts_with(p)) {
+    if ["no board ", "no component ", "no handler ", "no owner ", "no feed ", "no dataset "].iter().any(|p| e.starts_with(p)) {
         3
     } else {
         1
@@ -2252,7 +2252,7 @@ fn handle_open(input: &str, cfg: &Config) -> Result<(), String> {
             if t.verb == "open" {
                 // mg:open/<artifact>: show that artifact where the host puts panes
                 let art = t.artifact.clone().unwrap_or_else(|| t.id.clone());
-                if st.exists(&t.id) { host::pick(cfg, None).open(&st, &t.id, &host::OpenOpts::default(), cfg).map(|_| ()) } else { Err(format!("{target}: no artifact {art:?} to show")) }
+                if st.exists(&t.id) { host::pick(cfg, None).open(&st, &t.id, &host::OpenOpts::default(), cfg).map(|_| ()) } else { Err(format!("{target}: no board {art:?} to show")) }
             } else {
                 let art = t.artifact.clone().unwrap_or_else(|| e.artifact.clone());
                 select::apply_in(&st, &art, &t, "handler", cfg).map(|_| ())
@@ -2331,7 +2331,7 @@ fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
             } else {
                 return Err("pick a trigger: --every 10s, --watch <path>..., or --stream".into());
             };
-            let artifact = a.get("--artifact").unwrap_or(&name).to_string();
+            let artifact = a.get("--board").or(a.get("--artifact")).unwrap_or(&name).to_string();
             let owns = a.get("--owns").unwrap_or(&name).to_string();
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
             let f = Feed {
@@ -2679,7 +2679,7 @@ mod tests {
     fn add_and_ask_refuse_a_missing_artifact() {
         let (st, f) = tmp_store("create");
         for (cmd, v) in [("add", &["a1", "-", "section", "now", "title=Now"][..]), ("ask", &["a1", "Q1", "Which?", "x", "y"])] {
-            assert_eq!(go(cmd, v, &f).unwrap_err(), "no artifact \"a1\" in project t: create it with margin new a1", "{cmd}");
+            assert_eq!(go(cmd, v, &f).unwrap_err(), "no board \"a1\" in project t: create it with margin new a1", "{cmd}");
         }
         assert!(!st.exists("a1") && !st.art("a1").exists());
         mk("a1", &f);
@@ -2710,7 +2710,7 @@ mod tests {
         let (st, f) = tmp_store("missing");
         mk("plan", &f);
         go("add", &["plan", "-", "todo", "t1", "one"], &f).unwrap();
-        let want = "no artifact \"paln\" in project t: create it with margin new paln (did you mean \"plan\"?)";
+        let want = "no board \"paln\" in project t: create it with margin new paln (did you mean \"plan\"?)";
         let a = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).chain(f.iter().cloned()).collect::<Vec<_>>());
         let walk: Vec<(&str, Vec<&str>)> = vec![
             ("add", vec!["paln", "-", "todo", "t2", "two"]),
@@ -2745,7 +2745,7 @@ mod tests {
         // feed registration: a mistyped --artifact (or a name with no artifact) registers nothing
         let e = feed_cmd(&a(&["add", "jj", "--every", "1h", "--artifact", "paln"]), vec!["true".into()]).unwrap_err();
         assert_eq!(e, want, "feed add");
-        assert!(feed_cmd(&a(&["add", "jj", "--every", "1h"]), vec!["true".into()]).unwrap_err().starts_with("no artifact \"jj\" in project t: create it with margin new jj"));
+        assert!(feed_cmd(&a(&["add", "jj", "--every", "1h"]), vec!["true".into()]).unwrap_err().starts_with("no board \"jj\" in project t: create it with margin new jj"));
         assert!(feed::Registry::load(&st.dir()).feeds.is_empty());
         // nothing was created on the way, and the artifact beside it is as it was
         assert!(!st.exists("paln") && !st.art("paln").exists() && !st.exists("jj"));
@@ -2853,6 +2853,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&st.home);
     }
 
+    /// The thing is a board everywhere a person or an assistant reads: every help text, the
+    /// schema, the skill, the topics, the examples' steps and the hint for a missing board. The
+    /// old word stays only as the name of the JSON field (`"artifact"`, `"artifacts"`,
+    /// `.artifact` in a jq filter), which stored logs and outside tools' parsers hold.
+    #[test]
+    fn nothing_a_reader_sees_says_artifact_except_the_json_field() {
+        let mut texts: Vec<(String, String)> = vec![("margin --help".into(), HELP.into()), ("global flags".into(), GLOBAL_HELP.into())];
+        texts.extend(CMDS.iter().map(|c| (format!("margin {} --help", c.name), c.help.to_string())));
+        for sub in ["add", "ls", "rm", "pause", "resume", "logs", "run"] {
+            texts.push((format!("margin feed {sub} --help"), feed_sub_help(sub).unwrap().into()));
+        }
+        for sub in ["add", "set", "ls", "rm", "pause", "resume", "logs", "run"] {
+            if let Some(h) = handler_sub_help(sub) {
+                texts.push((format!("margin handler {sub} --help"), h.into()));
+            }
+        }
+        texts.push(("margin schema".into(), doc::schema_text(None).unwrap()));
+        texts.push(("margin schema --json".into(), doc::schema_json(None).unwrap().to_string()));
+        let c = help::Ctx::new("", std::path::Path::new("/opt/margin/bin/margin"));
+        texts.push(("margin skill".into(), help::render(help::SKILL, &c)));
+        texts.push(("margin help".into(), help::topic_list(&c)));
+        texts.extend(help::TOPICS.iter().map(|(n, t)| (format!("margin help {n}"), help::render(t, &c))));
+        texts.push(("margin example".into(), example::list()));
+        texts.extend(example::EXAMPLES.iter().map(|e| (format!("margin example {}", e.name), e.notes())));
+        texts.extend(example::EXAMPLES.iter().map(|e| (format!("margin example {} --script", e.name), e.feed.to_string())));
+        texts.push(("margin example runs".into(), example::RUNS.notes()));
+        texts.push(("margin example runs --tool".into(), example::RUNS.tool.into()));
+        let (st, _) = tmp_store("words");
+        texts.push(("the hint for a missing board".into(), st.missing("paln")));
+        texts.push(("the hint for a pane's own tab".into(), tabs::edit(&mut st.view("a", "tty"), "a", "rm", "a").unwrap_err()));
+        for (what, text) in &texts {
+            for line in text.lines() {
+                let rest = line.replace("\"artifact\"", "").replace("\"artifacts\"", "").replace("`artifact`", "").replace(".artifact", "");
+                assert!(!rest.to_lowercase().contains("artifact"), "{what} says \"artifact\": {line}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&st.home);
+    }
+
     /// Each feed subcommand has its own help, the trigger flags a line each, all pointing at the
     /// topic; the ownership note is a count and the first few ids.
     #[test]
@@ -2861,7 +2900,8 @@ mod tests {
             let h = feed_sub_help(sub).unwrap_or_else(|| panic!("feed {sub} has no help"));
             assert!(h.starts_with("margin feed ") && h.contains(&format!("margin feed {sub}")) && h.contains("margin help feeds"), "{sub}: {h}");
             let (flags, _) = feed_spec(sub).unwrap();
-            for f in flags {
+            // --artifact is the older spelling of --board: taken, never printed
+            for f in flags.iter().filter(|f| **f != "--artifact") {
                 assert!(h.contains(f), "feed {sub} --help doesn't show {f}");
             }
         }
@@ -2903,7 +2943,7 @@ mod tests {
         go("add", &["scratch", "-", "todo", "t1", "again"], &f).unwrap();
         go("rm", &["scratch", "--yes"], &f).unwrap();
         assert_eq!(std::fs::read_dir(st.dir().join(".archive")).unwrap().count(), 2);
-        assert!(rm_artifact(&st, "scratch", true, &[]).unwrap_err().contains("no artifact"));
+        assert!(rm_artifact(&st, "scratch", true, &[]).unwrap_err().contains("no board"));
         // a component removal is unchanged, and --yes isn't its flag
         assert!(go("rm", &["keep", "t1", "--yes"], &f).is_err() && st.load("keep").unwrap().find("t1").is_some());
         go("rm", &["keep", "t1"], &f).unwrap();
