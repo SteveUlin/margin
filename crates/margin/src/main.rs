@@ -331,7 +331,8 @@ const DATA_HELP: &str = "datasets: values a board displays, kept outside the doc
   margin data put <name> [--as OWNER] < records
       replace the content: a JSON array of records, or JSON lines, on stdin (empty: no records)
   margin data show <name> [--last N] [--json]
-      the newest records (default 10), read from the end of the file; --json: {v, name, records, ...}
+      the newest records (default 10), read from the end of the file; --json: {v, name, path,
+      records, bytes (the file's size), bytes_read (how much of it this read took), ...}
   margin data ls [--json]
       each dataset: where it is, its size, when it last changed, and STALE when that is overdue
   margin data rm <name>
@@ -2052,7 +2053,7 @@ fn data_cmd(a: &Args) -> Result<(), String> {
             let p = st.data_path(n, d);
             let t = data::read_tail(&p, last, data::format_of(&p)).map_err(|e| format!("dataset {n}: cannot read {} ({e})", p.display()))?;
             if a.has("--json") {
-                println!("{}", json!({"v": 1, "name": n, "path": p.display().to_string(), "external": d.file.is_some(), "owner": d.owner, "cap": d.cap, "expect_every": d.expect_every, "stale": st.data_stale(n, d, util::epoch_now()).is_some(), "records": t.records}));
+                println!("{}", json!({"v": 1, "name": n, "path": p.display().to_string(), "external": d.file.is_some(), "owner": d.owner, "cap": d.cap, "expect_every": d.expect_every, "stale": st.data_stale(n, d, util::epoch_now()).is_some(), "bytes": std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "bytes_read": t.bytes, "records": t.records}));
                 return Ok(());
             }
             for r in &t.records {

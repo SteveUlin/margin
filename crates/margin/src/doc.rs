@@ -115,7 +115,7 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "tabs", about: "views of one dashboard: its children are sections, their titles a tab strip, one section's content shown at a time", children: true, action: "switch (click a tab, ]t / [t)",
         fields: &[] },
     Kind { name: "text", about: "a paragraph", children: false, action: "",
-        fields: &[("text", Ty::Text, "the paragraph; wraps; **bold** `code` @[name]"), ("style", Ty::Enum(&["note", "dim", "warn"]), "note: an aside, dim: grey, warn: yellow"), ("tone", Ty::Enum(TONES), "the text's color")] },
+        fields: &[("text", Ty::Text, "the paragraph; wraps; **bold** `code` @[name]; ~[3 5 2 9] a sparkline of those numbers; ~[@dataset.field] one of a dataset's newest values (12 cells; ~[@dataset.field:24|orange] sets the width and the color), here and wherever markup is taken"), ("style", Ty::Enum(&["note", "dim", "warn"]), "note: an aside, dim: grey, warn: yellow"), ("tone", Ty::Enum(TONES), "the text's color")] },
     Kind { name: "code", about: "monospace lines: a fenced block or a table (margin doc makes them)", children: false, action: "",
         fields: &[("text", Ty::Text, "lines, kept as written"), ("language", Ty::Text, "the fence's language, as a label")] },
     Kind { name: "bullet", about: "a bullet; children are sub-bullets", children: true, action: "",

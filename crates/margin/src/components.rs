@@ -430,7 +430,10 @@ fn draw_plot(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
                     // the ends as ages: the newest reads "now" while it is no older than the
                     // records are apart, so a provider that stopped shows in the label
                     let step = if recs.len() > 1 { (t1 - t0) / (recs.len() - 1) as f64 } else { 0.0 };
-                    let age = |t: f64| format!("-{}", age_short((cx.wall - t).max(0.0)));
+                    let age = |t: f64| match age_short((cx.wall - t).max(0.0)) {
+                        s if s == "now" => s,
+                        s => format!("-{s}"),
+                    };
                     let newest = cx.wall - t1;
                     ends = vec![age(t0), if newest <= step.max(2.0) { "now".to_string() } else { age(t1) }];
                     tick = Some(age_tick((cx.wall - t1).max(0.0)).max(1.0));

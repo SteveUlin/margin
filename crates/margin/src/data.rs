@@ -371,9 +371,11 @@ thread_local! {
     static CURRENT: RefCell<Rc<Snapshot>> = RefCell::new(Rc::new(Snapshot::default()));
 }
 
+#[cfg(test)]
 pub fn bytes_read() -> u64 {
     BYTES_READ.with(|b| b.get())
 }
+#[cfg(test)]
 pub fn reads() -> u64 {
     READS.with(|b| b.get())
 }

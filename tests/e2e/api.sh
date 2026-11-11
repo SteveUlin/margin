@@ -61,5 +61,19 @@ expect "alpha unticked" "todo alpha [todo] alpha" "$M" show s
 expect "mg:tick alias" "" "$M" select mg:tick/s.gamma
 expect "...ticked" "todo gamma [next]" "$M" show s
 
+# datasets: registered once, appended to, drawn by a bound plot; the board's revision stays put
+expect "data append refuses an unregistered name" 'no dataset "lat" in project e2e: create it with margin data add lat' "$M" data append lat 1
+expect "data add" "dataset lat: held by margin, newest 3 kept" "$M" data add lat --cap 3
+expect "data add refuses a second time" "exists: change it with margin data set lat" "$M" data add lat
+for v in 1 9 1 9 1 9 5; do "$M" data append lat "{\"ms\":$v}" >/dev/null; done
+expect "the cap trims past twice its size" $'{"ms":1}\n{"ms":9}\n{"ms":5}' "$M" data show lat
+"$M" new d <<<'[{"type":"plot","id":"p","kind":"spark","data":"lat","y":["ms"]},{"type":"plot","id":"q","data":"absent"}]' >/dev/null
+expect "a bound plot draws the dataset" "▁█▅" "$M" render d
+expect "a missing dataset is a hint line" 'no dataset "absent" (margin data add absent)' "$M" render d
+"$M" data append lat '{"ms":20}' >/dev/null
+expect "an append redraws" "▁▄▂█" "$M" render d
+expect "...and makes no revision" "d                rev 1 " "$M" ls
+expect "data put replaces" "dataset lat: 2 records" "$M" data put lat <<<'[4, 2]'
+
 echo "$fails failed"
 exit $((fails > 0))
