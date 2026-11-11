@@ -1,4 +1,4 @@
-"""Transcript feeds (feeds/queue, feeds/turns): synthetic Claude Code transcripts, then a throwaway
+"""Transcript providers (providers/queue, providers/turns): synthetic Claude Code transcripts, then a throwaway
 headless Zellij session.
 
 Part 1, the scripts alone (QUEUE_ONCE / TURNS_ONCE, no daemon):
@@ -8,8 +8,9 @@ Part 1, the scripts alone (QUEUE_ONCE / TURNS_ONCE, no daemon):
   turns: one section per prompt (tool results, meta and compact summaries start none), tool and
          file counts, only the latest unfolded, a running turn, and the jj change at the turn's end
          read with --at-op from a throwaway jj repo.
-Part 2, live: both registered as stream feeds into one artifact; appending to the transcript moves a
-  queued message through the board in the pane, and a new turn shows up, with no AI op.
+Part 2, live: both registered as handlers of one refresh event on one board; appending to the
+  transcript and emitting the event moves a queued message through the board in the pane, and a
+  new turn shows up, with no AI op.
 
 usage: python3 tests/e2e/transcripts.py      (inside `nix develop`, after `cargo build`)
 Never touches sulin's sessions, transcripts or config: its own session name, --config, MARGIN_HOME,
@@ -30,8 +31,8 @@ sys.path.insert(0, HERE)
 from ptyhost import Host  # noqa: E402
 
 MARGIN = os.environ.get("MARGIN_BIN", os.path.join(ROOT, "target/debug/margin"))
-QUEUE = os.path.join(ROOT, "feeds/queue")
-TURNS = os.path.join(ROOT, "feeds/turns")
+QUEUE = os.path.join(ROOT, "providers/queue")
+TURNS = os.path.join(ROOT, "providers/turns")
 T = tempfile.mkdtemp(prefix="margin-transcripts-")
 S = f"margin-tr-{os.getpid()}"
 HOME = os.path.join(T, "home")
@@ -194,7 +195,7 @@ def part1():
     t5 = r.get("tn-5", {})
     check("turns: the running turn says so", "so far" in t5.get("note", "") and "#5 running" in s.get("note", ""), f"{t5.get('note')} | {s.get('note')}")
     check("turns: jj change at each turn's end (--at-op)", f"@{first}" in t4.get("title", "") and f"@{second}" in t5.get("title", ""), f"{first}/{second}: {t4.get('title')} | {t5.get('title')}")
-    check("turns: the feed recorded no jj operation", sh("jj", "op", "log", "--no-graph", "-T", "description ++ \"\\n\"", cwd=REPO).stdout.count("\n") == sh("jj", "op", "log", "--no-graph", "-T", "description ++ \"\\n\"", "--ignore-working-copy", cwd=REPO).stdout.count("\n"))
+    check("turns: the script recorded no jj operation", sh("jj", "op", "log", "--no-graph", "-T", "description ++ \"\\n\"", cwd=REPO).stdout.count("\n") == sh("jj", "op", "log", "--no-graph", "-T", "description ++ \"\\n\"", "--ignore-working-copy", cwd=REPO).stdout.count("\n"))
     return tr
 
 
@@ -241,26 +242,36 @@ def part2():
         def pane():
             return z("dump-screen", "-p", f"terminal_{mp['id']}").stdout
 
-        r1 = m("feed", "add", "queue", "--stream", "--artifact", "live", "--owns", "q", "--", QUEUE, tr.path)
-        r2 = m("feed", "add", "turns", "--stream", "--artifact", "live", "--owns", "tn", "--", TURNS, tr.path)
-        check("both feeds register", r1.returncode == 0 and r2.returncode == 0, (r1.stderr + r2.stderr).strip())
+        r1 = m("handler", "add", "queue-refresh", "--on", "live.refresh", "--board", "live", "--owns", "q", "--", "env", "QUEUE_ONCE=1", QUEUE, tr.path)
+        r2 = m("handler", "add", "turns-refresh", "--on", "live.refresh", "--board", "live", "--owns", "tn", "--", "env", "TURNS_ONCE=1", TURNS, tr.path)
+        check("both handlers register", r1.returncode == 0 and r2.returncode == 0, (r1.stderr + r2.stderr).strip())
+
+        def refresh():
+            # margin has no timer: whatever owns the schedule emits the event (here, the test)
+            m("emit", "live.refresh")
+
+        refresh()
         check("pane shows the empty board and turn 1", wait(lambda: "nothing queued" in pane() and "#1" in pane(), 10), pane()[-400:])
         tr.q("enqueue", "also bump the version")
+        refresh()
         check("live: waiting", wait(lambda: "waiting" in pane() and "also bump the version" in pane(), 6))
         tr.tool("Bash", command="true", description="x")
         tr.q("remove", "also bump the version")
         tr.absorbed("also bump the version")
+        refresh()
         check("live: absorbed, turn 1", wait(lambda: "absorbed" in pane() and "turn 1" in pane(), 6))
         tr.end()
+        refresh()
         check("live: answered", wait(lambda: "answered" in pane() and "all answered" in pane(), 6))
         tr.prompt("second turn now")
+        refresh()
         check("live: a new turn shows", wait(lambda: "#2" in pane() and "second turn now" in pane(), 8))
         with open(os.path.join(T, "pane.txt"), "w") as f:
             f.write(pane())
         doc = json.load(open(os.path.join(HOME, "e2e", "live", "doc.json")))
-        check("revisions after the put are all the feeds'", str(doc.get("by", "")).startswith("feed:"), doc.get("by"))
-        for n in ("queue", "turns"):
-            m("feed", "rm", n)
+        check("revisions after the first are all the handlers'", str(doc.get("by", "")).startswith("handler:"), doc.get("by"))
+        for n in ("queue-refresh", "turns-refresh"):
+            m("handler", "rm", n)
         m("close", "live", env=cenv)
     finally:
         h.close()
@@ -274,9 +285,8 @@ def main():
         part1()
         part2()
     finally:
-        if os.path.exists(os.path.join(HOME, "e2e", "feeds.json")):
-            for f in json.load(open(os.path.join(HOME, "e2e", "feeds.json"))).get("feeds", []):
-                m("feed", "rm", f["name"])
+        for n in ("queue-refresh", "turns-refresh"):
+            m("handler", "rm", n)
         if os.environ.get("KEEP"):
             print("kept", T)
         else:

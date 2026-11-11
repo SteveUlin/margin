@@ -6,6 +6,11 @@
 //! how a person sees them.
 //!
 //! It never touches a board, an event, a named cursor or a registration.
+//!
+//! It also reads what the removed feed runner left in a store (`feeds.json`, `feeds/*.log`,
+//! `feeds/*.status.json`): margin no longer runs a command on a timer, a file watch or as a
+//! stream, so each old feed is listed with the commands that replace it, and `--fix` moves the
+//! runner's files into `.archive/`. Nothing else in margin reads those files.
 
 use crate::store::Store;
 use std::path::PathBuf;
@@ -15,6 +20,9 @@ pub enum Fix {
     Remove(PathBuf),
     /// A handler's status that says it is running when nothing is: `--fix` corrects it.
     Settle(String),
+    /// Files of the removed feed runner: `--fix` moves them into this directory of `.archive/`
+    /// (never deletes), keeping each file's path below the project.
+    Archive(Vec<PathBuf>),
     /// Something to know or to do by hand; `--fix` leaves it.
     Note,
 }
@@ -31,6 +39,147 @@ fn older_than(p: &std::path::Path, days: u32) -> bool {
 
 fn rel(st: &Store, p: &std::path::Path) -> String {
     p.strip_prefix(st.dir()).map(|r| r.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+}
+
+/// One word of a command line, quoted when a shell would split or expand it.
+fn sh_word(w: &str) -> String {
+    if !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c)) {
+        w.to_string()
+    } else {
+        format!("'{}'", w.replace('\'', "'\\''"))
+    }
+}
+
+fn sh_line(words: &[String]) -> String {
+    words.iter().map(|w| sh_word(w)).collect::<Vec<_>>().join(" ")
+}
+
+/// A registered command word that names one of the shipped scripts where they used to live
+/// (`…/feeds/jj`): the same script in `providers/` beside it, when the old path is gone and
+/// the new one is there. Anything else is returned as it was.
+fn moved_script(word: &str) -> String {
+    if let Some((dir, name)) = word.rsplit_once("/feeds/") {
+        let new = format!("{dir}/providers/{name}");
+        if !std::path::Path::new(word).exists() && std::path::Path::new(&new).is_file() {
+            return new;
+        }
+    }
+    word.to_string()
+}
+
+/// The schedule line that replaces `--every N`: a cron line when N is whole minutes that cron
+/// can say, else a loop (cron's finest step is a minute).
+fn schedule(every: f64, emit: &str) -> String {
+    let m = every / 60.0;
+    if every >= 60.0 && m.fract() == 0.0 && m <= 59.0 && 60.0 % m == 0.0 {
+        format!("cron: {} * * * * {emit}", if m == 1.0 { "*".to_string() } else { format!("*/{m}") })
+    } else if every >= 3600.0 && (every / 3600.0).fract() == 0.0 && 24.0 % (every / 3600.0) == 0.0 {
+        let h = every / 3600.0;
+        format!("cron: 0 {} * * * {emit}", if h == 1.0 { "*".to_string() } else { format!("*/{h}") })
+    } else {
+        format!("a loop or a systemd timer (OnUnitActiveSec={0}): while sleep {0}; do {emit}; done", crate::owner::fmt_secs(every))
+    }
+}
+
+/// What the removed feed runner left in this store: a note per feed in `feeds.json` with the
+/// commands that replace it, and one fixable finding for the files (`--fix` archives them).
+/// The file is read as loose JSON: a feeds.json that does not parse is reported and archived
+/// like any other, and never stops a command (nothing else reads it).
+fn old_feeds(st: &Store, out: &mut Vec<Finding>) {
+    let reg = st.dir().join("feeds.json");
+    let mut files: Vec<PathBuf> = Vec::new();
+    if reg.is_file() {
+        files.push(reg.clone());
+    }
+    // a board may be named `feeds`: only the runner's own files in that directory are its
+    for e in std::fs::read_dir(st.dir().join("feeds")).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if e.path().is_file() && (n.ends_with(".status.json") || n.ends_with(".log") || n.ends_with(".log.1")) {
+            files.push(e.path());
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        return;
+    }
+    let text = std::fs::read_to_string(&reg).unwrap_or_default();
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+    if reg.is_file() && parsed.is_none() {
+        out.push(Finding { what: "feeds.json does not parse; margin no longer reads it (the feed runner was removed), so nothing depends on it".into(), fix: Fix::Note });
+    }
+    let claims = |board: &str| st.claims(board);
+    for f in parsed.as_ref().and_then(|v| v["feeds"].as_array()).into_iter().flatten() {
+        let s = |k: &str| f[k].as_str().unwrap_or("").to_string();
+        let (name, board, owns, cwd) = (s("name"), s("artifact"), s("owns"), s("cwd"));
+        if name.is_empty() {
+            continue;
+        }
+        let cmd: Vec<String> = f["cmd"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(moved_script)).collect()).unwrap_or_default();
+        let cmd = if cmd.is_empty() { "<its command>".to_string() } else { sh_line(&cmd) };
+        let kind = f["trigger"]["kind"].as_str().unwrap_or("");
+        let emit = format!("margin --project {} emit {name}.refresh", sh_word(&st.project));
+        let handler = format!("margin handler add {name} --on {name}.refresh --board {board} --owns {} -- {cmd}", sh_word(&owns));
+        let from = if cwd.is_empty() { String::new() } else { format!("cd {} && ", sh_word(&cwd)) };
+        let (was, now) = match kind {
+            "interval" => {
+                let every = f["trigger"]["every"].as_f64().unwrap_or(60.0);
+                (format!("every {}", crate::owner::fmt_secs(every)), format!("    {from}{handler}\n    {}", schedule(every, &emit)))
+            }
+            "watch" => {
+                let paths: Vec<String> = f["trigger"]["paths"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                (
+                    format!("watch {}", paths.join(" ")),
+                    format!("    {from}{handler}\n    then emit when those paths change, from whatever changes them or a watcher of your own:\n    {from}inotifywait -qm -e close_write,move,create,delete {} | while read -r _; do {emit}; done", sh_line(&paths)),
+                )
+            }
+            _ => (
+                "stream".to_string(),
+                format!("    margin owner add {name} --board {board} --owns {}\n    {from}{cmd} | while read -r line; do margin --project {} apply {board} --as {name} <<<\"$line\"; done", sh_word(&owns), sh_word(&st.project)),
+            ),
+        };
+        let span = if owns == "*" {
+            format!("every id in {board}")
+        } else if owns.ends_with(['-', '_']) {
+            format!("the ids starting with {owns} in {board}")
+        } else {
+            format!("the ids {owns} and {owns}-… in {board}")
+        };
+        let owned = if !st.exists(&board) {
+            format!("its board {board} is gone")
+        } else {
+            match claims(&board).into_iter().find(|c| crate::owner::overlaps(&c.owns, &owns)) {
+                Some(c) => format!("{span} now belong to {} {}", c.kind, c.feed),
+                None => format!("{span} are no longer owned by anyone: anybody may write them until a handler or an owner claims the prefix"),
+            }
+        };
+        // the health line the runner wrote beside the feed's rows: nobody updates it now
+        let sid = if owns == "*" { format!("{name}-feed") } else if owns.ends_with(['-', '_']) { format!("{owns}feed") } else { format!("{owns}-feed") };
+        let health = match st.load(&board).ok().filter(|d| d.find(&sid).map(|b| b.kind == "feed").unwrap_or(false)) {
+            Some(_) => format!("\n    its old health line stays as a dim line until removed: margin rm {board} {sid}"),
+            None => String::new(),
+        };
+        let paused = if f["paused"].as_bool().unwrap_or(false) { ", paused" } else { "" };
+        out.push(Finding { what: format!("old feed {name} ({was}{paused}) is no longer run (margin has no timer, file watch or stream runner); {owned}. What replaces it:\n{now}{health}"), fix: Fix::Note });
+    }
+    let n = files.len();
+    out.push(Finding { what: format!("{n} file{} of the removed feed runner (feeds.json, feeds/*.log, feeds/*.status.json): --fix moves {} into .archive/", if n == 1 { "" } else { "s" }, if n == 1 { "it" } else { "them" }), fix: Fix::Archive(files) });
+}
+
+/// Move the removed feed runner's files into `.archive/feed-runner-<date>/`, each at its path
+/// below the project. Returns where they went.
+fn archive_files(st: &Store, files: &[PathBuf]) -> Result<PathBuf, String> {
+    let _l = st.lock().map_err(|e| e.to_string())?;
+    let dir = st.dir().join(".archive");
+    let base = format!("feed-runner-{}", &crate::util::now_rfc3339()[..10]);
+    let dest = (1..).map(|n| dir.join(if n == 1 { base.clone() } else { format!("{base}-{n}") })).find(|p| !p.exists()).unwrap();
+    for f in files {
+        let to = dest.join(f.strip_prefix(st.dir()).map_err(|e| e.to_string())?);
+        std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::rename(f, &to).map_err(|e| format!("archive {}: {e}", f.display()))?;
+    }
+    // the runner's directory goes when nothing else is in it (a board named `feeds` keeps it)
+    let _ = std::fs::remove_dir(st.dir().join("feeds"));
+    Ok(dest)
 }
 
 /// Everything the doctor has to say about this project. `days`: how long a session's cursor, a
@@ -103,6 +252,7 @@ pub fn check(st: &Store, days: u32) -> Vec<Finding> {
         }
     }
     // files margin no longer writes or reads
+    old_feeds(st, &mut out);
     for d in &docs {
         let p = st.art(&d.id).join("history.jsonl");
         if let Ok(m) = std::fs::metadata(&p) {
@@ -113,7 +263,8 @@ pub fn check(st: &Store, days: u32) -> Vec<Finding> {
 }
 
 /// The report, and with `fix` the cleanup. Safe at any time: it removes only what `check`
-/// called a leftover, each decided by liveness or age at the moment of the check.
+/// called a leftover, each decided by liveness or age at the moment of the check; the removed
+/// feed runner's files are moved into `.archive/`, not deleted.
 pub fn run(st: &Store, fix: bool, days: u32) -> String {
     let found = check(st, days);
     if found.is_empty() {
@@ -142,6 +293,22 @@ pub fn run(st: &Store, fix: bool, days: u32) -> String {
                         s.state = "stopped".into();
                         if crate::store::write_atomic(&crate::handler::status_path(st, name), serde_json::to_string_pretty(&s).unwrap().as_bytes()).is_ok() {
                             fixed += 1;
+                        }
+                    }
+                }
+            }
+            Fix::Archive(files) => {
+                fixable += 1;
+                if fix {
+                    match archive_files(st, files) {
+                        Ok(dest) => {
+                            fixed += 1;
+                            out += &format!("{tag}{}\n      now in {}\n", f.what, rel(st, &dest));
+                            continue;
+                        }
+                        Err(e) => {
+                            out += &format!("stale {} (not moved: {e})\n", f.what);
+                            continue;
                         }
                     }
                 }
@@ -228,6 +395,81 @@ mod tests {
         let again = run_text(&st, true);
         assert!(!again.contains("stale ") && !again.contains("fixed ") && again.contains("note  "), "{again}");
         crate::wake::watch_end("alive", std::process::id());
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A store the feed runner once ran in: each old feed is named with the commands that
+    /// replace it and with who owns its rows now (nobody, until claimed); `--fix` moves the
+    /// runner's files into `.archive/` and touches no board; a store without them says nothing.
+    #[test]
+    fn old_feeds_are_reported_with_their_replacements_and_archived() {
+        let st = temp_store();
+        let run = crate::wake::tests::temp_runtime();
+        crate::wake::TEST_DIR.with(|d| *d.borrow_mut() = Some(run.clone()));
+        assert!(!run_text(&st, false).contains("feed"), "a store that never had one");
+        let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "showcase", "title": "S", "blocks": [
+            {"type": "section", "id": "jj", "title": "jj", "children": [{"type": "row", "id": "jj-1", "text": "a change"}]}]})).unwrap();
+        st.put(doc, None).unwrap();
+        // the health line the runner wrote is a block type the schema no longer has: it is in
+        // the stored document, as it is in a store made before the runner was removed
+        let path = st.art("showcase").join("doc.json");
+        let mut stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        stored["blocks"].as_array_mut().unwrap().insert(0, json!({"type": "feed", "id": "jj-feed", "name": "jj", "state": "stopped", "trigger": "watch .jj/repo"}));
+        std::fs::write(&path, stored.to_string()).unwrap();
+        st.create(crate::doc::Doc::empty("agents")).unwrap();
+        st.create(crate::doc::Doc::empty("feeds")).unwrap();
+        std::fs::write(st.dir().join("feeds.json"), json!({"feeds": [
+            {"name": "jj", "cmd": ["/opt/providers/jj", "--limit", "5 6"], "trigger": {"kind": "watch", "paths": [".jj/repo/op_heads"]}, "artifact": "showcase", "owns": "jj", "cwd": "/work/repo", "paused": true},
+            {"name": "agents", "cmd": ["/opt/providers/agents"], "trigger": {"kind": "stream"}, "artifact": "agents", "owns": "ag", "cwd": "/work"},
+            {"name": "ci", "cmd": ["ci-rows"], "trigger": {"kind": "interval", "every": 300.0}, "artifact": "gone", "owns": "*", "cwd": "/work"}]}).to_string()).unwrap();
+        for f in ["jj.log", "jj.log.1", "jj.status.json", "daemon.log"] {
+            std::fs::write(st.dir().join("feeds").join(f), "x").unwrap();
+        }
+        // the store still works with the file there: a write lands in the old prefix, unowned
+        st.patch("showcase", &[crate::doc::Op::Set { id: "jj-1".into(), field: "text".into(), value: json!("mine now") }], None).unwrap();
+        st.add_owner(crate::owner::Owner { name: "agents".into(), board: "agents".into(), owns: "ag".into(), expect_every: None, added: String::new(), last_write: String::new() }).unwrap();
+        let report = run_text(&st, false);
+        for must in [
+            "note  old feed jj (watch .jj/repo/op_heads, paused) is no longer run (margin has no timer, file watch or stream runner); the ids jj and jj-… in showcase are no longer owned by anyone",
+            "the ids jj and jj-… in showcase are no longer owned by anyone",
+            "    cd /work/repo && margin handler add jj --on jj.refresh --board showcase --owns jj -- /opt/providers/jj --limit '5 6'",
+            "inotifywait -qm -e close_write,move,create,delete .jj/repo/op_heads | while read -r _; do margin --project proj emit jj.refresh; done",
+            "its old health line stays as a dim line until removed: margin rm showcase jj-feed",
+            "note  old feed agents (stream) is no longer run",
+            "the ids ag and ag-… in agents now belong to owner agents",
+            "    margin owner add agents --board agents --owns ag",
+            "    cd /work && /opt/providers/agents | while read -r line; do margin --project proj apply agents --as agents <<<\"$line\"; done",
+            "old feed ci (every 5m) is no longer run",
+            "its board gone is gone",
+            "margin handler add ci --on ci.refresh --board gone --owns '*' -- ci-rows",
+            "    cron: */5 * * * * margin --project proj emit ci.refresh",
+            "stale 5 files of the removed feed runner",
+            "1 stale item: margin doctor --fix removes it",
+        ] {
+            assert!(report.contains(must), "{must}:\n{report}");
+        }
+        assert!(st.dir().join("feeds.json").exists(), "listing moves nothing");
+        let fixed = run_text(&st, true);
+        assert!(fixed.contains("fixed 5 files of the removed feed runner") && fixed.contains("now in .archive/feed-runner-") && fixed.contains("1 of 1 cleaned up"), "{fixed}");
+        let kept = std::fs::read_dir(st.dir().join(".archive")).unwrap().next().unwrap().unwrap().path();
+        for f in ["feeds.json", "feeds/jj.log", "feeds/jj.log.1", "feeds/jj.status.json", "feeds/daemon.log"] {
+            assert!(kept.join(f).is_file(), "{f} is in the archive");
+        }
+        assert!(!st.dir().join("feeds.json").exists() && st.exists("feeds") && st.load("showcase").unwrap().find("jj-feed").is_some(), "the boards are as they were, the one named feeds too");
+        assert!(!run_text(&st, true).contains("feed runner"), "nothing is left to say");
+        // a feeds.json that does not parse stops nothing and is archived like any other
+        std::fs::write(st.dir().join("feeds.json"), "{").unwrap();
+        st.patch("showcase", &[crate::doc::Op::Set { id: "jj-1".into(), field: "text".into(), value: json!("still writable") }], None).unwrap();
+        assert!(run_text(&st, false).contains("feeds.json does not parse") && run_text(&st, true).contains("fixed 1 file of the removed feed runner"));
+        // a shipped script registered at its old place is named at its new one, when that is where it is
+        let dir = st.home.join("checkout");
+        std::fs::create_dir_all(dir.join("providers")).unwrap();
+        std::fs::write(dir.join("providers/jj"), "").unwrap();
+        assert_eq!(moved_script(&dir.join("feeds/jj").display().to_string()), dir.join("providers/jj").display().to_string());
+        assert_eq!(moved_script("/nowhere/feeds/jj"), "/nowhere/feeds/jj");
+        assert_eq!(schedule(60.0, "E"), "cron: * * * * * E");
+        assert_eq!(schedule(7200.0, "E"), "cron: 0 */2 * * * E");
+        assert_eq!(schedule(10.0, "E"), "a loop or a systemd timer (OnUnitActiveSec=10s): while sleep 10s; do E; done");
         std::fs::remove_dir_all(&st.home).ok();
     }
 

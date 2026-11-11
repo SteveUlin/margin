@@ -123,9 +123,6 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("session", s(&[]), "", false),
         ("daemon", s(&[]), "", true),
         ("demo", s(&[]), "", true),
-        ("feed", s(&["ls"]), "", true),
-        ("feed", s(&["add", "f", "--every", "1h", "--artifact", "a", "--owns", "fd", "--", "true"]), "", true),
-        ("feed", s(&["rm", "f"]), "", true),
         ("handler", s(&["add", "h", "--on", "walk.*", "--", "true"]), "", true),
         ("handler", s(&["ls"]), "", true),
         ("handler", s(&["rm", "h"]), "", true),
@@ -176,7 +173,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         let state = std::fs::read_to_string(dir.join("a/state.json")).unwrap();
         assert!(state.contains("\"t3\"") && state.contains("next"), "flags {side}: select's decision landed: {state}");
         assert!(dir.join("plan/doc.json").exists(), "flags {side}: demo");
-        // the daemon `feed add` started leaves once its feed is gone
+        // the daemon `handler add` started leaves once its handler is gone
         let t = Instant::now();
         while dir.join("daemon.pid").exists() && t.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(100));
@@ -281,49 +278,17 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
         (vec!["diff", "paln", "d1", "--old", "/nonexistent-a", "--new", "/nonexistent-b"], ""),
         (vec!["image", "paln", "i1", &png_s], ""),
         (vec!["toast", "paln", "hello"], ""),
-        (vec!["feed", "add", "f", "--every", "1h", "--artifact", "paln", "--", "true"], ""),
     ];
     for (argv, stdin) in &walk {
         let (ok, out) = run(argv, stdin);
         assert!(!ok && out.trim() == format!("margin {}: {want}", argv[0]), "margin {argv:?}: {out}");
         assert_eq!(artifacts(&home), ["plan"], "margin {argv:?} created something");
     }
-    let (_, out) = run(&["feed", "ls"], "");
-    assert!(out.contains("no feeds in project p"), "no feed registered: {out}");
     let (_, out) = run(&["show", "plan"], "");
     assert!(out.contains("rev 3") || out.contains("rev 2"), "plan is as the last apply left it: {out}");
     // a name further than two edits away gets no suggestion
     let (ok, out) = run(&["add", "scratch", "-", "todo", "t1", "x"], "");
     assert!(!ok && out.trim().ends_with("create it with margin new scratch"), "{out}");
-    let _ = std::fs::remove_dir_all(&home);
-    let _ = std::fs::remove_dir_all(&decoy);
-}
-
-/// A registered feed whose artifact is gone fails its run with the same message, in the
-/// foreground and in `feed ls`' terms, and never writes the artifact back into being.
-#[test]
-fn a_feed_run_against_a_missing_artifact_fails_without_creating_it() {
-    let decoy = temp("feedrun-decoy");
-    let home = temp("feedrun-home");
-    let run = |argv: &[&str], stdin: &str| at(&decoy, &home, argv, stdin);
-    assert!(run(&["new", "board"], "").0);
-    // registered paused-free but with a long interval; the daemon it starts leaves with the feed
-    let (ok, out) = run(&["feed", "add", "f", "--every", "1h", "--board", "board", "--owns", "fd", "--", "printf", r#"{"type":"text","id":"fd","text":"hi"}\n"#], "");
-    assert!(ok, "{out}");
-    let (ok, out) = run(&["feed", "run", "f"], "");
-    assert!(ok && (out.contains("board rev") || out.contains("board unchanged")), "{out}");
-    // the artifact goes (by hand: `margin rm board --yes` would unregister the feed with it)
-    std::fs::rename(home.join("p/board"), home.join("gone")).unwrap();
-    let (ok, out) = run(&["feed", "run", "f"], "");
-    assert!(!ok && out.contains("margin feed: no board \"board\" in project p: create it with margin new board"), "{out}");
-    assert!(artifacts(&home).is_empty(), "the run created {:?}", artifacts(&home));
-    let (ok, out) = run(&["feed", "rm", "f"], "");
-    assert!(ok, "{out}");
-    let t = Instant::now();
-    while home.join("p/daemon.pid").exists() && t.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(artifacts(&home).is_empty() && !home.join("p/daemon.pid").exists());
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }
@@ -397,8 +362,8 @@ fn the_examples_run_end_to_end_through_new() {
         let (json, steps) = (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
         assert!(steps.contains(&format!("margin example {name} | margin new {name}")) && !steps.contains("| margin apply {name}\n#        margin render"), "{steps}");
         // step 3 before step 1: an update of a board that was never created is refused
-        let feed_out = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../skill/examples/{name}.fetch.out"))).unwrap();
-        let (ok, out) = run(&["apply", name], &feed_out);
+        let fetch_out = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../skill/examples/{name}.fetch.out"))).unwrap();
+        let (ok, out) = run(&["apply", name], &fetch_out);
         assert!(!ok && out.contains(&format!("create it with margin new {name}")), "{out}");
         let (ok, out) = run(&["new", name], &json);
         assert!(ok && out.trim() == format!("{name} rev 1"), "{name}: {out}");
@@ -423,21 +388,23 @@ fn the_examples_run_end_to_end_through_new() {
             assert!(ok && !out.contains("no dataset") && out.contains("● p50") && out.contains("● p95") && out.contains("now"), "{out}");
             assert!(run(&["show", name, "--json"], "").1.contains("\"rev\": 1,"), "appends make no revision");
         }
-        let (ok, out) = run(&["apply", name], &feed_out);
-        assert!(ok && out.trim() == format!("{name} rev 1"), "{name}: the feed's output changes nothing: {out}");
+        let (ok, out) = run(&["apply", name], &fetch_out);
+        assert!(ok && out.trim() == format!("{name} rev 1"), "{name}: the script's output changes nothing: {out}");
         let (ok, out) = run(&["new", name], &json);
         assert!(!ok && out.contains(&format!("{name} already exists (rev 1)")), "{name}: {out}");
         // the handler line of step 4, as written in the steps (removed at once: nothing needs to
-        // run); the steps name the legacy runner nowhere
-        assert!(!steps.contains("margin feed"), "{steps}");
+        // run); the steps name no runner of margin's own
+        assert!(!steps.to_lowercase().contains("feed"), "{steps}");
         let line = steps.lines().find(|l| l.contains(&format!("margin handler add {name}-refresh"))).unwrap().trim_start_matches(['#', ' ']).to_string();
         let words: Vec<&str> = line.split_whitespace().skip(1).collect();
         let (ok, out) = run(&words, "");
         assert!(ok && out.contains(&format!("(writes {name}, owns ")), "{name}: {line}: {out}");
         assert!(run(&["handler", "rm", &format!("{name}-refresh")], "").0);
-        // --script prints the script; --feed, the older spelling, prints the same
+        // --script prints the script; --feed, the spelling the removed runner had, is refused
         let (ok, script) = run(&["example", name, "--script"], "");
-        assert!(ok && script.starts_with("#!/usr/bin/env bash") && script == run(&["example", name, "--feed"], "").1, "{name}");
+        assert!(ok && script.starts_with("#!/usr/bin/env bash") && !script.to_lowercase().contains("feed"), "{name}");
+        let (ok, out) = run(&["example", name, "--feed"], "");
+        assert!(!ok && out.contains("unknown flag --feed"), "{out}");
     }
     assert_eq!(artifacts(&home), ["reviews", "services", "tracker"]);
     let t = Instant::now();
@@ -717,7 +684,7 @@ fn act_and_select_exit_nonzero_when_they_refuse() {
     let doc = r#"{"title":"Reviews","blocks":[{"type":"table","id":"pr","columns":[{"key":"title"}],"children":[
       {"type":"tr","id":"pr-1","target":"https://example.com/1","cells":{"title":"One"}}]},{"type":"todo","id":"t1","text":"a step"}]}"#;
     assert!(run(&["new", "reviews"], doc).0);
-    assert!(run(&["feed", "add", "reviews", "--every", "1h", "--owns", "pr", "--", "true"], "").0);
+    assert!(run(&["owner", "add", "reviews", "--board", "reviews", "--owns", "pr"], "").0);
     let (ok, out, err) = run(&["act", "reviews", "pr-1", "open"], "");
     assert!(ok && out == "1\n", "{out}{err}");
     let (_, out, _) = run(&["events", "--name", "reviews.*", "--json"], "");
@@ -728,14 +695,14 @@ fn act_and_select_exit_nonzero_when_they_refuse() {
         let (ok, out, err) = run(&argv, "");
         assert!(!ok && out.is_empty() && err.starts_with("margin act: ") && err.contains(why), "{argv:?}: {err}");
     }
-    // select: a content-changing verb on a feed-owned row is still refused, and now says so
+    // select: a content-changing verb on an owned row is still refused, and now says so
     let (ok, _, err) = run(&["select", "mg:pin/reviews.pr-1"], "");
-    assert!(!ok && err.contains("is kept current by feed `reviews`"), "{err}");
+    assert!(!ok && err.contains("is kept current by owner `reviews`"), "{err}");
     let (ok, _, err) = run(&["select", "mg:pick/reviews.t1=x"], "");
     assert!(!ok && err.contains("t1 is a todo"), "{err}");
     let (ok, _, err) = run(&["select", "mg:todo/reviews.t1=next"], "");
     assert!(ok, "{err}");
-    assert!(run(&["feed", "rm", "reviews"], "").0);
+    assert!(run(&["owner", "rm", "reviews"], "").0);
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }
@@ -1355,10 +1322,193 @@ fn the_runs_example_is_an_outside_tool_that_runs_submissions_one_at_a_time() {
     assert_eq!((log.matches("start d ").count(), log.matches("start e ").count(), log.matches("start a ").count()), (1, 1, 1), "{log}");
     assert!(log.find("end d").unwrap() < log.find("start e").unwrap(), "still one at a time");
     // margin ran nothing for any of it
-    assert!(!home.join("p/daemon.pid").exists() && !home.join("p/handlers.json").exists() && !home.join("p/feeds.json").exists());
+    assert!(!home.join("p/daemon.pid").exists() && !home.join("p/handlers.json").exists());
     assert!(!said().contains("margin "), "the tool hit no margin error: {}", said());
     tool.kill().unwrap();
     tool.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// The feed runner is gone from the binary: `margin feed` is an unknown command, and neither
+/// `margin --help`, the topic list nor any topic names a feed. One way keeps a board current.
+#[test]
+fn no_feed_command_and_no_help_that_mentions_one() {
+    let (decoy, home) = (temp("nofeed-decoy"), temp("nofeed-home"));
+    let run = |argv: &[&str]| plain(&decoy, &home, argv, "");
+    for argv in [vec!["feed", "ls"], vec!["feed", "add", "f", "--every", "10s", "--", "true"], vec!["feed", "--help"]] {
+        let (ok, out, err) = run(&argv);
+        assert!(!ok && out.is_empty() && err.contains("unknown command \"feed\""), "{argv:?}: {out}{err}");
+    }
+    assert!(!home.join("p/feeds.json").exists() && !home.join("p/daemon.pid").exists());
+    let (ok, help, _) = run(&["--help"]);
+    assert!(ok && help.contains("margin handler") && help.contains("margin owner") && help.contains("margin data"), "{help}");
+    let (ok, topics, _) = run(&["help"]);
+    assert!(ok && topics.contains("handlers") && topics.contains("integrate") && topics.contains("dashboards"), "{topics}");
+    // the topics, by the files they are built from
+    let mut names: Vec<String> = std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skill/topics")).unwrap().flatten().filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".md").map(String::from)).collect();
+    names.sort();
+    assert!(names.len() >= 9 && !names.iter().any(|n| n == "feeds"), "{names:?}");
+    let mut texts = vec![("margin --help".to_string(), help.clone()), ("margin help".to_string(), topics.clone()), ("margin skill".to_string(), run(&["skill"]).1), ("margin schema".to_string(), run(&["schema"]).1), ("margin daemon --help".to_string(), run(&["daemon", "--help"]).1)];
+    for n in &names {
+        let (ok, text, err) = run(&["help", n]);
+        assert!(ok && !text.is_empty(), "margin help {n}: {err}");
+        texts.push((format!("margin help {n}"), text));
+    }
+    for (what, text) in &texts {
+        for line in text.lines() {
+            let words = line.to_lowercase();
+            assert!(!words.split(|c: char| !c.is_alphanumeric()).any(|w| w == "feed" || w == "feeds"), "{what} mentions a feed: {line}");
+        }
+    }
+    assert!(run(&["help", "feeds"]).0 == false, "the feeds topic is gone");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+fn has(cmd: &str) -> bool {
+    Command::new(cmd).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// A synthetic Claude Code transcript for the shipped providers: one turn that edits a file,
+/// with a message queued while it ran and another after it.
+fn transcript(dir: &Path) -> PathBuf {
+    let d = dir.join("projects/-work-demo");
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join("sess1.jsonl");
+    std::fs::write(
+        &p,
+        r#"{"type":"user","isSidechain":false,"cwd":"/work/demo","timestamp":"2026-11-11T10:00:00.000Z","message":{"role":"user","content":"build the parser"}}
+{"type":"assistant","isSidechain":false,"timestamp":"2026-11-11T10:00:01.000Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/work/demo/src/parse.rs"}}]}}
+{"type":"user","isSidechain":false,"timestamp":"2026-11-11T10:00:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-11T10:00:03.000Z","content":"also add a test"}
+{"type":"assistant","isSidechain":false,"timestamp":"2026-11-11T10:00:09.000Z","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-11T10:00:20.000Z","content":"and one more thing"}
+"#,
+    )
+    .unwrap();
+    p
+}
+
+/// The shipped run-once providers (`providers/queue`, `providers/turns`) work as handlers, end
+/// to end: a board made with `margin new`, `handler add … --board … --owns …`, one `margin
+/// emit`, the daemon started on demand, and the rows are in the board under the handlers'
+/// names. Nothing in margin is on a timer: the event is the only thing that ran them.
+#[test]
+fn the_shipped_providers_run_as_handlers_for_a_refresh_event() {
+    if !has("bash") || !has("jq") {
+        eprintln!("skipped: bash or jq is not on PATH");
+        return;
+    }
+    let (decoy, home) = (temp("prov-decoy"), temp("prov-home"));
+    let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
+    let providers = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../providers").canonicalize().unwrap();
+    let t = transcript(&decoy).display().to_string();
+    assert!(run(&["new", "live"], "").0);
+    for (name, owns, once) in [("queue", "q", "QUEUE_ONCE=1"), ("turns", "tn", "TURNS_ONCE=1")] {
+        let script = providers.join(name).display().to_string();
+        let (ok, out, err) = run(&["handler", "add", &format!("{name}-refresh"), "--on", "live.refresh", "--board", "live", "--owns", owns, "--", "env", once, &script, &t], "");
+        assert!(ok && out.contains(&format!("(writes live, owns {owns:?})")), "{out}{err}");
+    }
+    let seq: u64 = run(&["emit", "live.refresh"], "").1.trim().parse().unwrap();
+    let cursor = |n: &str| std::fs::read_to_string(home.join(format!("p/cursors/handler.{n}"))).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    wait_for("both providers to handle the refresh", 20, || cursor("queue-refresh") == Some(seq) && cursor("turns-refresh") == Some(seq));
+    let (_, show, _) = run(&["show", "live"], "");
+    for must in ["(handler queue-refresh owns the ids q and q-…", "(handler turns-refresh owns the ids tn and tn-…", "row q-0 [waiting] also add a test", "row q-1 [waiting] and one more thing", "section tn-1", "build the parser", "src/parse.rs"] {
+        assert!(show.contains(must), "{must}:\n{show}");
+    }
+    let (_, ls, _) = run(&["handler", "ls"], "");
+    assert!(ls.matches("· ok").count() == 2 && ls.contains("waiting 0"), "{ls}");
+    // the same event again changes nothing: the scripts print the state, not a delta
+    let rev = |s: &str| s.lines().next().unwrap_or("").to_string();
+    let seq: u64 = run(&["emit", "live.refresh"], "").1.trim().parse().unwrap();
+    wait_for("the second refresh", 20, || cursor("queue-refresh") == Some(seq) && cursor("turns-refresh") == Some(seq));
+    assert_eq!(rev(&run(&["show", "live"], "").1), rev(&show), "an unchanged source makes no revision");
+    for n in ["queue-refresh", "turns-refresh"] {
+        assert!(run(&["handler", "rm", n], "").0);
+    }
+    wait_for("the daemon to leave with its last handler", 10, || !home.join("p/daemon.pid").exists());
+    assert!(!home.join("p/feeds.json").exists() && !home.join("p/feeds").exists(), "nothing of the old runner is written");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// The shipped long-running provider (`providers/agents`) works as an outside owner: `owner
+/// add`, then its lines piped into `margin apply --as`, one write per line. margin runs
+/// nothing for it: no daemon, no handler.
+#[test]
+fn the_shipped_agents_provider_writes_as_an_outside_owner() {
+    if !has("bash") || !has("jq") {
+        eprintln!("skipped: bash or jq is not on PATH");
+        return;
+    }
+    let (decoy, home) = (temp("agents-decoy"), temp("agents-home"));
+    let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
+    transcript(&decoy);
+    assert!(run(&["new", "agents"], "").0);
+    let (ok, out, _) = run(&["owner", "add", "agents", "--board", "agents", "--owns", "ag", "--expect-every", "5m"], "");
+    assert!(ok && out.contains("margin apply agents --as agents"), "{out}");
+    // the loop's first line is the whole section; take it and stop the loop
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../providers/agents");
+    let mut ch = Command::new("bash").arg(&script).env("CLAUDE_PROJECTS", decoy.join("projects")).env("AGENTS_EVERY", "1").stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(ch.stdout.take().unwrap()), &mut line).unwrap();
+    let _ = ch.kill();
+    let _ = ch.wait();
+    assert!(line.contains("\"id\":\"ag\""), "the agents provider printed: {line}");
+    let (ok, out, err) = run(&["apply", "agents", "--as", "agents"], &line);
+    assert!(ok && out.trim() == "agents rev 2", "{out}{err}");
+    let (_, show, _) = run(&["show", "agents"], "");
+    assert!(show.contains("rev 2 by owner:agents") && show.contains("(owner agents owns the ids ag and ag-…") && show.contains("row ag-sess1") && show.contains("last: Edit · parse.rs"), "{show}");
+    // the same line again is "still the same": no revision, and the owner's last write moves
+    let (ok, out, _) = run(&["apply", "agents", "--as", "agents"], &line);
+    assert!(ok && out.trim() == "agents rev 2", "{out}");
+    assert!(run(&["owner", "ls"], "").1.contains("wrote "));
+    assert!(!home.join("p/daemon.pid").exists() && !home.join("p/handlers.json").exists(), "margin ran nothing for it");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// A store the removed feed runner once ran in keeps working with no error and no warning on
+/// any command; `margin doctor` names each old feed with the commands that replace it, and
+/// `--fix` moves the runner's files into `.archive/`.
+#[test]
+fn a_store_with_an_old_feeds_json_loads_quietly_and_doctor_migrates_it() {
+    let (decoy, home) = (temp("oldfeeds-decoy"), temp("oldfeeds-home"));
+    let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
+    assert!(run(&["new", "showcase"], r#"{"title":"S","blocks":[{"type":"section","id":"jj","title":"jj","children":[{"type":"row","id":"jj-1","text":"a change"}]}]}"#).0);
+    let dir = home.join("p");
+    // the board as the runner left it: its health line is a block type the schema no longer has
+    let path = dir.join("showcase/doc.json");
+    let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["blocks"].as_array_mut().unwrap().insert(0, serde_json::json!({"type": "feed", "id": "jj-feed", "name": "jj", "state": "stopped", "trigger": "watch .jj/repo/op_heads/heads"}));
+    std::fs::write(&path, doc.to_string()).unwrap();
+    std::fs::write(dir.join("feeds.json"), r#"{"feeds": [{"name": "jj", "cmd": ["/opt/margin/feeds/jj"], "trigger": {"kind": "watch", "paths": [".jj/repo/op_heads/heads"]}, "artifact": "showcase", "owns": "jj", "paused": true, "cwd": "/work/repo", "min_gap": 1.0, "timeout": 60.0}]}"#).unwrap();
+    std::fs::create_dir_all(dir.join("feeds")).unwrap();
+    std::fs::write(dir.join("feeds/jj.log"), "2026-11-01T00:00:00Z start\n").unwrap();
+    std::fs::write(dir.join("feeds/jj.status.json"), r#"{"state":"paused","since":"2026-11-01T00:00:00Z"}"#).unwrap();
+    // every read and write goes on as before, with nothing on stderr
+    for (argv, stdin) in [(vec!["ls"], ""), (vec!["show", "showcase"], ""), (vec!["render", "showcase", "--width", "80"], ""), (vec!["set", "showcase", "jj-1", "text=mine now"], ""), (vec!["apply", "showcase"], r#"{"type":"row","id":"jj-2","text":"another","parent":"jj"}"#), (vec!["handler", "ls"], ""), (vec!["owner", "ls"], ""), (vec!["daemon", "status", "--unit-dir", &decoy.join("units").display().to_string()], ""), (vec!["emit", "x.y"], "")] {
+        let (ok, out, err) = run(&argv, stdin);
+        assert!(ok && err.is_empty(), "margin {argv:?}: {out}{err}");
+        assert!(!out.to_lowercase().contains("feeds.json"), "margin {argv:?} talks about the old file: {out}");
+    }
+    let (_, frame, _) = run(&["render", "showcase", "--width", "80"], "");
+    assert!(frame.contains("jj") && !frame.contains("unknown component"), "the old health line still draws: {frame}");
+    let (ok, report, _) = run(&["doctor"], "");
+    for must in ["old feed jj (watch .jj/repo/op_heads/heads, paused) is no longer run", "the ids jj and jj-… in showcase are no longer owned by anyone", "cd /work/repo && margin handler add jj --on jj.refresh --board showcase --owns jj -- /opt/margin/feeds/jj", "margin --project p emit jj.refresh", "margin rm showcase jj-feed", "3 files of the removed feed runner", "margin doctor --fix"] {
+        assert!(ok && report.contains(must), "{must}:\n{report}");
+    }
+    assert!(dir.join("feeds.json").exists(), "plain doctor moves nothing");
+    let (ok, fixed, _) = run(&["doctor", "--fix"], "");
+    assert!(ok && fixed.contains("now in .archive/feed-runner-"), "{fixed}");
+    assert!(!dir.join("feeds.json").exists() && !dir.join("feeds").exists());
+    let kept = std::fs::read_dir(dir.join(".archive")).unwrap().next().unwrap().unwrap().path();
+    assert!(kept.join("feeds.json").is_file() && kept.join("feeds/jj.log").is_file() && kept.join("feeds/jj.status.json").is_file(), "{kept:?}");
+    assert!(!run(&["doctor"], "").1.contains("feed"), "nothing is left to say");
+    // the health line goes with the command the doctor printed
+    let (ok, out, err) = run(&["rm", "showcase", "jj-feed"], "");
+    assert!(ok, "{out}{err}");
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }

@@ -106,7 +106,7 @@ const ACTIONS_NOTE: &str = "list of {key, name, label?}: with this block focused
 
 const PROPOSAL: (&str, Ty, &str) = ("proposal", Ty::Any, "written by margin propose");
 
-/// The component schema, checked on every write (CLI, apply, feeds) and printed by `margin
+/// The component schema, checked on every write (CLI, apply, handlers, owners) and printed by `margin
 /// schema`, so the skill and the guide point here instead of keeping their own tables. A new
 /// type is a row here plus its drawing in components.rs.
 pub const SCHEMA: &[Kind] = &[
@@ -142,8 +142,6 @@ pub const SCHEMA: &[Kind] = &[
         fields: &[("path", Ty::Text, "the file's label in the header"), ("language", Ty::Any, "what difftastic detected"), ("adds", Ty::Num, "added lines"), ("dels", Ty::Num, "removed lines"), ("rows", Ty::Any, "the diff's lines, written by margin diff"), ("max_rows", Ty::Num, "rows shown before it is cut"), ("text", Ty::Text, "a plain-text diff when there are no rows"), PROPOSAL] },
     Kind { name: "row", about: "one line of a ledger or monitor", children: true, action: "open (click or enter, when it has a target)",
         fields: &[("text", Ty::Text, "the line; cut at the edge, in full when focused; **bold** `code` @[name]"), ("glyph", Ty::Text, "spin done (ok) fail you (bell) perm (lock) idle ended commit wc file term, or any character; fail marks the tab"), ("tone", Ty::Enum(TONES), "the glyph's color"), ("tag", Ty::Text, "a short pill before the text: a ticket, a kind"), ("tag_tone", Ty::Enum(TONES), "the pill's color"), ("aside", Ty::Text, "dim text right of the text: exit 1, 3 files"), ("aside_tone", Ty::Enum(TONES), "the aside's color"), ("since", Ty::Any, "RFC 3339 or unix seconds"), ("meta", Ty::Text, "dim text at the far right, when there is no since"), ("detail", Ty::Text, "longer text under the row: wraps, three rows at most until the row has the focus"), ("text_tone", Ty::Enum(TONES), "the text's color"), ("bold", Ty::Bool, "the whole text bold"), ("who", Ty::Text, "a name, drawn as its badge (glyph + name in the name's color) before the text"), ("target", Ty::Text, "URL or mg: token, opened on click or enter"), ("actions", Ty::Any, ACTIONS_NOTE)] },
-    Kind { name: "feed", about: "legacy: the health line of a feed, the older runner (written by the daemon; margin help feeds)", children: false, action: "",
-        fields: &[("name", Ty::Text, "the feed's name"), ("state", Ty::Text, "not registered, live, restarting, failed, paused, removed, stopped"), ("trigger", Ty::Text, "every 30s, watch <path>, stream"), ("since", Ty::Any, "RFC 3339: when the state began"), ("until", Ty::Any, "RFC 3339: the next restart (a countdown)"), ("last", Ty::Any, "RFC 3339: its last write"), ("restarts", Ty::Num, "restarts so far"), ("note", Ty::Text, "the last error, shown under the line")] },
     Kind { name: "rule", about: "a horizontal line: a break between parts of a dashboard", children: false, action: "",
         fields: &[("text", Ty::Text, "a label inset at the left")] },
     Kind { name: "table", about: "a table: a header and aligned columns; its children are tr rows", children: true, action: "",
@@ -592,7 +590,7 @@ pub struct Doc {
     /// Claude Code session ids that wrote this artifact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<String>,
-    /// Who wrote this revision: `claude`, or `feed:<name>` (the fourth owner kind).
+    /// Who wrote this revision: `claude`, the person, or `handler:<name>` / `owner:<name>`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: String,
     /// Reminders the author keeps at the bottom of the pane while this artifact is on screen
@@ -637,7 +635,7 @@ pub enum Op {
     },
     Title { value: String },
     /// Replace the component with `block.id` in place (same position, same parent), or add it to
-    /// `parent` (None = top level) when it doesn't exist yet. A feed's usual write: one line of
+    /// `parent` (None = top level) when it doesn't exist yet. A handler's usual write: one line of
     /// stdout carries the whole component, and reconcile-by-id keeps folds and focus.
     Replace {
         block: Block,
@@ -649,7 +647,7 @@ pub enum Op {
 impl Op {
     /// The ids this op writes, judged against `doc` before it applies: the target, every
     /// descendant it replaces or removes, and the parent it inserts into. Ownership is checked
-    /// against this list (store.rs), so a removal can't take a feed's components with it.
+    /// against this list (store.rs), so a removal can't take an owner's components with it.
     pub fn touched(&self, doc: &Doc) -> (Vec<String>, Option<String>) {
         fn with_desc(b: &Block, out: &mut Vec<String>) {
             out.push(b.id.clone());
@@ -976,6 +974,73 @@ impl Doc {
     }
 }
 
+/// Parse a whole `margin apply` input: one JSON value (an op, an op array, a component), or
+/// several lines in the line grammar. All lines together form one all-or-nothing write.
+pub fn parse_input(s: &str) -> Result<Vec<Op>, String> {
+    if let Ok(v) = serde_json::from_str::<Value>(s) {
+        return match v {
+            Value::Array(a) => Ok(a.into_iter().map(parse_value).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect()),
+            v => parse_value(v),
+        };
+    }
+    let mut ops = Vec::new();
+    for (i, l) in s.lines().enumerate() {
+        ops.extend(parse_line(l).map_err(|e| format!("line {}: {e}", i + 1))?);
+    }
+    Ok(ops)
+}
+
+/// One line of a handler's or an owner's output → ops. Blank lines and `#` comments are skipped.
+pub fn parse_line(line: &str) -> Result<Vec<Op>, String> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') {
+        return Ok(vec![]);
+    }
+    let v: Value = serde_json::from_str(t).map_err(|e| format!("not JSON ({e}): {}", vellum::text::truncate(t, 80)))?;
+    match v {
+        Value::Array(a) => Ok(a.into_iter().map(parse_value).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect()),
+        v => parse_value(v),
+    }
+}
+
+/// One value of the line grammar. Beyond the stored op shapes: `set` takes `fields` (several at
+/// once, null deletes), and a bare component takes `parent` (where to add it when it's new).
+fn parse_value(mut v: Value) -> Result<Vec<Op>, String> {
+    // a writer may stamp every value with the format version; only 1 exists
+    if let Some(m) = v.as_object_mut() {
+        match m.remove("v") {
+            None => {}
+            Some(n) if n == 1 => {}
+            Some(n) => return Err(format!("version {n}: this margin reads v 1")),
+        }
+    }
+    if v.get("op").is_some() {
+        if v["op"] == "set" {
+            if let Some(Value::Object(fields)) = v.get("fields").cloned() {
+                let id = v.get("id").and_then(|x| x.as_str()).ok_or("set needs an id")?.to_string();
+                if fields.is_empty() {
+                    return Err("set with empty fields".into());
+                }
+                return Ok(fields.into_iter().map(|(field, value)| Op::Set { id: id.clone(), field, value }).collect());
+            }
+        }
+        return serde_json::from_value(v).map(|o| vec![o]).map_err(|e| format!("bad op: {e}"));
+    }
+    if v.get("type").is_some() {
+        let parent = match v.as_object_mut().and_then(|m| m.remove("parent")) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(p)) => Some(p),
+            Some(p) => return Err(format!("parent must be a component id, got {p}")),
+        };
+        let block: Block = serde_json::from_value(v).map_err(|e| format!("bad component: {e}"))?;
+        if block.id.is_empty() {
+            return Err("a whole component needs an id (it replaces the component with that id)".into());
+        }
+        return Ok(vec![Op::Replace { block, parent }]);
+    }
+    Err("each line is an op ({\"op\":…}), an array of ops, or a component ({\"type\":…,\"id\":…})".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1079,7 +1144,7 @@ mod tests {
         }
         let j = schema_json(None).unwrap();
         assert_eq!(j["document"]["fields"]["hints"]["type"], "list");
-        assert!(j["types"]["feed"]["fields"]["state"]["note"].as_str().unwrap().contains("paused"));
+        assert!(j["types"].get("feed").is_none(), "the feed health block left the schema with the feed runner");
         assert!(schema_json(Some("document")).unwrap()["document"]["fields"]["title"].is_object());
         assert!(schema_json(Some("todo")).unwrap().get("document").is_none());
         // a document with each of the described fields is one the store's envelope takes
@@ -1194,5 +1259,22 @@ mod tests {
         e.apply(&Op::Set { id: "t1".into(), field: "text".into(), value: json!("changed") }).unwrap();
         assert_eq!(d.find("steps").unwrap().hash(), e.find("steps").unwrap().hash());
         assert_ne!(d.find("t1").unwrap().hash(), e.find("t1").unwrap().hash());
+    }
+
+    #[test]
+    fn lines_parse_as_ops_arrays_or_components() {
+        assert!(matches!(parse_line(r#"{"op":"set","id":"jj-1","field":"text","value":"x"}"#).unwrap()[..], [Op::Set { .. }]));
+        assert_eq!(parse_line(r#"[{"op":"rm","id":"a"},{"op":"rm","id":"b"}]"#).unwrap().len(), 2);
+        assert!(matches!(&parse_line(r#"{"type":"row","id":"jj-1","text":"hi"}"#).unwrap()[..], [Op::Replace { block, .. }] if block.id == "jj-1"));
+        assert!(parse_line("").unwrap().is_empty());
+        assert!(parse_line("# comment").unwrap().is_empty());
+        assert!(parse_line("hello").is_err());
+        assert!(parse_line(r#"{"type":"row","text":"no id"}"#).is_err());
+        // apply's extras: multi-field set, a component's parent, several lines as one write
+        assert_eq!(parse_line(r#"{"op":"set","id":"t1","fields":{"a":"x","b":null}}"#).unwrap().len(), 2);
+        assert!(matches!(&parse_line(r#"{"type":"todo","id":"t9","parent":"steps"}"#).unwrap()[..], [Op::Replace { parent: Some(p), block }] if p == "steps" && !block.f.contains_key("parent")));
+        assert_eq!(parse_input("{\"op\":\"rm\",\"id\":\"a\"}\n# c\n[{\"op\":\"rm\",\"id\":\"b\"}]").unwrap().len(), 2);
+        assert!(parse_input("{\"op\":\"rm\",\"id\":\"a\"}\nnope").unwrap_err().starts_with("line 2"));
+        assert!(parse_line(r#"{"what":1}"#).is_err());
     }
 }

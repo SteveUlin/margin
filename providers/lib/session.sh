@@ -1,11 +1,11 @@
-# Sourced by the transcript feeds (queue, turns): resolve which Claude Code transcript to read.
+# Sourced by the transcript providers (queue, turns): resolve which Claude Code transcript to read.
 #
 #   session_file [SESSION]   prints the transcript path, or nothing
 #
 # SESSION is a session id or a path to a .jsonl. Without one, the newest transcript of the
-# project for the feed's working directory: Claude Code keeps them in
+# project for the script's working directory: Claude Code keeps them in
 # $CLAUDE_PROJECTS/<cwd with every non-alphanumeric char turned into "-">/<session>.jsonl.
-# "Newest" follows you to a new session after a restart without re-registering the feed.
+# "Newest" follows you to a new session after a restart without re-registering the handler.
 ROOT=${CLAUDE_PROJECTS:-$HOME/.claude/projects}
 session_file() {
   local s=${1:-}

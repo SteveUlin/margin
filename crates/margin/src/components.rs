@@ -70,7 +70,6 @@ icons! {
     FILE = "\u{f15b}" => "▤",
     STOP = "\u{f28d}" => "□",
     PAUSE = "\u{f04c}" => "‖",
-    FEED = "\u{f09e}" => "≋",
     MOON = "\u{f186}" => "☾",
     TERM = "\u{f120}" => "❯",
     SKIP = "\u{f05e}" => "⊘",
@@ -2077,59 +2076,14 @@ fn draw_runs(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     Drawn { grid: Some(g), ..Default::default() }
 }
 
-/// A feed's health line (written by the daemon, feed.rs `Worker::write_health`): what it is,
-/// whether it's live, and when it last wrote; a restart counts down; an error shows under it.
+/// A feed's health line: what it is
 fn draw_feed(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
     let p = cx.p;
     let g0 = p.bg0;
-    let state = b.s("state");
-    let note = b.opt("note");
-    let mut g = new_grid(w, 1 + note.is_some() as u16, g0);
-    let mut tick = None;
-    let until = b.opt("until").and_then(parse_rfc3339).map(|u| u - cx.wall);
-    let (gl, col, label) = match state {
-        "live" | "running" => (icon::FEED.to_string(), p.green, "live".to_string()),
-        "restarting" => {
-            tick = Some(0.1);
-            let left = until.map(|s| s.max(0.0).ceil() as i64).unwrap_or(0);
-            (parts::spinner(cx.now, cx.m).to_string(), p.orange, if left > 0 { format!("crashed · restart in {left}s") } else { "restarting".into() })
-        }
-        "failed" => (icon::BLOCKED.into(), p.red, "failed".into()),
-        "paused" => (icon::PAUSE.into(), p.grey1, "paused".into()),
-        "removed" => (icon::STOP.into(), p.grey0, "removed".into()),
-        s => (icon::STOP.into(), p.grey0, if s.is_empty() { "starting".into() } else { s.to_string() }),
-    };
-    let restarts = b.num("restarts").unwrap_or(0.0) as i64;
-    let right_s = match b.opt("last").and_then(parse_rfc3339) {
-        Some(t) => {
-            let s = cx.wall - t;
-            tick = Some(tick.unwrap_or(age_tick(s)).min(age_tick(s)));
-            format!("wrote {}", age_short(s))
-        }
-        None => "no data yet".into(),
-    };
-    let rx = w.saturating_sub(width(&right_s) as u16 + 1);
-    put(&mut g, ind, 0, &gl, Style::fg(col).on(g0).bold());
-    let mut x = put(&mut g, ind + TX, 0, "feed", Style::fg(p.grey1).on(g0));
-    x = put(&mut g, x + 1, 0, &truncate(b.s("name"), 16), Style::fg(p.grey2).on(g0).bold());
-    x = put(&mut g, x + 1, 0, "·", Style::fg(p.grey0).on(g0));
-    let lroom = rx.saturating_sub(x + 3) as usize;
-    x = put(&mut g, x + 1, 0, &truncate(&label, lroom.max(1)), Style::fg(col).on(g0).bold_if(state != "live"));
-    let trig = b.s("trigger");
-    let mut extra = trig.to_string();
-    if restarts > 0 {
-        extra = format!("{extra} · {restarts} restart{}", if restarts == 1 { "" } else { "s" });
-    }
-    let room = rx.saturating_sub(x + 4) as usize;
-    if room > 6 && !extra.is_empty() {
-        put(&mut g, x + 1, 0, "·", Style::fg(p.grey0).on(g0));
-        put(&mut g, x + 3, 0, &truncate(&extra, room), Style::fg(p.grey0).on(g0));
-    }
-    put(&mut g, rx, 0, &right_s, Style::fg(p.grey1).on(g0));
-    if let Some(n) = note {
-        put(&mut g, ind + TX, 1, &truncate(n, w.saturating_sub(ind + TX + 1) as usize), Style::fg(p.red).on(g0).italic());
-    }
-    Drawn { grid: Some(g), tick, ..Default::default() }
+    let mut g = new_grid(w, 1, g0);
+    let x = put(&mut g, ind + TX, 0, "feed", Style::fg(p.grey1).on(g0));
+    put(&mut g, x + 1, 0, &truncate(b.s("name"), 16), Style::fg(p.grey1).on(g0));
+    Drawn { grid: Some(g), ..Default::default() }
 }
 
 fn draw_image(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {

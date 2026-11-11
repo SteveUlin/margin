@@ -8,7 +8,7 @@
 //! The contract (`margin help handlers` states it for script authors):
 //! - started by argv exec with no shell, in the directory it was registered from;
 //! - stdin: the pending matching events since the handler's cursor, one JSON object per line;
-//! - stdout: JSON lines, each an op or a component for its board (the feed line grammar), a
+//! - stdout: JSON lines, each an op or a component for its board (the line grammar of `margin apply`), a
 //!   toast, or `{"emit": "name", "value": …}`;
 //! - exit 0: the ops apply, the emits are appended and the cursor moves past the last event it
 //!   was given, in one locked step (`Store::handler_commit`);
@@ -19,11 +19,11 @@
 //! Delivery is therefore at-least-once: a handler must be safe to run twice on one event, and
 //! every event carries its `seq` to dedupe on.
 //!
-//! The feed runner (feed.rs) is older and separate; this file shares its log, its stop flag and
-//! its backoff, and nothing of its triggers.
+//! This file also holds what one run needs around it: the per-handler log, the stop flag the
+//! daemon raises, and the retry backoff.
 
-use crate::doc::Op;
-use crate::feed::{fmt_secs, parse_line, toast_line, Backoff, Ctl, Log};
+use crate::doc::{parse_line, Op};
+use crate::owner::fmt_secs;
 use crate::store::{write_atomic, Event, Store, Writer};
 use crate::util::{epoch_now, now_rfc3339, valid_id};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -285,6 +286,98 @@ pub fn settle_status(s: &mut Status) -> bool {
     s.pid = 0;
     s.last_outcome = "interrupted".into();
     true
+}
+
+/// A handler's toast line, `{"toast": "tests passed", "level": "ok", "at": "ci-1", "ttl": 8}`: sent
+/// beside the document (toast.rs), never an op. True when the line was one.
+pub fn toast_line(st: &Store, art: &str, handler: &str, line: &str, log: &Log) -> bool {
+    let t = line.trim();
+    if !t.starts_with('{') || !t.contains("\"toast\"") {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(t) else { return false };
+    let Some(text) = v["toast"].as_str() else { return false };
+    if let Err(e) = crate::toast::send(st, art, text, v["level"].as_str().unwrap_or("info"), v["at"].as_str().unwrap_or(""), v["ttl"].as_f64(), &format!("handler:{handler}")) {
+        log.line(&format!("bad toast: {e}"));
+    }
+    true
+}
+
+/// Restart backoff: 1, 2, 4 … 60 s after consecutive failures; a run that stayed up for
+/// `healthy` seconds wipes the slate, so a command that fails once a day is retried in 1 s.
+#[derive(Clone, Debug, Default)]
+pub struct Backoff {
+    pub fails: u32,
+}
+
+impl Backoff {
+    pub const MAX: f64 = 60.0;
+    pub fn delay(&self) -> f64 {
+        if self.fails == 0 {
+            0.0
+        } else {
+            2f64.powi(self.fails.min(16) as i32 - 1).min(Self::MAX)
+        }
+    }
+    /// Record a run's end; returns how long to wait before the next start.
+    pub fn record(&mut self, ok: bool, ran_for: f64, healthy: f64) -> f64 {
+        if ran_for >= healthy {
+            self.fails = 0;
+        }
+        if ok {
+            self.fails = 0;
+        } else {
+            self.fails += 1;
+        }
+        self.delay()
+    }
+}
+
+/// Per-handler log: daemon notes plus the command's stderr, capped at 512 KB (one rotation).
+#[derive(Clone)]
+pub struct Log {
+    path: PathBuf,
+    echo: bool,
+    lock: Arc<Mutex<()>>,
+}
+
+impl Log {
+    pub fn new(path: PathBuf, echo: bool) -> Log {
+        Log { path, echo, lock: Arc::new(Mutex::new(())) }
+    }
+    pub fn line(&self, s: &str) {
+        let _g = self.lock.lock();
+        if self.echo {
+            eprintln!("{s}");
+        }
+        if let Some(d) = self.path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if std::fs::metadata(&self.path).map(|m| m.len() > 512 * 1024).unwrap_or(false) {
+            let _ = std::fs::rename(&self.path, self.path.with_extension("log.1"));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+            let _ = writeln!(f, "{} {s}", now_rfc3339());
+        }
+    }
+}
+
+/// Shared between the daemon and one worker.
+#[derive(Default)]
+pub struct Ctl {
+    pub stop: AtomicBool,
+    /// Why it was stopped: "removed", "paused", "stopped" (daemon exit), "restart" (job changed).
+    pub reason: Mutex<String>,
+}
+
+impl Ctl {
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || crate::daemon::exiting()
+    }
+    pub fn stop(&self, why: &str) {
+        *self.reason.lock().unwrap() = why.into();
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 /// One line of a handler's stdout that is an emit: `{"emit": "name", "value": …}`.
@@ -886,5 +979,15 @@ mod tests {
         let mut w = worker(&st, &slow);
         assert_eq!(w.exec(&evs, false, false).unwrap_err(), "timed out after 0.3s");
         std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    #[test]
+    fn backoff_doubles_caps_and_forgives() {
+        let mut b = Backoff::default();
+        let ds: Vec<f64> = (0..8).map(|_| b.record(false, 0.5, 30.0)).collect();
+        assert_eq!(ds, vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]);
+        // a run that stayed up past `healthy` resets: the next crash waits 1 s again
+        assert_eq!(b.record(false, 45.0, 30.0), 1.0);
+        assert_eq!(b.record(true, 0.1, 30.0), 0.0);
     }
 }

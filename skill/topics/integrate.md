@@ -111,6 +111,24 @@ A program that already runs on its own schedule can write its rows directly, as 
 owner (below): `./fetch.sh | margin apply reviews --as fetcher --project boards` from cron.
 margin then runs nothing, and `--expect-every` shows the rows stale if the cron job stops.
 
+## The shipped providers
+
+Four scripts (bash + jq) come with margin, in `{{providers}}`. Each one's header has its
+registration; none is on a schedule until you give it one.
+
+```sh
+# run once per event: a handler, and whatever owns the schedule emits the event
+margin handler add jj-refresh    --on changes.refresh --board changes --owns jj -- {{providers}}/jj
+margin handler add queue-refresh --on live.refresh    --board live    --owns q  -- env QUEUE_ONCE=1 {{providers}}/queue
+margin handler add turns-refresh --on live.refresh    --board live    --owns tn -- env TURNS_ONCE=1 {{providers}}/turns
+# a loop of its own: an outside owner, one write per line it prints
+margin owner add agents --board agents --owns ag --expect-every 5m
+{{providers}}/agents | while read -r line; do margin apply agents --as agents <<<"$line"; done
+```
+
+`jj` is the current repository's recent changes, `queue` and `turns` read one Claude Code
+session's transcript, `agents` watches every session on the machine. All four only read.
+
 ## Publish numbers for a board to draw
 
 Values that change often (a rate, a latency, a queue length) go in a dataset, not in the board: a

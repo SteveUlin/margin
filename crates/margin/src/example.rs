@@ -13,7 +13,8 @@ pub struct Example {
     /// One line for the list: what the board shows and which components it uses.
     pub about: &'static str,
     pub artifact: &'static str,
-    pub feed: &'static str,
+    /// The script that fetches its rows: a handler's command.
+    pub script: &'static str,
     pub data: &'static str,
     /// The script's output for `data`: the handler's parts of `artifact`, line for line.
     pub out: &'static str,
@@ -32,7 +33,7 @@ macro_rules! example {
             name: $name,
             about: $about,
             artifact: include_str!(concat!("../../../skill/examples/", $name, ".json")),
-            feed: include_str!(concat!("../../../skill/examples/", $name, ".fetch.sh")),
+            script: include_str!(concat!("../../../skill/examples/", $name, ".fetch.sh")),
             data: include_str!(concat!("../../../skill/examples/", $name, ".data.json")),
             out: include_str!(concat!("../../../skill/examples/", $name, ".fetch.out")),
             owns: $owns,
@@ -171,7 +172,7 @@ impl Example {
 mod tests {
     use super::*;
     use crate::doc::Doc;
-    use crate::feed::parse_line;
+    use crate::doc::parse_line;
     use crate::store::tests::temp_store;
     use crate::store::Writer;
 
@@ -199,10 +200,10 @@ mod tests {
             assert!(l.contains(&format!("  {} ", e.name)) && l.contains(e.about), "{}", e.name);
             assert!(e.notes().contains(&format!("margin example {0} | margin new {0}", e.name)));
             assert!(e.notes().contains(&format!("--owns {} ", e.owns)));
-            // the steps teach the handler and the outside schedule, and nothing of the legacy runner
+            // the steps teach the handler and the outside schedule: margin has no runner of its own
             let notes = e.notes();
             assert!(notes.contains(&format!("margin handler add {0}-refresh --on {0}.refresh --board {0}", e.name)) && notes.contains(&format!("margin emit {}.refresh --project <project>", e.name)), "{notes}");
-            assert!(!notes.contains("margin feed") && !e.feed.contains("margin feed") && e.feed.contains(&format!("margin handler add {}-refresh", e.name)), "{}", e.name);
+            assert!(!notes.to_lowercase().contains("feed") && !e.script.to_lowercase().contains("feed") && e.script.contains(&format!("margin handler add {}-refresh", e.name)), "{}", e.name);
         }
         assert!(get("nope").is_none());
     }
@@ -221,16 +222,16 @@ mod tests {
         }
     }
 
-    /// The feed's sample output is written as the feed (so every id sits inside the prefix it
-    /// owns), into an empty artifact and onto the example artifact. Onto the artifact it changes
-    /// nothing: the artifact already holds exactly what the feed prints.
+    /// The script's sample output is written as its handler (so every id sits inside the prefix
+    /// it owns), into an empty board and onto the example board. Onto the board it changes
+    /// nothing: the board already holds exactly what the script prints.
     #[test]
-    fn every_feed_output_applies_as_the_feed() {
+    fn every_script_output_applies_as_its_handler() {
         for e in EXAMPLES {
             let st = temp_store();
-            let w = Writer::Feed { name: e.name.into(), owns: e.owns.into() };
+            let w = Writer::Named { by: format!("handler:{}-refresh", e.name), owns: e.owns.into() };
             let g = groups(e, e.out);
-            assert!(!g.is_empty(), "{}: the feed prints nothing", e.name);
+            assert!(!g.is_empty(), "{}: the script prints nothing", e.name);
             st.create(Doc::empty("empty")).unwrap();
             let (rev, errs) = st.feed_write("empty", &g, &w, &[]);
             assert!(rev.is_some() && errs.is_empty(), "{} into an empty board: {errs:?}", e.name);
@@ -246,7 +247,7 @@ mod tests {
     /// output. (A build sandbox without jq skips the run; the stored output is still held to the
     /// schema above.)
     #[test]
-    fn every_feed_script_prints_its_stored_output() {
+    fn every_script_prints_its_stored_output() {
         let has = |c: &str| std::process::Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
         if !has("bash") || !has("jq") {
             eprintln!("skipped: bash or jq is not on PATH");
@@ -255,7 +256,7 @@ mod tests {
         for e in EXAMPLES {
             let dir = std::env::temp_dir().join(format!("margin-example-{}-{}", std::process::id(), e.name));
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("fetch.sh"), e.feed).unwrap();
+            std::fs::write(dir.join("fetch.sh"), e.script).unwrap();
             std::fs::write(dir.join("data.json"), e.data).unwrap();
             let o = std::process::Command::new("bash").arg(dir.join("fetch.sh")).arg(dir.join("data.json")).output().unwrap();
             assert!(o.status.success(), "{}: {}", e.name, String::from_utf8_lossy(&o.stderr));
@@ -313,7 +314,7 @@ mod tests {
     #[test]
     fn examples_name_no_one() {
         for e in EXAMPLES {
-            for (what, s) in [("json", e.artifact), ("script", e.feed), ("data", e.data), ("notes", &e.notes()[..])] {
+            for (what, s) in [("json", e.artifact), ("script", e.script), ("data", e.data), ("notes", &e.notes()[..])] {
                 let low = s.to_lowercase();
                 assert!(!low.contains("sulin") && !low.contains("/home/"), "{}.{what}", e.name);
             }

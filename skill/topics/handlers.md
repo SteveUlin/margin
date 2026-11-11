@@ -160,5 +160,3 @@ margin handler run <name> [--events FILE] [--dry-run]      # once, in the foregr
 - `add` refuses a name that exists and `set` one that doesn't, as everywhere in margin.
 - Rows a handler owns are read-only for you ("belongs to handler `x`"); ask {{user}} before
   `margin handler rm x`.
-- `margin feed`, the older runner with its own timer, is legacy: `margin help feeds` says what
-  replaces each of its triggers.

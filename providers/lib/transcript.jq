@@ -1,4 +1,4 @@
-# Shared by the transcript feeds. Input: one transcript entry per line (raw), read with -R.
+# Shared by the transcript providers. Input: one transcript entry per line (raw), read with -R.
 
 # entries of the main thread, in file order
 def entries: [inputs | fromjson? // empty | select(type == "object" and (.isSidechain | not))];

@@ -4,12 +4,9 @@
 # Run it as the handler of a refresh event, registered from the repo's root, and let whatever
 # owns the schedule emit that event (margin help handlers, margin help integrate):
 #   margin new changes
-#   margin handler add jj-refresh --on changes.refresh --board changes --owns jj -- /path/to/margin/feeds/jj
+#   margin handler add jj-refresh --on changes.refresh --board changes --owns jj -- /path/to/margin/providers/jj
 #   crontab -e:   * * * * *  /path/to/margin emit changes.refresh --project <project>
 #   or on every jj operation:  watchexec -w .jj/repo/op_heads/heads -- margin emit changes.refresh
-#
-# Legacy, the frozen `margin feed` runner (margin help feeds):
-#   margin feed add jj --watch .jj/repo/op_heads/heads --board changes -- /path/to/margin/feeds/jj
 #
 # Prints one line: the whole `jj` section (rows `jj-c-<change>`, plus a `jj-wc` section listing the
 # working copy's files), which margin applies as a replace of the component with id "jj".
@@ -18,10 +15,10 @@
 # records an operation: a script that wrote ops would retrigger a watch on op_heads forever. The cost is
 # that unsnapshotted edits show up at the next jj command anyone runs, which the section note says.
 #
-# Env: JJ_FEED_REVS (revset, default: the last 8 ancestors of @, without the root), JJ_FEED_PREFIX (default "jj").
+# Env: JJ_REVS (revset, default: the last 8 ancestors of @, without the root), JJ_PREFIX (default "jj").
 set -euo pipefail
-P=${JJ_FEED_PREFIX:-jj}
-REVS=${JJ_FEED_REVS:-'ancestors(@, 8) ~ root()'}
+P=${JJ_PREFIX:-jj}
+REVS=${JJ_REVS:-'ancestors(@, 8) ~ root()'}
 root=$(jj root --ignore-working-copy)
 J=(jj --ignore-working-copy --no-pager --color never)
 

@@ -1,13 +1,13 @@
 //! Owners: programs margin does not run, registered as the writers of an id prefix on a board.
 //!
 //! `margin owner add NAME --board B --owns PREFIX` is a claim and nothing else: the ids PREFIX
-//! and PREFIX-… on B are the owner's, exactly as a feed's or a handler's are theirs (one claims
+//! and PREFIX-… on B are the owner's, exactly as a handler's are its own (one claims
 //! table: `Store::claims`), and the program writes them with `margin apply B --as NAME`, as often
 //! as it likes. margin cannot say whether a program it does not run is healthy; it can say how
 //! long ago the owner last wrote. With `--expect-every` an owner whose last write is older than
 //! that is stale: the pane marks its rows, the tab gets the failure mark, `owner ls` says so.
 
-use crate::store::{write_atomic, Claim, Store};
+use crate::store::{Claim, Store};
 use crate::util::valid_id;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -54,8 +54,26 @@ pub fn overdue(every: Option<f64>, last: Option<f64>, added: Option<f64>, now: f
     if now - at <= every {
         return None;
     }
-    let every = crate::feed::fmt_secs(every);
+    let every = fmt_secs(every);
     Some(if wrote { format!("last updated {}, expected every {every}", crate::util::ago(now - at)) } else { format!("never updated, expected every {every}") })
+}
+
+/// A duration in the fewest words: `90s`, `10m`, `2h`, `0.3s`.
+pub fn fmt_secs(s: f64) -> String {
+    if s >= 3600.0 && s % 3600.0 == 0.0 {
+        format!("{}h", s / 3600.0)
+    } else if s >= 60.0 && s % 60.0 == 0.0 {
+        format!("{}m", s / 60.0)
+    } else if s.fract() == 0.0 {
+        format!("{}s", s as i64)
+    } else {
+        format!("{s:.1}s")
+    }
+}
+
+/// Do two prefixes claim any common id? (`*` overlaps everything.)
+pub fn overlaps(a: &str, b: &str) -> bool {
+    a == "*" || b == "*" || a.starts_with(b) || b.starts_with(a)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -164,7 +182,7 @@ mod tests {
     }
 
     fn block(v: serde_json::Value) -> Vec<Op> {
-        crate::feed::parse_line(&v.to_string()).unwrap()
+        crate::doc::parse_line(&v.to_string()).unwrap()
     }
 
     /// An owner is a claim: it writes its prefix with `apply_as`, nobody else does, it writes

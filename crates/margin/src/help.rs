@@ -3,8 +3,8 @@
 //! `skill/SKILL.md` is the always-loaded part (what the pane is for, its shape, the turn loop, the
 //! rules); `skill/topics/*.md` is reference Claude reads when it first needs a feature
 //! (`margin help <topic>`). Both are templates: no one's name or paths are in them, and `render`
-//! fills `{{user}}` (the config's `user_name`), `{{bin}}` (this binary) and `{{feeds}}` (the
-//! example feed scripts) on the way out, so one source serves any machine and any user.
+//! fills `{{user}}` (the config's `user_name`), `{{bin}}` (this binary) and `{{providers}}` (the
+//! shipped provider scripts) on the way out, so one source serves any machine and any user.
 
 use std::path::{Path, PathBuf};
 
@@ -15,31 +15,32 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("dashboards", include_str!("../../../skill/topics/dashboards.md")),
     ("handlers", include_str!("../../../skill/topics/handlers.md")),
     ("integrate", include_str!("../../../skill/topics/integrate.md")),
+    ("contract", include_str!("../../../skill/topics/contract.md")),
     ("lifecycle", include_str!("../../../skill/topics/lifecycle.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
     ("graphs", include_str!("../../../skill/topics/graphs.md")),
     ("diagrams", include_str!("../../../skill/topics/diagrams.md")),
     ("proposals", include_str!("../../../skill/topics/proposals.md")),
     ("subagents", include_str!("../../../skill/topics/subagents.md")),
-    ("feeds", include_str!("../../../skill/topics/feeds.md")),
 ];
 
 /// What the templates' placeholders stand for on this machine.
 pub struct Ctx {
     pub user: String,
     pub bin: String,
-    pub feeds: String,
+    /// The directory of the shipped provider scripts (jj, queue, turns, agents).
+    pub providers: String,
 }
 
 impl Ctx {
-    /// For this process: the configured name, the running binary, the feeds beside it.
+    /// For this process: the configured name, the running binary, the provider scripts beside it.
     pub fn here() -> Ctx {
         Ctx::new(crate::who::name(), &bin_path())
     }
 
     pub fn new(user: &str, bin: &Path) -> Ctx {
         let user = if user.trim().is_empty() { "the user" } else { user.trim() };
-        Ctx { user: user.into(), bin: bin.display().to_string(), feeds: feeds_dir(bin) }
+        Ctx { user: user.into(), bin: bin.display().to_string(), providers: providers_dir(bin) }
     }
 }
 
@@ -66,22 +67,22 @@ fn undeleted(exe: PathBuf) -> PathBuf {
     }
 }
 
-/// Where the example feed scripts live for a binary: a checkout (`target/<profile>/margin` →
-/// `feeds/`) or a nix install (`bin/margin` → `share/margin/feeds`).
-fn feeds_dir(bin: &Path) -> String {
+/// Where the shipped provider scripts live for a binary: a checkout (`target/<profile>/margin` →
+/// `providers/`) or a nix install (`bin/margin` → `share/margin/providers`).
+fn providers_dir(bin: &Path) -> String {
     let dir = bin.parent().unwrap_or(Path::new("."));
-    for rel in ["../../feeds", "../share/margin/feeds"] {
+    for rel in ["../../providers", "../share/margin/providers"] {
         let p = dir.join(rel);
         if p.join("jj").is_file() {
             return p.canonicalize().unwrap_or(p).display().to_string();
         }
     }
-    "<margin checkout>/feeds".into()
+    "<margin checkout>/providers".into()
 }
 
 /// A template with its placeholders filled.
 pub fn render(text: &str, c: &Ctx) -> String {
-    text.replace("{{user}}", &c.user).replace("{{bin}}", &c.bin).replace("{{feeds}}", &c.feeds)
+    text.replace("{{user}}", &c.user).replace("{{bin}}", &c.bin).replace("{{providers}}", &c.providers)
 }
 
 pub fn topic(name: &str) -> Option<&'static str> {
@@ -340,26 +341,23 @@ mod tests {
         assert!(crate::doc::kind("todo").unwrap().fields.iter().any(|f| f.0 == "after" && f.2.ends_with(mark)));
     }
 
-    /// The feed runner is legacy and off the main path: its topic is a short page that says so
-    /// and names what replaces each trigger, and nothing else teaches it. The skill and every
-    /// other topic keep a board current with a handler, an owner or a dataset.
+    /// One way keeps a board current: a handler run by an event, an outside owner, or a dataset.
+    /// The feed runner is gone, with its topic; no topic and no line of the skill names it, and
+    /// the three topics that explain keeping a board current each say where the schedule lives.
     #[test]
-    fn feeds_are_legacy_and_off_the_main_path() {
-        let f = topic("feeds").unwrap();
-        assert!(f.starts_with("# feeds: legacy: ") && f.lines().count() <= 25, "a short page titled as legacy ({} lines)", f.lines().count());
-        for must in ["frozen", "will be removed", "`--every 30s`", "`--watch <path>`", "`--stream`", "a cron line or a systemd timer", "`watchexec`, `entr` or a systemd path unit", "follows the event stream", "margin emit <board>.refresh", "margin handler add", "margin owner add", "margin data append", "margin help handlers", "margin help integrate", "margin feed rm"] {
-            assert!(f.contains(must), "feeds doesn't say {must:?}");
-        }
-        for gone in ["margin feed add", "margin feed run", "margin feed logs", "--min-gap", "health line is"] {
-            assert!(!f.contains(gone), "feeds still teaches {gone:?}");
-        }
-        for (name, text) in TOPICS.iter().filter(|(n, _)| *n != "feeds") {
+    fn no_topic_mentions_a_feed() {
+        assert!(topic("feeds").is_none());
+        for (name, text) in std::iter::once(&("skill", SKILL)).chain(TOPICS) {
             let lines: Vec<&str> = text.lines().filter(|l| l.to_lowercase().contains("feed")).collect();
-            let pointers = lines.iter().filter(|l| l.contains("legacy") && l.contains("margin help feeds")).count();
-            assert!(lines.len() == pointers && pointers <= 1, "{name} still talks about feeds: {lines:?}");
+            assert!(lines.is_empty(), "{name} still talks about feeds: {lines:?}");
         }
-        let lines: Vec<&str> = SKILL.lines().filter(|l| l.to_lowercase().contains("feed")).collect();
-        assert!(lines.len() == 1 && lines[0].starts_with("- `feeds`: legacy"), "the skill names feeds once, as legacy: {lines:?}");
+        for (name, must) in [("handlers", "it has no timer and watches no file"), ("integrate", "cron"), ("dashboards", "margin handler add")] {
+            assert!(topic(name).unwrap().contains(must), "{name} doesn't say {must:?}");
+        }
+        // the shipped provider scripts are found beside the binary, in a checkout or an install
+        let c = Ctx::here();
+        assert!(c.providers.ends_with("/providers"), "{}", c.providers);
+        assert_eq!(render("{{providers}}/jj", &ctx("")), "<margin checkout>/providers/jj");
     }
 
     /// Datasets are documented where the binary sends a reader: the command's help names the

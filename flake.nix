@@ -56,7 +56,7 @@
           # the demo finds its assets next to the source tree; point it at the installed copy
           postInstall = ''
             mkdir -p $out/share/margin
-            cp -r assets zellij skill hooks feeds units $out/share/margin/
+            cp -r assets zellij skill hooks providers $out/share/margin/
             wrapProgram $out/bin/margin \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.difftastic ]} --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.jq pkgs.jujutsu ]} \
               --set-default MARGIN_ASSETS $out/share/margin/assets/demo

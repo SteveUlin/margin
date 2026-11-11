@@ -1,6 +1,6 @@
 //! margin: live artifacts beside the chat. One binary, four roles: the CLI Claude calls through
 //! its Bash tool, the renderer in a pane (`margin view`), the selection dispatcher Zellij pipes
-//! copies into (`margin select`), and the feed supervisor (`margin daemon`).
+//! copies into (`margin select`), and the event dispatcher (`margin daemon`).
 
 mod agents;
 mod app;
@@ -15,7 +15,6 @@ mod diffblock;
 mod doc;
 mod doctor;
 mod example;
-mod feed;
 mod graph;
 mod handler;
 mod help;
@@ -110,9 +109,6 @@ parked (not part of the documented set; may be removed):
   margin image <board> <id> <png> [--alt A] [--rows N]                  a PNG in the pane
   margin demo live [--speed X]                                          plays a turn into the demo board
 
-legacy (frozen; a handler, an owner or a dataset replaces it: margin help feeds):
-  margin feed add|ls|rm|pause|resume|logs|run   the older runner: scripts on margin's own timer, file watch or stream
-
 global, before or after the command: --home DIR  --project NAME  --by you|claude|NAME
 margin <command> --help for each
 ";
@@ -147,7 +143,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "add", help: "margin add <board> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the board must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
     Cmd { name: "set", help: "margin set <board> <id> <field> <value> [--base-rev N]\nmargin set <board> <id> <field>=<value>... [--base-rev N]\n  change: set fields of a component that exists (a missing id is refused; create it with margin add); text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
-    Cmd { name: "rm", help: "margin rm <board> <id> [--base-rev N] [--json]\n  change: remove a component that exists, and its children\nmargin rm <board> [--yes]\n  remove a whole board. Without --yes it prints what would go (title, rev, the panes\n  showing it, any legacy feed registered on it) and removes nothing. With --yes the board moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it) and a legacy feed on it is unregistered. Panes are left\n  open: margin close <board>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
+    Cmd { name: "rm", help: "margin rm <board> <id> [--base-rev N] [--json]\n  change: remove a component that exists, and its children\nmargin rm <board> [--yes]\n  remove a whole board. Without --yes it prints what would go (title, rev, the panes\n  showing it) and removes nothing. With --yes the board moves to\n  the project's .archive/ directory (the store never deletes; margin gc archives the same way,\n  and moving the directory back restores it). Panes are left\n  open: margin close <board>\n", flags: &["--base-rev", "--json", "--yes"], max_pos: Some(2) },
     Cmd { name: "move", help: "margin move <board> <id> --before X|--after X|--parent P [--base-rev N] [--json]\n  change: move a component that exists\n", flags: &["--before", "--after", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
     Cmd { name: "title", help: "margin title <board> <title> [--base-rev N]\n  change: rename a board that exists (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
     Cmd { name: "hints", help: "margin hints <board> [text...] [--json]\n  change: the reminders of a board that exists, a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
@@ -177,15 +173,14 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "daemon", help: DAEMON_HELP, flags: &["--stay", "--unit-dir", "--json"], max_pos: Some(1) },
-    Cmd { name: "doctor", help: "margin doctor [--fix] [--days N]\n  what was left behind by a session, a pane or a daemon that went without saying so, and what on\n  a board cannot work yet. Lists, and removes nothing without --fix:\n    stale  rewake and review marks whose process is gone; the cursor, activity entry and pane view\n           of a session or pane untouched for N days (default: config archive_days, else 30); the\n           pid file of a daemon that is not running; a handler recorded as running when none is\n    note   a board whose rows have targets or actions that no handler takes (with the line that\n           registers one); history.jsonl files, which margin no longer writes (delete them by hand)\n  --fix removes the stale items. It never touches a board, an event, a named cursor (a tool's or a\n  handler's) or a registration, and it is safe to run at any time. margin help lifecycle\n", flags: &["--fix", "--days"], max_pos: Some(0) },
+    Cmd { name: "doctor", help: "margin doctor [--fix] [--days N]\n  what was left behind by a session, a pane or a daemon that went without saying so, and what on\n  a board cannot work yet. Lists, and removes nothing without --fix:\n    stale  rewake and review marks whose process is gone; the cursor, activity entry and pane view\n           of a session or pane untouched for N days (default: config archive_days, else 30); the\n           pid file of a daemon that is not running; a handler recorded as running when none is\n    note   a board whose rows have targets or actions that no handler takes (with the line that\n           registers one); history.jsonl files, which margin no longer writes (delete them by hand)\n           each feed a store still lists in feeds.json (margin no longer runs commands on a timer, a\n           file watch or as a stream): the handler and schedule line, or the owner line, that\n           replaces it, and who owns its rows now\n    stale  the removed feed runner's files (feeds.json, feeds/*.log, feeds/*.status.json): --fix\n           moves them into the project's .archive/ directory instead of deleting them\n  --fix removes the stale items. It never touches a board, an event, a named cursor (a tool's or a\n  handler's) or a registration, and it is safe to run at any time. margin help lifecycle\n", flags: &["--fix", "--days"], max_pos: Some(0) },
     Cmd { name: "handler", help: HANDLER_HELP, flags: &[], max_pos: None },
     Cmd { name: "handle", help: "margin handle open\n  a ready-made handler command: reads events on stdin (one JSON object per line) and opens each\n  event's value.target: a URL with the configured opener (config key opener; default xdg-open, or\n  `opener` over ssh), an mg: token by applying it, mg:open/<board> by showing that board.\n  With $MARGIN_DRY_OPEN=FILE it appends each target to FILE and opens nothing. A target that fails\n  to open is reported on stderr and the run still exits 0 (a retry would open the others twice)\n  The pane never opens anything itself: enter or a click on a row with a target appends the event\n  <board>.open, and this is the handler for it. Register it once per project:\n    margin handler add open --on '*.open' -- margin handle open\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "data", help: DATA_HELP, flags: &["--cap", "--file", "--owner", "--expect-every", "--as", "--last", "--json"], max_pos: Some(3) },
     Cmd { name: "owner", help: OWNER_HELP, flags: &["--board", "--owns", "--expect-every", "--json"], max_pos: Some(2) },
     Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo board `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused)\nmargin demo live [--speed X]\n  plays a turn into the demo board: steps tick, a card resolves\n  live: not part of the documented set; may be removed\n", flags: &["--speed"], max_pos: Some(1) },
-    Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
     Cmd { name: "init", help: "margin init [--user-name NAME] [--claude-dir DIR] [--bin PATH] [--dry-run]\n  make this machine ready: write user_name to margin's config (when given), install the skill\n  to <claude-dir>/skills/margin/SKILL.md, and merge the margin hooks into <claude-dir>/settings.json\n  with this binary's absolute path. Safe to re-run: it updates its own entries in place, leaves\n  every other hook and key alone, and keeps settings.json.bak from before its first change.\n  --claude-dir  Claude Code's directory (default ~/.claude)\n  --bin         the binary the hooks run (default: this one)\n  --dry-run     print the changes, write nothing\n", flags: &["--user-name", "--claude-dir", "--bin", "--dry-run"], max_pos: Some(0) },
-    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--script | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --script: the script that fetches its rows (a handler runs it); --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--script", "--feed", "--data", "--tool"], max_pos: Some(1) },
+    Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--script | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --script: the script that fetches its rows (a handler runs it); --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--script", "--data", "--tool"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
 
@@ -224,7 +219,7 @@ margin events --unread [--session S]
 
 const DAEMON_HELP: &str = "margin daemon [--stay]
   the supervisor for this project, in the foreground: it dispatches appended events to the
-  registered handlers (and runs any legacy feed). You rarely start it: registering a handler,
+  registered handlers, and nothing else. You rarely start it: registering a handler,
   or appending an event while one is registered, starts it in the background. With nothing
   registered it exits (--stay keeps it up). SIGTERM stops it cleanly: running handlers are
   stopped (not failed), their events stay pending, and the next daemon gives them again
@@ -370,83 +365,6 @@ const RENDER_HELP: &str = "margin render <board> [<board>...] [--width W] [--hei
   --pane P       draw with pane P's saved view: folds, focus, scroll (default tty)
 ";
 
-const FEED_HELP: &str = "feeds (legacy: frozen, and to be removed; margin help feeds says what replaces each trigger)\n  scripts the daemon runs on its own timer, file watch or as a stream, to keep a board current
-  margin feed add <name> [--every 10s | --watch <path>... | --stream] [--board B] [--owns PREFIX]
-                  [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
-  margin feed ls
-  margin feed rm <name>
-  margin feed pause <name>          margin feed resume <name>
-  margin feed logs <name> [--follow] [--lines N]
-  margin feed run <name>            once, in the foreground (stream: until it exits or ctrl-c);
-                                    leaves the daemon's status alone
-  margin feed <subcommand> --help for each; margin help feeds: what to use instead
-";
-
-/// `margin feed <sub> --help`: that subcommand's own usage.
-fn feed_sub_help(sub: &str) -> Option<&'static str> {
-    Some(match sub {
-        "add" => "margin feed add <name> (--every 10s | --watch <path>... | --stream) [--board B] [--owns PREFIX]
-                [--min-gap 1s] [--timeout 60s] [--replace] -- <cmd...>
-  register a script whose stdout is `margin apply` input; the daemon runs it from here on
-  pick one trigger:
-  --every 30s        run it to completion on that interval (10s, 2m, 1h; at least 0.2s)
-  --watch <path>...  run it once now, then whenever a watched file or directory changes
-                     (a file replaced by rename is still watched)
-  --stream           start it once and keep it running; lines land as they arrive, and it is
-                     restarted with backoff when it exits
-  --board B          the board it updates (default: <name>); it must exist (margin new):
-                     a feed never creates its board
-  --owns PREFIX      the id prefix it owns there: PREFIX and PREFIX-… (default: <name>; * = all)
-  --min-gap 1s       at least this long between two writes
-  --timeout 60s      a run of --every / --watch is stopped after this long
-  --replace          change a registered feed's command or trigger in place
-  -- <cmd...>        the command, run with no shell in the directory you are in now
-  legacy: margin help feeds says what replaces each trigger
-",
-        "ls" => "margin feed ls
-  each feed: its state (live, restarting, paused), trigger, board/prefix, restarts, and its
-  last run: `ran 2s ago · unchanged`, `ran 2s ago · wrote`, or `failed 5s ago: <last stderr line>`
-  (unchanged: it ran and printed what is already there, so nothing was written)
-  legacy: margin help feeds says what to use instead
-",
-        "rm" => "margin feed rm <name>
-  unregister a feed. Its last output stays in the board, unowned (the health line says
-  removed); the daemon exits when no unpaused feed is left
-  legacy: margin help feeds says what to use instead
-",
-        "pause" | "resume" => "margin feed pause <name>
-margin feed resume <name>
-  stop running a feed without unregistering it (it still owns its ids), or start it again;
-  pausing the last running feed stops the daemon, resume starts it
-  legacy: margin help feeds says what to use instead
-",
-        "logs" => "margin feed logs <name> [--follow] [--lines N]
-  the feed's log: a line per run (`run: wrote`, `run: unchanged`, `run: failed: …`), its
-  stderr, rejected lines, restarts
-  --lines N   the last N lines (default 40)
-  --follow    keep printing as lines arrive
-  legacy: margin help feeds says what to use instead
-",
-        "run" => "margin feed run <name>
-  run a registered feed once, in the foreground, as the feed (a stream: until it exits or
-  ctrl-c); prints `<board> rev N` or `<board> unchanged`, and leaves the daemon's status alone
-  legacy: margin help feeds says what to use instead
-",
-        _ => return None,
-    })
-}
-
-/// Flags each `feed` subcommand takes, and its most positionals.
-fn feed_spec(sub: &str) -> Option<(&'static [&'static str], Option<usize>)> {
-    Some(match sub {
-        "add" => (&["--every", "--watch", "--stream", "--board", "--artifact", "--owns", "--min-gap", "--timeout", "--replace"][..], None),
-        "ls" => (&[][..], Some(1)),
-        "rm" | "pause" | "resume" | "run" => (&[][..], Some(2)),
-        "logs" => (&["--follow", "--lines"][..], Some(2)),
-        _ => return None,
-    })
-}
-
 fn wants_help(v: &[String]) -> bool {
     v.iter().any(|x| x == "-h" || x == "--help")
 }
@@ -470,7 +388,6 @@ fn check_args(name: &str, a: &Args, flags: &[&str], max_pos: Option<usize>) -> R
 fn author(a: &Args) -> Result<String, String> {
     match a.get("--by") {
         Some("you") | Some("sulin") => Ok(crate::who::HUMAN.into()),
-        Some(n) if n.starts_with("feed:") => Err("--by feed:… is reserved for feeds".into()),
         Some(n) if util::valid_id(n) => Ok(n.into()),
         Some(n) => Err(format!("bad --by {n:?}: you, claude, or a name (letters, digits, - and _)")),
         None if a.has("--by") => Err("--by needs a value: you, claude, or a name".into()),
@@ -648,7 +565,7 @@ fn new_cmd(st: &Store, art: &str, input: &str, a: &Args) -> Result<(), String> {
     apply_cmd(st, art, input, a, true, Whole::Create)
 }
 
-/// `margin apply`: stdin in the feed line grammar, or a whole-document
+/// `margin apply`: stdin in the line grammar, or a whole-document
 /// envelope `{"title", "blocks"}`. One all-or-nothing write to an artifact that exists. `whole`:
 /// `margin new`'s reading, where a bare array is the block list, not an op list. `mode`: `margin new`
 /// comes through here too, with `Whole::Create`.
@@ -721,7 +638,7 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool, mode: Wh
         report(art, rev, a);
         return Ok(());
     }
-    let ops = feed::parse_input(t)?;
+    let ops = doc::parse_input(t)?;
     if ops.is_empty() {
         return Err("nothing to apply".into());
     }
@@ -758,7 +675,7 @@ fn leading_globals(argv: &[String]) -> Result<(Vec<String>, Vec<String>), String
 /// store without an `Args` in hand, and `margin select --home DIR` once acted on the real store.
 fn export_store_flags(a: &Args) {
     if let Some(h) = a.get("--home") {
-        // absolute: a feed or a pane started from here runs in another directory
+        // absolute: a handler or a pane started from here runs in another directory
         let h = std::path::absolute(h).map(|p| p.display().to_string()).unwrap_or_else(|_| h.to_string());
         std::env::set_var("MARGIN_HOME", h);
     }
@@ -818,16 +735,15 @@ fn main() {
         eprintln!("margin: unknown command {cmd:?}; margin --help");
         std::process::exit(1);
     };
-    // everything after `--` is a feed's command, untouched by flag parsing
+    // everything after `--` is a handler's command, untouched by flag parsing
     let (mine, rest) = match argv.iter().position(|x| x == "--") {
         Some(i) => (&argv[1..i], argv[i + 1..].to_vec()),
         None => (&argv[1..], vec![]),
     };
     if wants_help(mine) {
-        // `margin feed add --help`: that subcommand's own usage
+        // `margin handler add --help`: that subcommand's own usage
         let word = mine.iter().find(|x| !x.starts_with('-'));
         let sub = match cmd.as_str() {
-            "feed" => word.and_then(|s| feed_sub_help(s)),
             "handler" => word.and_then(|s| handler_sub_help(s)),
             _ => None,
         };
@@ -838,12 +754,10 @@ fn main() {
     let mine: Vec<String> = globals.iter().chain(mine.iter()).cloned().collect();
     let a = Args::parse(&mine);
     export_store_flags(&a);
-    let r = if cmd == "feed" {
-        feed_cmd(&a, rest)
-    } else if cmd == "handler" {
+    let r = if cmd == "handler" {
         handler_cmd(&a, rest)
     } else {
-        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for handler add/set and feed add".into()) }).and_then(|_| run(&cmd, &a))
+        check_args(&cmd, &a, spec.flags, spec.max_pos).and_then(|_| if rest.is_empty() { Ok(()) } else { Err("`--` is only for handler add/set".into()) }).and_then(|_| run(&cmd, &a))
     };
     if let Err(e) = r {
         eprintln!("margin {cmd}: {}", who::say(&e));
@@ -872,7 +786,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             if whole {
                 return Err(format!("--as writes ops and components inside {name}'s prefix, not a whole document"));
             }
-            let ops = feed::parse_input(input.trim())?;
+            let ops = doc::parse_input(input.trim())?;
             if ops.is_empty() {
                 return Err("nothing to apply".into());
             }
@@ -1521,9 +1435,8 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "skill" => print!("{}", help::render(help::SKILL, &help::Ctx::here())),
         "example" => {
             // `--script`/`--data` are switches; written before the name they swallow it as a value
-            // (`--feed` is the older spelling of `--script`)
-            let script = a.has("--script") || a.has("--feed");
-            let name = a.pos.first().map(String::as_str).or(a.get("--script")).or(a.get("--feed")).or(a.get("--data")).or(a.get("--tool"));
+            let script = a.has("--script");
+            let name = a.pos.first().map(String::as_str).or(a.get("--script")).or(a.get("--data")).or(a.get("--tool"));
             let Some(name) = name else {
                 print!("{}", example::list());
                 return Ok(());
@@ -1546,7 +1459,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let e = example::get(name).ok_or_else(|| format!("no example {name:?}; examples: {}", names()))?;
             match (script, a.has("--data")) {
                 (true, true) => return Err("--script or --data, one at a time".into()),
-                (true, _) => print!("{}", e.feed),
+                (true, _) => print!("{}", e.script),
                 (_, true) => print!("{}", e.data),
                 _ => {
                     eprint!("{}", e.notes());
@@ -1679,10 +1592,10 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
 }
 
 /// The exit code for an error: 3 when the thing named is not there (an artifact, a component, a
-/// handler, an owner, a feed), 1 for everything else (refused, invalid, failed). A script can
+/// handler, an owner), 1 for everything else (refused, invalid, failed). A script can
 /// tell "not created yet" from "something is wrong" without reading the message.
 fn exit_code(e: &str) -> i32 {
-    if ["no board ", "no component ", "no handler ", "no owner ", "no feed ", "no dataset "].iter().any(|p| e.starts_with(p)) {
+    if ["no board ", "no component ", "no handler ", "no owner ", "no dataset "].iter().any(|p| e.starts_with(p)) {
         3
     } else {
         1
@@ -1857,7 +1770,7 @@ fn handler_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
             }
             // the command may exit without reading its stdin
             unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-            let mut w = handler::Worker::new(store(a), h, std::sync::Arc::new(feed::Ctl::default()), true);
+            let mut w = handler::Worker::new(store(a), h, std::sync::Arc::new(handler::Ctl::default()), true);
             w.exec(&events, a.has("--dry-run"), own)?;
         }
         _ => unreachable!(),
@@ -1928,7 +1841,7 @@ fn owner_cmd(a: &Args) -> Result<(), String> {
                 o.expect_every = e;
             }
             st.set_owner(o.clone())?;
-            println!("owner {n}: owns {:?} in {}{}", o.owns, o.board, o.expect_every.map(|e| format!(", expected every {}", feed::fmt_secs(e))).unwrap_or_default());
+            println!("owner {n}: owns {:?} in {}{}", o.owns, o.board, o.expect_every.map(|e| format!(", expected every {}", owner::fmt_secs(e))).unwrap_or_default());
         }
         "rm" => {
             let n = name()?;
@@ -1950,7 +1863,7 @@ fn owner_cmd(a: &Args) -> Result<(), String> {
                 let wrote = util::parse_rfc3339(&o.last_write).map(|t| format!("wrote {}", util::ago(now - t))).unwrap_or_else(|| "never wrote".into());
                 let health = match (o.stale(now), o.expect_every) {
                     (Some(why), _) => format!("STALE: {why}"),
-                    (None, Some(e)) => format!("{wrote} (expected every {})", feed::fmt_secs(e)),
+                    (None, Some(e)) => format!("{wrote} (expected every {})", owner::fmt_secs(e)),
                     (None, None) => wrote,
                 };
                 println!("{:<14} {:<20} {health}", o.name, format!("{}/{}", o.board, o.owns));
@@ -2020,7 +1933,7 @@ fn data_cmd(a: &Args) -> Result<(), String> {
         }];
         parts.extend(d.cap.map(|c| format!("newest {c} kept")));
         parts.extend(d.owner.as_ref().map(|o| format!("written only by owner {o}")));
-        parts.extend(d.expect_every.map(|e| format!("expected every {}", feed::fmt_secs(e))));
+        parts.extend(d.expect_every.map(|e| format!("expected every {}", owner::fmt_secs(e))));
         format!("dataset {n}: {}", parts.join(", "))
     };
     match sub {
@@ -2118,7 +2031,7 @@ fn data_cmd(a: &Args) -> Result<(), String> {
                 let changed = at.map(|t| format!("changed {}", util::ago(now - t))).unwrap_or_else(|| "no records yet".into());
                 let health = match (stale, d.expect_every) {
                     (Some(why), _) => format!("STALE: {why}"),
-                    (None, Some(e)) => format!("{changed} (expected every {})", feed::fmt_secs(e)),
+                    (None, Some(e)) => format!("{changed} (expected every {})", owner::fmt_secs(e)),
                     (None, None) => changed,
                 };
                 let mut notes = Vec::new();
@@ -2216,7 +2129,6 @@ fn daemon_cmd(a: &Args) -> Result<(), String> {
             let installed = dir.join(&unit).exists();
             let enabled = dir.join("default.target.wants").join(&unit).exists();
             let hs = handler::Registry::load_strict(&st.dir())?;
-            let feeds = feed::Registry::load(&st.dir()).feeds.len();
             let rows: Vec<Value> = hs
                 .handlers
                 .iter()
@@ -2227,7 +2139,7 @@ fn daemon_cmd(a: &Args) -> Result<(), String> {
                 })
                 .collect();
             if a.has("--json") {
-                println!("{}", json!({"v": 1, "project": st.project, "running": running.is_some(), "pid": running.unwrap_or(0), "since": up.map(util::rfc3339), "unit": {"name": unit, "installed": installed, "enabled": enabled}, "handlers": rows, "feeds": feeds}));
+                println!("{}", json!({"v": 1, "project": st.project, "running": running.is_some(), "pid": running.unwrap_or(0), "since": up.map(util::rfc3339), "unit": {"name": unit, "installed": installed, "enabled": enabled}, "handlers": rows}));
                 return Ok(());
             }
             match (running, up) {
@@ -2248,9 +2160,6 @@ fn daemon_cmd(a: &Args) -> Result<(), String> {
             }
             for r in &rows {
                 println!("  {:<14} {:<9} {:<24} waiting {:<3} {}", r["name"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""), vellum::text::truncate(&format!("on {}", r["on"].as_array().map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default()), 24), r["pending"], r["last"].as_str().unwrap_or(""));
-            }
-            if feeds > 0 {
-                println!("feeds: {feeds} registered (margin feed ls)");
             }
             Ok(())
         }
@@ -2298,18 +2207,12 @@ fn handle_open(input: &str, cfg: &Config) -> Result<(), String> {
 
 /// `margin rm <art>`: what would go, and with `yes` the removal. The store never deletes
 /// (`Store::archive`, as `margin gc`): the artifact's directory moves to `.archive/`, so a
-/// mistaken removal is one `mv` from undone. Its feeds are unregistered first, since a feed left
-/// registered would fail every run from then on (a feed never creates its artifact). Without `yes` nothing
+/// mistaken removal is one `mv` from undone. Without `yes` nothing
 /// changes and the command fails, so a script can't take the preview for the removal.
 fn rm_artifact(st: &Store, art: &str, yes: bool, panes: &[String]) -> Result<String, String> {
     let d = st.load(art)?;
-    let feeds: Vec<feed::Feed> = feed::Registry::load_strict(&st.dir())?.feeds.into_iter().filter(|f| f.artifact == art).collect();
     let mut out = format!("{art}  \"{}\"  rev {}  updated {}\n", d.title, d.rev, d.updated);
     out += &format!("  components: {}\n", d.ids().len());
-    out += &match feeds.len() {
-        0 => "  feeds: none\n".to_string(),
-        _ => format!("  feeds registered on it (unregistered with it): {}\n", feeds.iter().map(|f| format!("{} ({})", f.name, f.trigger.describe())).collect::<Vec<_>>().join(", ")),
-    };
     out += &match panes.len() {
         0 => "  panes showing it: none\n".to_string(),
         _ => format!("  panes showing it (left open; margin close {art}): {}\n", panes.join(", ")),
@@ -2318,170 +2221,8 @@ fn rm_artifact(st: &Store, art: &str, yes: bool, panes: &[String]) -> Result<Str
         eprint!("{out}");
         return Err(format!("nothing removed: `margin rm {art} --yes` moves it to the project's .archive/ directory"));
     }
-    for f in &feeds {
-        feed::edit_registry(st, |r| r.remove(&f.name))?;
-    }
     let dest = st.archive(art)?;
     Ok(format!("{out}removed {art}: archived as {}\n", dest.strip_prefix(st.dir()).unwrap_or(&dest).display()))
-}
-
-/// The note `feed add` prints when ids that were Claude's change hands: how many, and the first
-/// few (a table of 200 rows once printed 200 ids).
-fn owns_note(name: &str, taken: &[String]) -> String {
-    const SHOWN: usize = 5;
-    let first = taken.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
-    let more = if taken.len() > SHOWN { format!(", … {} more", taken.len() - SHOWN) } else { String::new() };
-    format!("note: feed {name} now owns {} existing id{} ({first}{more}): read-only for you from here", taken.len(), if taken.len() == 1 { "" } else { "s" })
-}
-
-fn feed_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
-    use feed::{edit_registry, Feed, Registry, Trigger};
-    let sub = a.pos(0, "add|rm|ls|pause|resume|logs|run")?;
-    let (flags, max_pos) = feed_spec(sub).ok_or_else(|| format!("unknown feed command {sub:?}: add, rm, ls, pause, resume, logs, run"))?;
-    check_args(&format!("feed {sub}"), a, flags, max_pos)?;
-    author(a)?;
-    if sub != "add" && !cmd.is_empty() {
-        return Err("`--` is only for feed add".into());
-    }
-    let st = store(a);
-    let name = || a.pos(1, "name");
-    match sub {
-        "add" => {
-            let name = name()?.to_string();
-            let trigger = if a.has("--stream") {
-                Trigger::Stream
-            } else if let Some(p) = a.get("--watch") {
-                // --watch takes one or more paths: the flag's value plus any positionals after the name
-                let mut paths = vec![p.to_string()];
-                paths.extend(a.pos[2..].iter().cloned());
-                Trigger::Watch { paths }
-            } else if let Some(e) = a.get("--every") {
-                Trigger::Interval { every: util::parse_duration(e).ok_or_else(|| format!("bad --every {e}"))? }
-            } else {
-                return Err("pick a trigger: --every 10s, --watch <path>..., or --stream".into());
-            };
-            let artifact = a.get("--board").or(a.get("--artifact")).unwrap_or(&name).to_string();
-            let owns = a.get("--owns").unwrap_or(&name).to_string();
-            let cwd = std::env::current_dir().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
-            let f = Feed {
-                name: name.clone(),
-                cmd,
-                trigger,
-                artifact: artifact.clone(),
-                owns: owns.clone(),
-                paused: false,
-                cwd,
-                min_gap: a.get("--min-gap").and_then(util::parse_duration).unwrap_or(1.0),
-                timeout: a.get("--timeout").and_then(util::parse_duration).unwrap_or(60.0),
-                added: util::now_rfc3339(),
-            };
-            // a feed updates its artifact and never creates it: a mistyped --artifact is caught
-            // here, not as a board nobody asked for
-            if !st.exists(&artifact) {
-                return Err(st.missing(&artifact));
-            }
-            let desc = f.trigger.describe();
-            // one id has one owner, whoever registered it: a handler's or an outside owner's too
-            st.claim_overlap(&artifact, &owns, ("feed", &name)).or_else(|e| if e.contains(" overlaps feed ") { Ok(()) } else { Err(e) })?;
-            edit_registry(&st, |r| r.add(f, a.has("--replace")))?;
-            // ids Claude already wrote under the prefix change hands now; say so
-            if let Ok(d) = st.load(&artifact) {
-                let taken: Vec<String> = d.ids().into_iter().filter(|i| store::owns(&owns, i)).collect();
-                if !taken.is_empty() {
-                    eprintln!("{}", owns_note(&name, &taken));
-                }
-            }
-            let started = daemon::ensure(&st)?;
-            println!("feed {name}: {desc} → {artifact} (owns {owns:?}){}", if started.is_some() { "; daemon started" } else { "" });
-        }
-        "rm" => {
-            let n = name()?;
-            let f = edit_registry(&st, |r| r.remove(n))?;
-            // the daemon's worker marks the health line as it stops; with no daemon (or a feed
-            // that was paused) nobody would, and the line kept saying `paused`
-            feed::mark_health(&st, &f, "removed");
-            println!("removed feed {n}; its last output stays in {} (health line {}: removed), unowned: margin rm {} <id> deletes a part", f.artifact, f.status_id(), f.artifact);
-        }
-        "pause" | "resume" => {
-            let n = name()?;
-            edit_registry(&st, |r| r.set_paused(n, sub == "pause"))?;
-            if sub == "resume" {
-                daemon::ensure(&st)?;
-            } else if let Some(f) = Registry::load(&st.dir()).get(n) {
-                feed::mark_health(&st, f, "paused");
-            }
-            println!("{} feed {n}", if sub == "pause" { "paused" } else { "resumed" });
-        }
-        "ls" => {
-            let r = Registry::load(&st.dir());
-            match daemon::running(&st) {
-                Some(p) if p > 0 => println!("daemon: running, pid {p}"),
-                Some(_) => println!("daemon: running"),
-                None => println!("daemon: not running{}", if r.feeds.iter().any(|f| !f.paused) { " (start: margin feed resume <name>)" } else { "" }),
-            }
-            if r.feeds.is_empty() {
-                println!("no feeds in project {}", st.project);
-            }
-            for f in &r.feeds {
-                let s = feed::read_status(&st, &f.name).unwrap_or_default();
-                let state = if f.paused { "paused".to_string() } else if s.state.is_empty() { "starting".into() } else { s.state.clone() };
-                // the last run and how it went, apart from the last write: a feed whose output
-                // matched what was there has run and written nothing
-                let last = s.last_run_text(util::epoch_now());
-                println!(
-                    "{:<12} {:<11} {:<26} {:<20} restarts {:<3} {last}",
-                    f.name,
-                    state,
-                    vellum::text::truncate(&f.trigger.describe(), 26),
-                    format!("{}/{}", f.artifact, f.owns),
-                    s.restarts
-                );
-                if !s.last_error.is_empty() && state != "live" && s.last_outcome != "failed" {
-                    println!("{:<12} last error: {}", "", vellum::text::truncate(&s.last_error, 90));
-                }
-            }
-        }
-        "logs" => {
-            let n = name()?;
-            let p = feed::log_path(&st, n);
-            let lines: usize = a.get("--lines").and_then(|l| l.parse().ok()).unwrap_or(40);
-            let text = std::fs::read_to_string(&p).map_err(|_| format!("no log yet for feed {n} ({})", p.display()))?;
-            let all: Vec<&str> = text.lines().collect();
-            for l in &all[all.len().saturating_sub(lines)..] {
-                println!("{l}");
-            }
-            if a.has("--follow") {
-                let mut seen = text.len();
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    let t = std::fs::read_to_string(&p).unwrap_or_default();
-                    if t.len() < seen {
-                        seen = 0; // rotated
-                    }
-                    print!("{}", &t[seen..]);
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    seen = t.len();
-                }
-            }
-        }
-        "run" => {
-            let n = name()?;
-            let f = Registry::load(&st.dir()).get(n).cloned().ok_or_else(|| format!("no feed {n:?}; margin feed ls"))?;
-            let ctl = std::sync::Arc::new(feed::Ctl::default());
-            let mut w = feed::Worker::new(store(a), f.clone(), ctl, true);
-            match f.trigger {
-                Trigger::Stream => w.run(),
-                _ => match w.run_once() {
-                    Ok(true) => {}
-                    Ok(false) => {}
-                    Err(e) => return Err(e),
-                },
-            }
-        }
-        s => return Err(format!("unknown feed command {s:?}: add, rm, ls, pause, resume, logs, run")),
-    }
-    Ok(())
 }
 
 /// What sulin sees, as text for Claude: content merged with his decisions.
@@ -2542,7 +2283,6 @@ fn show_text(d: &Doc, s: &store::State, claims: &[store::Claim], delivered: u64)
             ("claim", Some(d)) if d.kind == "strike" => format!("[STRUCK by sulin{}]", d.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default()),
             ("diff", Some(d)) => format!("[{}]", d.value.as_str().unwrap_or("")),
             ("status", _) => format!("[{} {}]", b.s("state"), b.s("result")),
-            ("feed", _) => format!("[feed {} {}]", b.s("name"), b.s("state")),
             ("row", _) => [b.s("tag"), b.s("aside"), b.s("meta")].iter().filter(|x| !x.is_empty()).map(|x| format!("[{x}]")).collect::<Vec<_>>().join(" "),
             _ => String::new(),
         };
@@ -2604,7 +2344,7 @@ fn set_hints(st: &Store, art: &str, hints: Vec<String>) -> Result<u64, String> {
 
 /// Change a document-level field (`hints`, `purpose`): `change` edits the document and says
 /// whether anything changed. The document is otherwise written back as it was read; a write that
-/// landed in between (a feed) is taken up and the change redone.
+/// landed in between (a handler's, an owner's) is taken up and the change redone.
 fn set_doc_field(st: &Store, art: &str, change: impl Fn(&mut Doc) -> bool) -> Result<u64, String> {
     let mut last = String::new();
     for _ in 0..8 {
@@ -2771,13 +2511,8 @@ mod tests {
         // doc writes a component through apply_cmd
         let sec = mdoc::to_section("notes", None, "# Notes\n\nA line.\n");
         assert_eq!(apply_cmd(&st, "paln", &sec.to_string(), &a(&[]), false, Whole::Replace).unwrap_err(), want, "doc");
-        // feed registration: a mistyped --artifact (or a name with no artifact) registers nothing
-        let e = feed_cmd(&a(&["add", "jj", "--every", "1h", "--artifact", "paln"]), vec!["true".into()]).unwrap_err();
-        assert_eq!(e, want, "feed add");
-        assert!(feed_cmd(&a(&["add", "jj", "--every", "1h"]), vec!["true".into()]).unwrap_err().starts_with("no board \"jj\" in project t: create it with margin new jj"));
-        assert!(feed::Registry::load(&st.dir()).feeds.is_empty());
         // nothing was created on the way, and the artifact beside it is as it was
-        assert!(!st.exists("paln") && !st.art("paln").exists() && !st.exists("jj"));
+        assert!(!st.exists("paln") && !st.art("paln").exists());
         assert_eq!(st.list().len(), 1);
         assert_eq!(st.load("plan").unwrap().rev, 2);
         // a whole-document apply to an artifact that exists is still an update
@@ -2890,9 +2625,6 @@ mod tests {
     fn nothing_a_reader_sees_says_artifact_except_the_json_field() {
         let mut texts: Vec<(String, String)> = vec![("margin --help".into(), HELP.into()), ("global flags".into(), GLOBAL_HELP.into())];
         texts.extend(CMDS.iter().map(|c| (format!("margin {} --help", c.name), c.help.to_string())));
-        for sub in ["add", "ls", "rm", "pause", "resume", "logs", "run"] {
-            texts.push((format!("margin feed {sub} --help"), feed_sub_help(sub).unwrap().into()));
-        }
         for sub in ["add", "set", "ls", "rm", "pause", "resume", "logs", "run"] {
             if let Some(h) = handler_sub_help(sub) {
                 texts.push((format!("margin handler {sub} --help"), h.into()));
@@ -2906,7 +2638,7 @@ mod tests {
         texts.extend(help::TOPICS.iter().map(|(n, t)| (format!("margin help {n}"), help::render(t, &c))));
         texts.push(("margin example".into(), example::list()));
         texts.extend(example::EXAMPLES.iter().map(|e| (format!("margin example {}", e.name), e.notes())));
-        texts.extend(example::EXAMPLES.iter().map(|e| (format!("margin example {} --script", e.name), e.feed.to_string())));
+        texts.extend(example::EXAMPLES.iter().map(|e| (format!("margin example {} --script", e.name), e.script.to_string())));
         texts.push(("margin example runs".into(), example::RUNS.notes()));
         texts.push(("margin example runs --tool".into(), example::RUNS.tool.into()));
         let (st, _) = tmp_store("words");
@@ -2921,18 +2653,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&st.home);
     }
 
-    /// `margin --help` keeps the feed runner out of the main path: one line, under a heading that
-    /// says legacy, at the bottom; and the feed command's own help opens by saying so.
+    /// The feed runner is gone: no `feed` command, no help that names one, no `feed` block type.
+    /// One way keeps a board current (a handler, an owner or a dataset), so nothing a reader
+    /// can print points at a second.
     #[test]
-    fn help_lists_feed_last_under_a_legacy_heading() {
-        let lines: Vec<&str> = HELP.lines().collect();
-        let at = lines.iter().position(|l| l.starts_with("legacy (")).expect("a legacy heading");
-        let feed: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.contains("feed")).map(|(i, _)| i).collect();
-        assert_eq!(feed, [at, at + 1], "feed is named under the legacy heading and nowhere else");
-        assert!(lines[at].contains("margin help feeds") && lines[at + 1].starts_with("  margin feed "), "{}", lines[at + 1]);
-        assert!(lines[at + 2].is_empty() && lines[at + 3].starts_with("global, before or after"), "the legacy block is the last one");
-        assert!(FEED_HELP.starts_with("feeds (legacy: frozen"), "{FEED_HELP}");
-        assert!(doc::kind("feed").unwrap().about.starts_with("legacy: "));
+    fn no_help_names_a_feed_command() {
+        assert!(CMDS.iter().all(|c| c.name != "feed") && doc::kind("feed").is_none());
+        assert!(!HELP.lines().any(|l| l.starts_with("legacy")), "no legacy heading is left");
+        let mut texts: Vec<(String, String)> = vec![("margin --help".into(), HELP.into()), ("global flags".into(), GLOBAL_HELP.into())];
+        texts.extend(CMDS.iter().map(|c| (format!("margin {} --help", c.name), c.help.to_string())));
+        for sub in ["add", "set", "ls", "rm", "pause", "resume", "logs", "run"] {
+            texts.extend(handler_sub_help(sub).map(|h| (format!("margin handler {sub} --help"), h.to_string())));
+        }
+        let c = help::Ctx::new("", std::path::Path::new("/opt/margin/bin/margin"));
+        texts.push(("margin skill".into(), help::render(help::SKILL, &c)));
+        texts.push(("margin help".into(), help::topic_list(&c)));
+        texts.extend(help::TOPICS.iter().map(|(n, t)| (format!("margin help {n}"), help::render(t, &c))));
+        texts.push(("margin schema".into(), doc::schema_text(None).unwrap()));
+        texts.push(("margin example".into(), example::list()));
+        texts.extend(example::EXAMPLES.iter().map(|e| (format!("margin example {}", e.name), e.notes())));
+        texts.extend(example::EXAMPLES.iter().map(|e| (format!("margin example {} --script", e.name), e.script.to_string())));
+        texts.push(("margin example runs".into(), example::RUNS.notes()));
+        for (what, text) in &texts {
+            for line in text.lines() {
+                let l = line.to_lowercase();
+                assert!(!l.contains("margin feed") && !l.contains("help feeds") && !l.contains("--feed"), "{what} names the feed command: {line}");
+                // the word stays only in `margin doctor`'s help, which says what it does with
+                // a store that still holds the removed runner's files
+                if !what.starts_with("margin doctor") {
+                    assert!(!l.split(|c: char| !c.is_alphanumeric()).any(|w| w == "feed" || w == "feeds"), "{what} says \"feed\": {line}");
+                }
+            }
+        }
     }
 
     /// The parked commands keep an accurate help, each marked, and `margin --help` lists them
@@ -2952,31 +2704,8 @@ mod tests {
         }
     }
 
-    /// Each feed subcommand has its own help, the trigger flags a line each, all pointing at the
-    /// topic; the ownership note is a count and the first few ids.
-    #[test]
-    fn feed_subcommands_have_their_own_help_and_the_note_is_capped() {
-        for sub in ["add", "ls", "rm", "pause", "resume", "logs", "run"] {
-            let h = feed_sub_help(sub).unwrap_or_else(|| panic!("feed {sub} has no help"));
-            assert!(h.starts_with("margin feed ") && h.contains(&format!("margin feed {sub}")) && h.contains("legacy: margin help feeds"), "{sub}: {h}");
-            let (flags, _) = feed_spec(sub).unwrap();
-            // --artifact is the older spelling of --board: taken, never printed
-            for f in flags.iter().filter(|f| **f != "--artifact") {
-                assert!(h.contains(f), "feed {sub} --help doesn't show {f}");
-            }
-        }
-        let add = feed_sub_help("add").unwrap();
-        for f in ["--every", "--watch", "--stream"] {
-            assert_eq!(add.lines().filter(|l| l.trim_start().starts_with(f)).count(), 1, "{f} has a line of its own");
-        }
-        assert!(feed_sub_help("nope").is_none() && FEED_HELP.contains("margin help feeds"));
-        let ids: Vec<String> = (0..14).map(|i| format!("pr-{i}")).collect();
-        assert_eq!(owns_note("reviews", &ids), "note: feed reviews now owns 14 existing ids (pr-0, pr-1, pr-2, pr-3, pr-4, … 9 more): read-only for you from here");
-        assert_eq!(owns_note("x", &ids[..1]), "note: feed x now owns 1 existing id (pr-0): read-only for you from here");
-    }
-
     /// `margin rm <art>`: a preview and a refusal without --yes; with it the artifact is archived
-    /// (never deleted), its feeds unregistered, and a second one of the same name can follow.
+    /// (never deleted), and a second one of the same name can follow.
     #[test]
     fn rm_of_an_artifact_previews_then_archives() {
         let (st, f) = tmp_store("rmart");
@@ -2985,17 +2714,15 @@ mod tests {
         go("add", &["scratch", "-", "todo", "t1", "one"], &f).unwrap();
         go("title", &["scratch", "Scratch board"], &f).unwrap();
         go("add", &["keep", "-", "todo", "t1", "stays"], &f).unwrap();
-        let fd = feed::Feed { name: "sc".into(), cmd: vec!["true".into()], trigger: feed::Trigger::Interval { every: 60.0 }, artifact: "scratch".into(), owns: "sc".into(), paused: true, cwd: "/".into(), min_gap: 1.0, timeout: 60.0, added: String::new() };
-        feed::edit_registry(&st, |r| r.add(fd, false)).unwrap();
         let e = rm_artifact(&st, "scratch", false, &["pid 7".into()]).unwrap_err();
         assert!(e.contains("nothing removed") && e.contains("margin rm scratch --yes"), "{e}");
-        assert!(st.exists("scratch") && st.claims("scratch").len() == 1, "the preview changes nothing");
+        assert!(st.exists("scratch"), "the preview changes nothing");
         assert!(go("rm", &["scratch"], &f).is_err() && st.exists("scratch"));
         let out = rm_artifact(&st, "scratch", true, &["pid 7".into()]).unwrap();
-        for must in ["\"Scratch board\"", "rev 3", "sc (every 1m)", "pid 7", "removed scratch: archived as .archive/scratch-"] {
+        for must in ["\"Scratch board\"", "rev 3", "pid 7", "removed scratch: archived as .archive/scratch-"] {
             assert!(out.contains(must), "{must}: {out}");
         }
-        assert!(!st.exists("scratch") && st.exists("keep") && st.claims("scratch").is_empty());
+        assert!(!st.exists("scratch") && st.exists("keep"));
         let kept: Vec<_> = std::fs::read_dir(st.dir().join(".archive")).unwrap().map(|e| e.unwrap().path()).collect();
         assert!(kept.len() == 1 && kept[0].join("doc.json").exists(), "archived whole: {kept:?}");
         // the same name again on the same day gets its own place in the archive
@@ -3016,7 +2743,7 @@ mod tests {
         assert_eq!(author(&args(&["--by", "you"])).unwrap(), crate::who::HUMAN);
         assert_eq!(author(&args(&["--by", "claude"])).unwrap(), "claude");
         assert_eq!(author(&args(&["--by", "jess"])).unwrap(), "jess");
-        assert!(author(&args(&["--by", "feed:x"])).is_err());
+        assert!(author(&args(&["--by", "handler:x"])).is_err());
         assert!(author(&args(&["--by"])).is_err());
     }
 }
