@@ -1123,16 +1123,30 @@ impl Scene {
                         Phase::Waiting => (format!("waiting {}", components::age_short(wait.unwrap_or(0.0))), p.grey1),
                         Phase::Done => (phase.label().to_string(), p.green),
                     };
+                    // why it waits, when the transcript says (`waiting 2m · retrying tests`): after
+                    // the word on a row with no plan, after the plan's count on a row with one
+                    // (the columns stay where they are), and only where the row has the room
+                    let why = ag.waiting_why(inp.wall).map(|r| format!(" · {r}")).unwrap_or_default();
+                    let plan = ag.progress.as_ref().filter(|_| cols.count_x + cols.count_w + 1 <= edge);
+                    let mut after_plan = "";
                     if cols.phase_x + width(&word) as u16 + 1 <= edge {
-                        gg.put(cols.phase_x, 0, &word, Style::fg(pc).on(p.bg0));
+                        let x = gg.put(cols.phase_x, 0, &word, Style::fg(pc).on(p.bg0));
+                        if plan.is_none() && !why.is_empty() && x + width(&why) as u16 + 1 <= edge {
+                            gg.put(x, 0, &why, Style::fg(p.grey1).on(p.bg0));
+                        } else {
+                            after_plan = &why;
+                        }
                     }
                     // the plan: a bar and done/total; an agent that keeps no plan shows neither
-                    if let Some(pr) = ag.progress.as_ref().filter(|_| cols.count_x + cols.count_w + 1 <= edge) {
+                    if let Some(pr) = plan {
                         let bar = pr.bar(AGENT_BAR_W as usize);
                         let full = bar.chars().filter(|c| *c == '▰').count();
                         let x = gg.put(cols.bar_x, 0, &"▰".repeat(full), Style::fg(if pr.done >= pr.total { p.green } else { p.grey2 }).on(p.bg0));
                         gg.put(x, 0, &"▱".repeat(AGENT_BAR_W as usize - full), Style::fg(p.bg4).on(p.bg0));
-                        gg.put(cols.count_x, 0, &format!("{}/{}", pr.done, pr.total), Style::fg(p.grey2).on(p.bg0));
+                        let x = gg.put(cols.count_x, 0, &format!("{}/{}", pr.done, pr.total), Style::fg(p.grey2).on(p.bg0));
+                        if !after_plan.is_empty() && x + width(after_plan) as u16 + 1 <= edge {
+                            gg.put(x, 0, after_plan, Style::fg(p.grey1).on(p.bg0));
+                        }
                     }
                     for (i, (node, nc, text, tc)) in more.iter().enumerate() {
                         let y = 1 + i as u16;
@@ -3004,8 +3018,25 @@ mod tests {
         let wall = t0 + 20.0 + 125.0;
         let t = agents_frame(&mut sc, 0.0, wall, 80).grid.to_text();
         let row = t.lines().find(|l| l.contains("Add tabs")).unwrap_or_else(|| panic!("{t}"));
-        assert!(row.contains("waiting 2m") && row.contains("▰▰▰▱▱ 2/4") && row.contains(icon::PAUSE), "{row}");
+        assert!(row.contains("waiting 2m") && row.contains("▰▰▰▱▱ 2/4 · sleep") && row.contains(icon::PAUSE), "{row}");
         assert!(t.contains("Agents  1 waiting"), "{t}");
+        // with no plan on the row the reason follows the word; a row too narrow for it says
+        // only "waiting", as before; a wait with no knowable reason says nothing more
+        let row_of = |sc: &mut Scene, w: u16| {
+            let t = agents_frame(sc, 0.0, wall, w).grid.to_text();
+            t.lines().find(|l| l.contains("waiting") && !l.contains("Agents")).unwrap_or_default().to_string()
+        };
+        sc.agents[0].agents[0].progress = None;
+        assert!(row_of(&mut sc, 80).contains("waiting 2m · sleep"), "{}", row_of(&mut sc, 80));
+        // at every width the reason is whole or absent, and some width has room for the word alone
+        let rows: Vec<String> = (24..80).map(|w| row_of(&mut sc, w)).collect();
+        assert!(rows.iter().all(|r| !r.contains('·') || r.contains("waiting 2m · sleep")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("waiting 2m") && !r.contains("sleep")), "{rows:#?}");
+        let mut b = crate::agents::parsed_for_test("Add tabs", &agent_lines(&[(10, "Edit", json!({"file_path": "/r/a.rs"}), true), (20, "Bash", json!({"command": "rsync -a big/ copy/"}), false)]));
+        b.id = "t".into();
+        sc.agents = vec![crate::agents::Group { prompt: "p".into(), agents: vec![b] }];
+        let plain = row_of(&mut sc, 80);
+        assert!(plain.contains("waiting 2m") && !plain.contains("·"), "{plain}");
         // motion is on, and still nothing asks for a sub-second frame: its glyph does not spin
         for now in [5.0, 50.0] {
             let ms = agents_frame(&mut sc, now, wall, 80).wake.timeout_ms(now);

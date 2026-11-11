@@ -350,6 +350,25 @@ impl Agent {
         Some((now - since).max(0.0))
     }
 
+    /// What it is waiting on, in a word or two, when `phase` is `Waiting` and the transcript's
+    /// tail says: the oldest call in flight is a retry loop around a build or a test run
+    /// (`retrying tests`), a nested agent (`subagent`), a sleep (`sleep`), or a build or test
+    /// run past `TEST_SECS` (`long build`, `long tests`); with nothing in flight, a turn that
+    /// ended (`turn ended`). `None` for anything else (a permission prompt and a slow plain
+    /// command look the same from here).
+    pub fn waiting_why(&self, now: f64) -> Option<&'static str> {
+        if self.phase(now) != Phase::Waiting {
+            return None;
+        }
+        let t = &self.track;
+        match t.pending.iter().min_by(|a, b| a.at.total_cmp(&b.at)) {
+            Some(p) if !p.why.is_empty() => Some(p.why),
+            Some(p) if p.test => Some(p.long),
+            Some(_) => None,
+            None => t.idle_turn.then_some("turn ended"),
+        }
+    }
+
     /// The row's name: the description it was started with, which is written to be read. Its
     /// plan section's id (`ag-new` once showed as a row named "new") is only the fallback.
     pub fn who(&self) -> String {
@@ -490,11 +509,14 @@ struct Pending {
     at: f64,
     test: bool,
     waits: bool,
+    /// Why it blocks, where the call itself says (`Call::why`), and what a long run of it is.
+    why: &'static str,
+    long: &'static str,
 }
 
 impl Track {
     fn note(&mut self, id: &str, at: f64, call: Call, reviewer: bool) {
-        self.pending.push(Pending { id: id.to_string(), at, test: call.class == Class::Test, waits: call.waits });
+        self.pending.push(Pending { id: id.to_string(), at, test: call.class == Class::Test, waits: call.waits, why: call.why, long: call.long });
         let vote = match call.class {
             Class::None => return,
             Class::Edit => {
@@ -544,6 +566,11 @@ struct Call {
     paths: Vec<String>,
     /// A shell command's text, to spot a file it changed being read back.
     text: String,
+    /// Why it blocks, when the call says so itself: `retrying tests` (a loop around a build or
+    /// a test run), `sleep`, `subagent`. Empty otherwise.
+    why: &'static str,
+    /// What a build or a test run is called once it has run long: `long build`, `long tests`.
+    long: &'static str,
 }
 
 fn base(path: &str) -> String {
@@ -552,13 +579,14 @@ fn base(path: &str) -> String {
 
 fn classify(tool: &str, input: &Value) -> Call {
     let file = |k: &str| input[k].as_str().filter(|s| !s.is_empty()).map(base).into_iter().collect::<Vec<_>>();
-    let call = |class, waits, paths| Call { class, waits, paths, text: String::new() };
+    let call = |class, waits, paths| Call { class, waits, paths, text: String::new(), why: "", long: "" };
     match tool {
         "Edit" | "Write" | "MultiEdit" => call(Class::Edit, false, file("file_path")),
         "NotebookEdit" => call(Class::Edit, false, file("notebook_path")),
         "Read" => call(Class::Read, false, file("file_path")),
         "Grep" | "Glob" | "LSP" | "WebSearch" | "WebFetch" => call(Class::Read, false, Vec::new()),
-        "Agent" | "Task" | "Monitor" | "TaskOutput" | "BashOutput" => call(Class::None, true, Vec::new()),
+        "Agent" | "Task" => Call { why: "subagent", ..call(Class::None, true, Vec::new()) },
+        "Monitor" | "TaskOutput" | "BashOutput" => call(Class::None, true, Vec::new()),
         "Bash" => shell(input["command"].as_str().unwrap_or("")),
         _ => call(Class::None, false, Vec::new()),
     }
@@ -574,7 +602,9 @@ fn shell(cmd: &str) -> Call {
     let (outside, bodies) = strip_heredocs(cmd);
     let mut class = Class::None;
     let mut waits = false;
+    let mut looped = false;
     for seg in segments(&outside) {
+        looped |= matches!(seg.split_whitespace().next().map(|w| w.trim_start_matches(['(', '{'])), Some("until" | "while" | "for"));
         let words: Vec<&str> = head_words(&seg);
         let Some(first) = words.first() else { continue };
         let w0 = first.rsplit('/').next().unwrap_or("");
@@ -623,7 +653,15 @@ fn shell(cmd: &str) -> Call {
     } else {
         Vec::new()
     };
-    Call { class, waits, paths, text: outside }
+    let why = if looped && class == Class::Test {
+        "retrying tests"
+    } else if waits {
+        "sleep"
+    } else {
+        ""
+    };
+    let long = if outside.contains("test") { "long tests" } else { "long build" };
+    Call { class, waits, paths, text: outside, why, long }
 }
 
 /// A command without its here-document bodies, and the bodies.
@@ -905,6 +943,37 @@ mod tests {
         p.push(serde_json::json!({"type": "assistant", "timestamp": at(10), "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Waiting for the suite."}]}}).to_string());
         assert_eq!(parsed("x", &p).phase(now(15)), Phase::Coding);
         assert_eq!(parsed("x", &p).phase(now(45)), Phase::Waiting);
+    }
+
+    /// A waiting agent says why when the transcript's tail tells: the call in flight is a retry
+    /// loop, a sleep, a nested agent or a build that has run long; or the turn ended. A wait
+    /// nothing explains (a slow plain command, long silence) gives no reason, and nothing is
+    /// said while it is not waiting.
+    #[test]
+    fn a_waiting_agent_says_why_when_the_transcript_tells() {
+        let waiting = |tool: &str, input: serde_json::Value, after: u32| {
+            let mut l = numbered(|i, s| edit(i, s, "/r/src/a.rs"), 1, 3);
+            l.push(call(4, 10, tool, input, true));
+            let a = parsed("x", &l);
+            (a.phase(now(10 + after)), a.waiting_why(now(10 + after)))
+        };
+        let sh = |cmd: &str, after: u32| waiting("Bash", serde_json::json!({"command": cmd}), after);
+        assert_eq!(sh("until cargo test --workspace 2>&1 | grep -q 'test result: ok'; do sleep 30; done", 60), (Phase::Waiting, Some("retrying tests")));
+        assert_eq!(sh("for i in 1 2 3; do cargo build && break; sleep 5; done", 301), (Phase::Waiting, Some("retrying tests")));
+        assert_eq!(sh("sleep 600", 60), (Phase::Waiting, Some("sleep")));
+        assert_eq!(sh("sleep 60; cargo build 2>&1 | tail", 40), (Phase::Waiting, Some("sleep")));
+        assert_eq!(sh("cargo build --release", 301), (Phase::Waiting, Some("long build")));
+        assert_eq!(sh("cargo test --workspace", 301), (Phase::Waiting, Some("long tests")));
+        assert_eq!(sh("cargo test --workspace", 120), (Phase::Testing, None), "still testing: nothing to explain");
+        assert_eq!(waiting("Agent", serde_json::json!({"description": "review the diff", "prompt": "…"}), 60), (Phase::Waiting, Some("subagent")));
+        assert_eq!(sh("rsync -a big/ copy/", 60), (Phase::Waiting, None), "a slow command or a permission prompt: it cannot tell");
+        // nothing in flight: a turn that ended is parked; plain silence has no reason
+        let mut p = numbered(|i, s| edit(i, s, "/r/src/a.rs"), 1, 3);
+        p.push(serde_json::json!({"type": "assistant", "timestamp": at(10), "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Waiting for the suite."}]}}).to_string());
+        assert_eq!(parsed("x", &p).waiting_why(now(45)), Some("turn ended"));
+        assert_eq!(parsed("x", &p).waiting_why(now(15)), None);
+        let quiet = parsed("x", &numbered(|i, s| edit(i, s, "/r/src/a.rs"), 1, 3));
+        assert_eq!((quiet.phase(now(3 + 700)), quiet.waiting_why(now(3 + 700))), (Phase::Waiting, None));
     }
 
     #[test]
