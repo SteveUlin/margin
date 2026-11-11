@@ -1079,7 +1079,9 @@ impl Store {
             return Err(format!("bad action name {action:?}: letters, digits, - and _"));
         }
         let _l = self.lock().map_err(|e| e.to_string())?;
-        let d = self.load(board)?;
+        // a row that comes from a dataset is not in the stored document: read it in, so the
+        // event carries the record as the pane shows it
+        let d = crate::data::with_rows(self, self.load(board)?);
         let id = if id == "-" { "" } else { id };
         let block = match id {
             "" => None,

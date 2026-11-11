@@ -21,27 +21,57 @@ struct Inotify {
     /// The watch on the pane's own view directory: a write there is this pane saving its view, or
     /// `margin tab` changing the tab set, and neither is a reason to reload the documents.
     view_wd: i32,
+    /// The project directory's watch. Its `.lock` is opened by every command that takes the
+    /// project lock, whatever it then writes: the write itself is the news, not the lock (an
+    /// append to a dataset ten times a second would otherwise reload every tab each time).
+    proj_wd: i32,
+    /// The watches whose changes mean "reload".
+    other: Vec<i32>,
+    /// The watches on datasets: the project's `data/` directory (any name), and the directory of
+    /// each registered external file (that file's name only).
+    data: Vec<(i32, Option<String>)>,
+}
+
+/// What fired since the last look.
+#[derive(Default, Debug, PartialEq)]
+struct Fired {
+    views: bool,
+    /// A dataset's file changed: no document did.
+    data: bool,
+    other: bool,
 }
 
 impl Inotify {
-    fn new(paths: &[std::path::PathBuf], view_dir: &std::path::Path) -> Inotify {
+    /// `paths`: directories to reload on. `proj`: the project directory (one of them).
+    /// `data_dir` and `files`: where the datasets are (data.rs).
+    fn new(paths: &[std::path::PathBuf], view_dir: &std::path::Path, proj: &std::path::Path, data_dir: &std::path::Path, files: &[std::path::PathBuf]) -> Inotify {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-        let add = |p: &std::path::Path| -> i32 {
-            let _ = std::fs::create_dir_all(p);
+        let add = |p: &std::path::Path, make: bool| -> i32 {
+            if make {
+                let _ = std::fs::create_dir_all(p);
+            }
             match CString::new(p.to_string_lossy().as_bytes()) {
                 Ok(c) => unsafe { libc::inotify_add_watch(fd, c.as_ptr(), libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_MODIFY | libc::IN_CREATE) },
                 Err(_) => -1,
             }
         };
-        for p in paths {
-            add(p);
+        let other: Vec<i32> = paths.iter().map(|p| add(p, true)).collect();
+        let view_wd = add(view_dir, true);
+        // the same directory watched twice is one watch: the same descriptor comes back
+        let proj_wd = add(proj, true);
+        let mut data = vec![(add(data_dir, true), None)];
+        for f in files {
+            // an external file's directory, never created here; a file replaced by rename is
+            // still seen, which a watch on the file itself would lose
+            if let (Some(dir), Some(name)) = (f.parent(), f.file_name()) {
+                data.push((add(dir, false), Some(name.to_string_lossy().into_owned())));
+            }
         }
-        let view_wd = add(view_dir);
-        Inotify { fd, view_wd }
+        Inotify { fd, view_wd, proj_wd, other, data }
     }
-    /// Read what fired: (the view directory did, anything else did).
-    fn drain(&self) -> (bool, bool) {
-        let (mut views, mut other) = (false, false);
+    /// Read what fired.
+    fn drain(&self) -> Fired {
+        let mut out = Fired::default();
         let mut buf = [0u8; 4096];
         loop {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
@@ -53,15 +83,20 @@ impl Inotify {
             while at + 16 <= n {
                 let wd = i32::from_ne_bytes(buf[at..at + 4].try_into().unwrap());
                 let len = u32::from_ne_bytes(buf[at + 12..at + 16].try_into().unwrap()) as usize;
+                let raw = &buf[(at + 16).min(n)..(at + 16 + len).min(n)];
+                let name = String::from_utf8_lossy(raw.split(|b| *b == 0).next().unwrap_or(&[])).into_owned();
+                let is_data = self.data.iter().any(|(d, only)| *d == wd && only.as_deref().map(|o| o == name).unwrap_or(true));
                 if wd == self.view_wd {
-                    views = true;
-                } else {
-                    other = true;
+                    out.views = true;
+                } else if is_data {
+                    out.data = true;
+                } else if self.other.contains(&wd) && !(wd == self.proj_wd && name == ".lock") {
+                    out.other = true;
                 }
                 at += 16 + len;
             }
         }
-        (views, other)
+        out
     }
 }
 
@@ -77,7 +112,24 @@ struct Live {
     cfg: Config,
     pane: String,
     view: View,
+    /// The document as the pane shows it: the stored one, with the rows of any table bound to a
+    /// dataset filled in (data.rs `expand`). Never written anywhere.
     doc: crate::doc::Doc,
+    /// The document as stored.
+    raw: crate::doc::Doc,
+    /// The datasets this board reads, as last read; the reads are cached by file length and mtime.
+    data: std::rc::Rc<crate::data::Snapshot>,
+    data_cache: crate::data::Cache,
+    /// A dataset's file changed (or the bindings, or the width) since `data` was read. Only the
+    /// tab on screen reads again: a dataset appended to costs a tab out of view nothing.
+    data_dirty: bool,
+    data_ready: bool,
+    /// The board reads at least one dataset. One that reads none sleeps through their changes.
+    binds: bool,
+    /// This tab is the one on screen, and the pane's width in cells (a plot asks for as many
+    /// records as it has cells).
+    on_screen: bool,
+    cols: u16,
     state: crate::store::State,
     delivered: u64,
     unread: usize,
@@ -281,7 +333,15 @@ impl Live {
             cfg: cfg.clone(),
             pane: pane.to_string(),
             view,
+            raw: doc.clone(),
             doc,
+            data: Default::default(),
+            data_cache: Default::default(),
+            data_dirty: true,
+            data_ready: false,
+            binds: false,
+            on_screen: false,
+            cols: 80,
             state: Default::default(),
             delivered: 0,
             unread: 0,
@@ -318,10 +378,74 @@ impl Live {
         self.view != self.saved || self.scene.focus != self.view.focus || self.scene.anchor.as_ref().map(|a| &a.0) != self.view.anchor.as_ref()
     }
 
+    /// Read the datasets this board is bound to (tail-bounded and cached: data.rs) and fill the
+    /// bound tables' rows. Nothing here is a change to the document: the scene reconciles the
+    /// rows by id without a change bar or an unseen count. True when the content changed.
+    fn refresh_data(&mut self) -> bool {
+        self.data_dirty = false;
+        self.data_ready = true;
+        let wants = crate::data::wants(&self.raw, self.cols);
+        self.binds = !wants.is_empty();
+        let mut snap = crate::data::Snapshot::load(&self.st, &wants, &mut self.data_cache);
+        if snap.same(&self.data) {
+            return false;
+        }
+        snap.gen = crate::data::next_gen();
+        self.data = std::rc::Rc::new(snap);
+        self.doc = crate::data::expand(&self.raw, &self.data);
+        true
+    }
+
+    /// Before a frame of this tab, the one on screen: read its datasets again when one changed
+    /// and the pace allows, and make them the ones components draw from. A change that came too
+    /// soon after the last data frame waits: the time it is due is returned, for a wake-up.
+    fn data_step(&mut self, pace: &mut crate::data::Pace, t: f64, wall: f64) -> Option<f64> {
+        let mut due = None;
+        if self.data_dirty {
+            let hold = pace.hold(t);
+            if hold > 0.0 {
+                due = Some(t + hold);
+            } else {
+                self.refresh_data();
+                pace.drew(t);
+            }
+        }
+        self.show_data(wall);
+        due
+    }
+
+    /// The datasets have never been read (a tab that has not drawn yet).
+    fn data_dirty_first(&self) -> bool {
+        !self.data_ready
+    }
+
+    /// Make this tab's datasets the ones components draw from, and mark what is bound to an
+    /// overdue one. Before every frame of this tab.
+    fn show_data(&mut self, wall: f64) {
+        crate::data::install(self.data.clone());
+        self.scene.data_gen = self.data.gen;
+        let stale = self.data.stale(wall);
+        self.scene.stale_data = if stale.is_empty() {
+            Default::default()
+        } else {
+            crate::data::bound_ids(&self.doc).into_iter().filter_map(|(id, set)| stale.get(&set).map(|why| (id, (set.clone(), why.clone())))).collect()
+        };
+    }
+
     fn reload(&mut self, now: f64) {
         if let Ok(d) = self.st.load(&self.art) {
-            self.doc = d;
+            self.raw = d;
         }
+        // the tab on screen reads its datasets with the document (a binding added by this
+        // revision draws at once); a tab out of view keeps the rows it had until it is shown.
+        // The first load always reads, so opening a pane animates nothing in
+        if self.on_screen || !self.data_ready {
+            self.refresh_data();
+        } else {
+            self.data_dirty = true;
+        }
+        self.doc = crate::data::expand(&self.raw, &self.data);
+        self.scene.data_gen = self.data.gen;
         self.state = self.st.state(&self.art);
         self.activity = crate::link::activity_for(&self.st, &self.art);
         self.scene.recap = crate::recap::for_pane(&self.st, &self.art);
@@ -1095,6 +1219,8 @@ impl Pane {
         // its time on screen starts now
         new.visible_since = None;
         new.last_seen_poll = -10.0;
+        // and its datasets are read again: they were not while it was out of view
+        new.data_dirty = true;
         self.store_set();
         true
     }
@@ -1128,7 +1254,7 @@ impl Pane {
                     unseen: if i == self.active { 0 } else { l.scene.unseen_count() },
                     needs: needs || waiting,
                     // an overdue writer of the board is a failure of the board
-                    failed: failed || !l.scene.stale.is_empty() || l.toasts.iter().any(|t| t.level == "error"),
+                    failed: failed || !l.scene.stale.is_empty() || !l.data.stale(epoch_now()).is_empty() || l.toasts.iter().any(|t| t.level == "error"),
                 }
             })
             .collect()
@@ -1208,6 +1334,31 @@ impl Pane {
     fn view_dir(&self) -> std::path::PathBuf {
         self.tabs[0].st.art(&self.tabs[0].art).join("view")
     }
+
+    /// The registered external dataset files (`margin data add --file`): each is watched where
+    /// it is.
+    fn data_files(&self) -> Vec<std::path::PathBuf> {
+        crate::data::Registry::load(&self.tabs[0].st.dir()).datasets.values().filter_map(|d| d.file.as_ref().map(std::path::PathBuf::from)).collect()
+    }
+
+    /// A dataset's file changed: every tab's datasets are out of date. Nothing is read here.
+    fn data_changed(&mut self) {
+        for l in &mut self.tabs {
+            l.data_dirty = true;
+        }
+    }
+
+    /// Say which tab is on screen, and how wide the pane is.
+    fn on_screen(&mut self, cols: u16) {
+        let active = self.active;
+        for (i, l) in self.tabs.iter_mut().enumerate() {
+            l.on_screen = i == active;
+            if l.on_screen && l.cols != cols {
+                l.cols = cols;
+                l.data_dirty = true;
+            }
+        }
+    }
 }
 
 /// What a pane does on its way out, however it goes: every tab's view is saved, and the marks
@@ -1264,13 +1415,18 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
     };
     // the binary's directory: a build replacing it is how the pane learns to reload
     let exe_dir = exe.as_deref().and_then(|e| e.parent()).map(|d| d.to_path_buf());
-    let watch = |pn: &Pane| {
+    let watch = |pn: &Pane, files: &[std::path::PathBuf]| {
         let mut w = pn.watch();
         w.extend(exe_dir.clone());
-        Inotify::new(&w, &pn.view_dir())
+        let st = &pn.tabs[0].st;
+        Inotify::new(&w, &pn.view_dir(), &st.dir(), &st.data_dir(), files)
     };
-    let mut ino = watch(&pn);
+    let mut data_files = pn.data_files();
+    let mut ino = watch(&pn, &data_files);
+    // frames drawn because a dataset changed: 10 a second at most (data.rs `Pace`)
+    let mut pace = crate::data::Pace::new();
     let now = || clock.elapsed().as_secs_f64();
+    pn.on_screen(term::size().cols);
     pn.reload(0.0);
     for l in &pn.tabs {
         let _ = l.st.log(&l.art, "", "view", json!({"pane": l.pane, "kitty": probe_kitty}), "pane");
@@ -1297,7 +1453,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
                     term.write(&down).map_err(|e| e.to_string())?;
                 }
                 imgs = ImgSync::default();
-                ino = watch(&pn);
+                ino = watch(&pn, &data_files);
                 prev = None;
             }
         };
@@ -1307,15 +1463,17 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         let wall = epoch_now();
         // the tab bar's badges, from every tab; then this iteration is the tab on screen's
         let infos = pn.infos();
+        pn.on_screen(size.cols);
         let active = pn.active;
         let lv = &mut pn.tabs[active];
         lv.scene.tabs = infos;
         lv.scene.tab = active;
+        let data_due = lv.data_step(&mut pace, t, wall);
         // an owner goes stale by the clock alone: looked at on every frame, with a wake-up
         // (below) for the moment the next one would
         lv.scene.stale = crate::owner::stale_on(&lv.st, &lv.art, wall);
         let sent_wait = lv.sent_notes(wall);
-        let next_stale = crate::owner::next_stale(&lv.st, &lv.art, wall);
+        let next_stale = [crate::owner::next_stale(&lv.st, &lv.art, wall), lv.data.next_stale(wall)].into_iter().flatten().min_by(|a, b| a.total_cmp(b));
         // toasts: start each one's clock when the pane is first on screen, drop the ones run out
         if !lv.toasts.is_empty() {
             if lv.toasts.iter().any(|x| !lv.toast_seen.contains_key(&x.id)) && t - toast_vis_t >= 1.0 {
@@ -1453,6 +1611,9 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         if let Some(at) = next_stale {
             wake.at(t + (at - wall).max(0.0) + 0.5);
         }
+        if let Some(at) = data_due {
+            wake.at(at);
+        }
         // a row saying `sent` is looked at again until its note goes
         if sent_wait {
             wake.at(t + 0.5);
@@ -1576,18 +1737,49 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
             let ms = ((d - now()) * 1000.0).ceil().max(0.0) as i32;
             timeout = if timeout < 0 { ms } else { timeout.min(ms) };
         }
-        let (bytes, resized, ready) = term.poll(&[ino.fd], timeout).map_err(|e| e.to_string())?;
+        // sleep until something happens. A dataset changing is held to the pace: while the
+        // last data frame is less than `Pace::GAP` old and nothing else happened, the pane goes
+        // back to sleep until the gap is up, so a burst of appends draws a bounded number of frames
+        let deadline = (timeout >= 0).then(|| now() + timeout as f64 / 1000.0);
+        let (bytes, resized) = loop {
+            let (bytes, resized, ready) = term.poll(&[ino.fd], timeout).map_err(|e| e.to_string())?;
+            let t = now();
+            let mut only_data = false;
+            if !ready.is_empty() {
+                let fired = ino.drain();
+                if fired.other {
+                    pn.reload(t);
+                    // a dataset registered on a file of its own is watched where that file is
+                    let files = pn.data_files();
+                    if files != data_files {
+                        data_files = files;
+                        ino = watch(&pn, &data_files);
+                    }
+                }
+                // the view directory: this pane's own saves, or `margin tab` changing the set
+                if fired.views {
+                    follow!();
+                }
+                if fired.data {
+                    pn.data_changed();
+                }
+                only_data = fired == Fired { data: true, ..Default::default() };
+            }
+            // a board that reads no dataset has nothing to draw for one; a board that does
+            // waits out the pace
+            let (hold, idle) = (pace.hold(t), !pn.lv().binds && !pn.lv().data_dirty_first());
+            if only_data && bytes.is_empty() && !resized && (idle || hold > 0.0) {
+                let rest = deadline.map(|d| ((d - t) * 1000.0).ceil().max(0.0) as i32);
+                timeout = match (idle, rest) {
+                    (true, r) => r.unwrap_or(-1),
+                    (false, Some(r)) => r.min((hold * 1000.0).ceil() as i32),
+                    (false, None) => (hold * 1000.0).ceil() as i32,
+                };
+                continue;
+            }
+            break (bytes, resized);
+        };
         let t = now();
-        if !ready.is_empty() {
-            let (views, other) = ino.drain();
-            if other {
-                pn.reload(t);
-            }
-            // the view directory: this pane's own saves, or `margin tab` changing the set
-            if views {
-                follow!();
-            }
-        }
         if resized {
             size = term::size();
             prev = None;
@@ -1868,6 +2060,177 @@ mod action_tests {
             .frame(&Input { doc: &lv.doc, state: &lv.state, view: &lv.view, delivered: 0, unread: 0, now: 10.0, wall: epoch_now(), cfg: &lv.cfg, kitty: false, cell: (10, 20), focused_pane: true, mouse: true, project: "proj", w, h: 30, activity: &[] })
             .grid;
         (g.to_text(), g)
+    }
+
+    /// A board bound to two datasets, in a pane: a plot, a line of text and a table.
+    fn data_board() -> (Store, Pane) {
+        let st = crate::store::tests::temp_store();
+        crate::data::tests::held(&st, "requests");
+        crate::data::tests::held(&st, "prs");
+        st.data_put("requests", None, &(0..5).map(|i| json!({"rps": 70 + i})).collect::<Vec<_>>()).unwrap();
+        st.data_put("prs", None, &[json!({"id": 12, "title": "Cache the layout"}), json!({"id": 14, "title": "Fix the flaky test", "target": "https://example.com/14"})]).unwrap();
+        let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "dash", "title": "Dash", "blocks": [
+            {"type": "plot", "id": "load", "kind": "spark", "data": "requests", "y": ["rps"], "last": 5},
+            {"type": "text", "id": "note", "text": "now ~[@requests.rps:3]"},
+            {"type": "table", "id": "pr", "rows": "prs", "key": "id", "actions": [{"key": "e", "name": "retry"}], "columns": [{"key": "id", "title": "PR"}, {"key": "title", "title": "Title"}]}]}))
+        .unwrap();
+        st.put(doc, None).unwrap();
+        st.put(serde_json::from_value(json!({"id": "other", "title": "Other", "blocks": [{"type": "text", "id": "x", "text": "nothing bound"}]})).unwrap(), None).unwrap();
+        let mut pn = Pane::open(&st, "dash", &["other".to_string()], &Config::default(), "tty", false, true).unwrap();
+        pn.on_screen(80);
+        pn.reload(0.0);
+        (st, pn)
+    }
+
+    /// One frame of the tab on screen at `now`, the way the loop draws it: the datasets first.
+    fn data_frame(pn: &mut Pane, pace: &mut crate::data::Pace, now: f64) -> String {
+        pn.on_screen(80);
+        let lv = pn.lv();
+        lv.data_step(pace, now, epoch_now());
+        lv.scene.frame(&Input { doc: &lv.doc, state: &lv.state, view: &lv.view, delivered: 0, unread: 0, now, wall: epoch_now(), cfg: &lv.cfg, kitty: false, cell: (10, 20), focused_pane: false, mouse: false, project: "proj", w: 80, h: 24, activity: &[] }).grid.to_text()
+    }
+
+    /// A dataset changing is not the document changing: the plot and the inline strip draw the
+    /// new numbers, a table's rows keep their ids (the focus stays on a record, a record that
+    /// goes collapses away, a new one opens), and through all of it the board has the revision
+    /// it had, no change bar, no unseen count and no "new" in its title bar.
+    #[test]
+    fn a_dataset_change_redraws_without_a_revision_a_change_bar_or_an_unseen_count() {
+        let (st, mut pn) = data_board();
+        let mut pace = crate::data::Pace::new();
+        let t = data_frame(&mut pn, &mut pace, 1.0);
+        assert!(t.contains("12 Cache the layout") && t.contains("14 Fix the flaky test") && t.contains("now ▁▅█"), "{t}");
+        let ids = |pn: &mut Pane| pn.lv().doc.find("pr").unwrap().children.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&mut pn), ["pr-12", "pr-14"], "a row's id is the table's id and the record's key");
+        assert!(pn.lv().scene.focusable.contains(&"pr-14".to_string()));
+        pn.lv().scene.focus = Some("pr-14".into());
+        let rev = st.load("dash").unwrap().rev;
+        // new numbers, a record gone and a record new
+        st.data_append("requests", None, &[json!({"rps": 10}), json!({"rps": 200})]).unwrap();
+        st.data_put("prs", None, &[json!({"id": 14, "title": "Fix the flaky test"}), json!({"id": 15, "title": "A third"})]).unwrap();
+        pn.data_changed();
+        let t = data_frame(&mut pn, &mut pace, 10.0);
+        assert!(t.contains("now ▃▁█"), "{t}");
+        assert_eq!(ids(&mut pn), ["pr-14", "pr-15"]);
+        let lv = pn.lv();
+        assert_eq!((lv.scene.focus.as_deref(), lv.doc.rev, lv.raw.rev, st.load("dash").unwrap().rev), (Some("pr-14"), rev, rev, rev));
+        assert!(lv.raw.find("pr").unwrap().children.is_empty(), "the rows live in the pane's copy only");
+        // the row that went is leaving (it collapses where it was), the new one is opening
+        assert!(lv.scene.retained.get("pr-12").map(|n| n.leaving).unwrap_or(false), "pr-12 animates out");
+        assert!(lv.scene.retained.get("pr-15").is_some());
+        // and nothing is marked as changed: no bar, no unseen count, no tour stop, no title tag
+        assert!(lv.scene.retained.nodes.values().all(|n| n.change.is_none() && !n.unseen), "a change bar or an unseen mark");
+        assert_eq!((lv.scene.unseen_count(), lv.scene.change_step(true)), (0, None));
+        let later = data_frame(&mut pn, &mut pace, 30.0);
+        assert!(!later.lines().next().unwrap().contains(" new ") && !later.contains("Cache the layout") && later.contains("15 A third"), "{later}");
+        assert_eq!(pn.infos()[0].unseen, 0);
+        // the action's event carries the record
+        pn.lv().fire("pr-15", "retry", "key", 31.0);
+        let ev = st.events().into_iter().find(|e| e.kind == "dash.retry").unwrap();
+        assert_eq!((ev.id.as_str(), ev.value["cells"]["title"].as_str(), ev.rev), ("pr-15", Some("A third"), rev));
+        // a real change to the document is still one
+        st.patch("dash", &[crate::doc::Op::Set { id: "note".into(), field: "text".into(), value: json!("edited ~[@requests.rps:3]") }], None).unwrap();
+        pn.reload(40.0);
+        data_frame(&mut pn, &mut pace, 40.0);
+        assert!(pn.lv().scene.retained.get("note").unwrap().unseen && pn.lv().doc.rev == rev + 1);
+        assert_eq!(ids(&mut pn), ["pr-14", "pr-15"], "and the rows are still there after a reload");
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// The pace and the tab on screen bound what a busy dataset costs: a burst of appends is
+    /// read and drawn at most once per `Pace::GAP`, an unchanged file is not read at all, and a
+    /// tab out of view reads nothing until it is shown.
+    #[test]
+    fn a_burst_of_appends_is_read_at_the_pace_and_only_by_the_tab_on_screen() {
+        let (st, mut pn) = data_board();
+        let mut pace = crate::data::Pace::new();
+        data_frame(&mut pn, &mut pace, 1.0);
+        let r0 = crate::data::reads();
+        // 50 appends 10 ms apart: half a second
+        let mut refreshes = 0;
+        for i in 0..50 {
+            let t = 2.0 + i as f64 * 0.01;
+            st.data_append("requests", None, &[json!({"rps": i})]).unwrap();
+            pn.data_changed();
+            let before = crate::data::reads();
+            let due = pn.lv().data_step(&mut pace, t, epoch_now());
+            let read = crate::data::reads() > before;
+            refreshes += read as usize;
+            assert!(read || due.is_some(), "a change that is not drawn is owed a wake-up");
+        }
+        assert!((4..=6).contains(&refreshes), "{refreshes} reads for 50 appends in half a second");
+        // the wake-up comes: the last appends are drawn
+        let t = data_frame(&mut pn, &mut pace, 3.0);
+        assert!(!pn.lv().data_dirty && t.contains("now ▁▅█"), "{t}");
+        // nothing changed: a frame reads nothing (the cache is by length and mtime)
+        let r1 = crate::data::reads();
+        pn.data_changed();
+        data_frame(&mut pn, &mut pace, 4.0);
+        assert_eq!(crate::data::reads(), r1);
+        assert!(r1 - r0 < 20);
+        // the other tab on screen: appends are not read by the board out of view
+        pn.switch(1);
+        data_frame(&mut pn, &mut pace, 5.0);
+        let r2 = crate::data::reads();
+        for i in 0..20 {
+            st.data_append("requests", None, &[json!({"rps": 500 + i})]).unwrap();
+            pn.data_changed();
+            data_frame(&mut pn, &mut pace, 6.0 + i as f64);
+        }
+        assert_eq!(crate::data::reads(), r2, "a tab out of view costs nothing");
+        assert!(!pn.lv().binds && pn.tabs[0].data_dirty);
+        pn.switch(0);
+        let t = data_frame(&mut pn, &mut pace, 60.0);
+        assert!(crate::data::reads() > r2 && t.contains("now ▁▅█"), "shown again, it reads: {t}");
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// An overdue dataset marks what is bound to it the way an overdue owner marks its rows, and
+    /// puts the failure mark on the board's tab.
+    #[test]
+    fn an_overdue_dataset_marks_what_is_bound_to_it() {
+        let (st, mut pn) = data_board();
+        st.data_set("prs", |d| d.expect_every = Some(600.0)).unwrap();
+        pn.reload(0.0);
+        let mut pace = crate::data::Pace::new();
+        let t = data_frame(&mut pn, &mut pace, 1.0);
+        assert!(!t.contains("stale") && !pn.infos()[0].failed, "{t}");
+        let next = pn.lv().data.next_stale(epoch_now()).unwrap();
+        assert!((next - epoch_now() - 600.0).abs() < 5.0, "the pane wakes when it would go stale");
+        // an hour on
+        let lv = pn.lv();
+        lv.show_data(epoch_now() + 3600.0);
+        assert_eq!(lv.scene.stale_data.keys().cloned().collect::<std::collections::BTreeSet<_>>(), ["pr", "pr-12", "pr-14"].iter().map(|s| s.to_string()).collect());
+        let t = lv.scene.frame(&Input { doc: &lv.doc, state: &lv.state, view: &lv.view, delivered: 0, unread: 0, now: 2.0, wall: epoch_now() + 3600.0, cfg: &lv.cfg, kitty: false, cell: (10, 20), focused_pane: false, mouse: false, project: "proj", w: 90, h: 24, activity: &[] }).grid.to_text();
+        assert_eq!(t.matches("◷ stale · last updated 1h ago, expected every 10m").count(), 1, "{t}");
+        assert_eq!(t.matches("◷ stale").count(), 3, "the table and its two rows: {t}");
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// What the pane's watches report: a dataset's file is `data` and never a reload; the project
+    /// lock every command opens is nothing; an external file counts by its own name only.
+    #[test]
+    fn the_watch_tells_a_dataset_from_a_document_and_ignores_the_lock() {
+        let st = crate::store::tests::temp_store();
+        let ext = st.home.join("elsewhere");
+        std::fs::create_dir_all(&ext).unwrap();
+        crate::data::tests::held(&st, "requests");
+        st.data_add("log", crate::data::Dataset { file: Some(ext.join("app.jsonl").display().to_string()), ..Default::default() }).unwrap();
+        let ino = Inotify::new(&[st.dir()], &st.dir().join("view"), &st.dir(), &st.data_dir(), &[ext.join("app.jsonl")]);
+        // making the watched directories is itself news: read past it
+        ino.drain();
+        assert_eq!(ino.drain(), Fired::default());
+        st.data_append("requests", None, &[json!(1)]).unwrap();
+        assert_eq!(ino.drain(), Fired { data: true, ..Default::default() }, "an append: the lock is taken, the file grows, no document changed");
+        std::fs::write(ext.join("unrelated.txt"), "x").unwrap();
+        assert_eq!(ino.drain(), Fired::default(), "another file beside an external dataset");
+        std::fs::write(ext.join("app.jsonl"), "{\"a\": 1}\n").unwrap();
+        assert_eq!(ino.drain(), Fired { data: true, ..Default::default() });
+        st.emit("x.y", "", "", json!(1), "you", "emit").unwrap();
+        assert_eq!(ino.drain(), Fired { other: true, ..Default::default() }, "an event is appended to the log in the project directory");
+        st.data_set("requests", |d| d.cap = Some(9)).unwrap();
+        assert!(ino.drain().other, "the registry changed: reload, and look at the watches again");
+        std::fs::remove_dir_all(&st.home).ok();
     }
 
     /// An action's key on a feed-owned row appends `<board>.<name>` with the row's id and a

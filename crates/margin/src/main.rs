@@ -8,6 +8,7 @@ mod attention;
 mod components;
 mod config;
 mod daemon;
+mod data;
 mod demo;
 mod detail;
 mod diffblock;
@@ -83,6 +84,10 @@ handlers and outside writers (margin runs a command only for an event; schedulin
   margin owner add <name> --board B --owns PREFIX [--expect-every 10m]   rows an outside program writes: margin apply B --as <name>
   margin owner set <name> ... | ls [--json] | rm <name>
   margin daemon [status | install | uninstall] [--unit-dir D]   the dispatcher (started on demand); status, and a systemd user unit
+
+datasets (values a board displays, outside the document; the pane reads them when it draws):
+  margin data add <name> [--cap N] [--file PATH] [--owner OWNER] [--expect-every 10s]   register one (--file: an external JSONL or CSV file, read in place)
+  margin data set <name> ... | append <name> <VALUE|JSON|-> | put <name> < records | show <name> [--last N] | ls [--json] | rm <name>
 
 feeds (the older runner: scripts on a timer, a file watch or as a stream; margin help feeds):
   margin feed add <name> [--every 10s | --watch <path>... | --stream] [--artifact A] [--owns PREFIX]
@@ -176,6 +181,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "doctor", help: "margin doctor [--fix] [--days N]\n  what was left behind by a session, a pane or a daemon that went without saying so, and what on\n  a board cannot work yet. Lists, and removes nothing without --fix:\n    stale  rewake and review marks whose process is gone; the cursor, activity entry and pane view\n           of a session or pane untouched for N days (default: config archive_days, else 30); the\n           pid file of a daemon that is not running; a handler recorded as running when none is\n    note   a board whose rows have targets or actions that no handler takes (with the line that\n           registers one); history.jsonl files, which margin no longer writes (delete them by hand)\n  --fix removes the stale items. It never touches a board, an event, a named cursor (a tool's or a\n  handler's) or a registration, and it is safe to run at any time. margin help lifecycle\n", flags: &["--fix", "--days"], max_pos: Some(0) },
     Cmd { name: "handler", help: HANDLER_HELP, flags: &[], max_pos: None },
     Cmd { name: "handle", help: "margin handle open\n  a ready-made handler command: reads events on stdin (one JSON object per line) and opens each\n  event's value.target: a URL with the configured opener (config key opener; default xdg-open, or\n  `opener` over ssh), an mg: token by applying it, mg:open/<artifact> by showing that artifact.\n  With $MARGIN_DRY_OPEN=FILE it appends each target to FILE and opens nothing. A target that fails\n  to open is reported on stderr and the run still exits 0 (a retry would open the others twice)\n  The pane never opens anything itself: enter or a click on a row with a target appends the event\n  <board>.open, and this is the handler for it. Register it once per project:\n    margin handler add open --on '*.open' -- margin handle open\n", flags: &[], max_pos: Some(1) },
+    Cmd { name: "data", help: DATA_HELP, flags: &["--cap", "--file", "--owner", "--expect-every", "--as", "--last", "--json"], max_pos: Some(3) },
     Cmd { name: "owner", help: OWNER_HELP, flags: &["--board", "--owns", "--expect-every", "--json"], max_pos: Some(2) },
     Cmd { name: "demo", help: "margin demo [live [--speed X]]\n  create the demo artifact `plan` (run again, it resets it; a `plan` that is not the demo's is\n  refused); `live` plays updates into it\n", flags: &["--speed"], max_pos: Some(1) },
     Cmd { name: "feed", help: FEED_HELP, flags: &[], max_pos: None },
@@ -312,6 +318,37 @@ const OWNER_HELP: &str = "owners: programs margin does not run, registered as th
       long ago it wrote is the one thing margin knows about a program it does not run
   The program writes as often as it likes: `... | margin apply B --as <name>` (ops and components,
   all or nothing; a write that changes nothing still counts as a write). margin help integrate
+";
+
+const DATA_HELP: &str = "datasets: values a board displays, kept outside the document and read by the pane when it draws
+  margin data add <name> [--cap N] [--file PATH] [--owner OWNER] [--expect-every 10s]
+      create: register a dataset in this project. A name that exists is refused
+  margin data set <name> [--cap N|none] [--file PATH|none] [--owner OWNER|none] [--expect-every 10s|none]
+      change: only what you pass changes; a missing name is refused
+  margin data append <name> <VALUE | JSON | -> [--as OWNER]
+      add one record at the end: a number (71.4) or a JSON object ('{\"t\":\"2026-11-10T19:40:00Z\",\"rps\":71.4}').
+      - reads many from stdin, one per line. One write, so a reader sees a record whole or not at all
+  margin data put <name> [--as OWNER] < records
+      replace the content: a JSON array of records, or JSON lines, on stdin (empty: no records)
+  margin data show <name> [--last N] [--json]
+      the newest records (default 10), read from the end of the file; --json: {v, name, records, ...}
+  margin data ls [--json]
+      each dataset: where it is, its size, when it last changed, and STALE when that is overdue
+  margin data rm <name>
+      unregister it. Records margin holds move to the project's .archive/; an external file stays
+  A record is a JSON object or a bare number (a dataset of bare numbers is one unnamed series).
+  Writes go to a registered name only: a missing one is an error naming margin data add
+  --cap N            keep the newest N records: once the file holds more than 2N it is rewritten to N
+  --file PATH        an external file its provider already writes: JSON lines, or CSV with a header
+                     row (by the .csv extension). margin reads it in place and never writes it, so
+                     put and append are refused. A relative path is resolved here and stored absolute
+  --owner OWNER      only that registered owner (margin owner add) may write, with --as OWNER
+  --expect-every 10s how often it means to change. Once its last change is older than that, the
+                     components bound to it show as stale in the pane and data ls says so
+  A board binds to a dataset by name: a plot (\"data\": name), a table (\"rows\": name), a run strip
+  (\"data\": name) and ~[@name] in text. margin schema plot|table|runs and margin help dashboards
+  (\"Numbers that change often\") have the fields. A dataset changing is not the board changing: no
+  revision, no change bar, no unseen count
 ";
 
 const RENDER_HELP: &str = "margin render <art> [<art>...] [--width W] [--height H] [--section ID]... [--focus ID] [--focused]
@@ -1335,6 +1372,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "daemon" => daemon_cmd(a)?,
         "owner" => owner_cmd(a)?,
+        "data" => data_cmd(a)?,
         "handle" => match a.pos(0, "open")? {
             "open" => handle_open(&stdin(), &cfg)?,
             other => return Err(format!("no built-in handler {other:?}: margin handle open")),
@@ -1350,12 +1388,18 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             });
             let tab = a.get("--tab").map(|t| set.iter().position(|x| x == t).ok_or_else(|| format!("--tab {t}: not one of {}", set.join(" ")))).transpose()?.unwrap_or(0);
             let art = set.get(tab).map(|s| s.as_str()).ok_or("missing <artifact>")?;
+            let w: u16 = a.get("--width").and_then(|x| x.parse().ok()).unwrap_or(62);
+            // the datasets the board reads, as the pane would read them now (data.rs)
             let d = st.load(art)?;
+            let mut snap = data::Snapshot::load(&st, &data::wants(&d, w), &mut data::Cache::default());
+            snap.gen = data::next_gen();
+            let snap = std::rc::Rc::new(snap);
+            let d = data::expand(&d, &snap);
+            data::install(snap.clone());
             let s = st.state(art);
             let mut v = st.view(art, a.get("--pane").unwrap_or("tty"));
             v.detail |= a.has("--detail");
             render_view(&d, &mut v, a.all("--section"), a.get("--focus"))?;
-            let w: u16 = a.get("--width").and_then(|x| x.parse().ok()).unwrap_or(62);
             let h: u16 = a.get("--height").and_then(|x| x.parse().ok()).unwrap_or(40);
             let at: f64 = a.get("--at").and_then(|x| x.parse().ok()).unwrap_or(10.0);
             let mut cfg = cfg;
@@ -1366,6 +1410,9 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             sc.restore(&v);
             sc.recap = recap::for_pane(&st, art);
             sc.stale = owner::stale_on(&st, art, util::epoch_now());
+            sc.data_gen = snap.gen;
+            let overdue = snap.stale(util::epoch_now());
+            sc.stale_data = data::bound_ids(&d).into_iter().filter_map(|(id, set)| overdue.get(&set).map(|why| (id, (set.clone(), why.clone())))).collect();
             (sc.linked, sc.ended) = link::liveness(&st, art);
             sc.agents = agents::for_pane(&st, art);
             sc.toasts = toast::load(&st, art).into_iter().map(|t| (t, 1.0)).collect();
@@ -1605,7 +1652,7 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
 /// handler, an owner, a feed), 1 for everything else (refused, invalid, failed). A script can
 /// tell "not created yet" from "something is wrong" without reading the message.
 fn exit_code(e: &str) -> i32 {
-    if ["no artifact ", "no component ", "no handler ", "no owner ", "no feed "].iter().any(|p| e.starts_with(p)) {
+    if ["no artifact ", "no component ", "no handler ", "no owner ", "no feed ", "no dataset "].iter().any(|p| e.starts_with(p)) {
         3
     } else {
         1
@@ -1880,6 +1927,185 @@ fn owner_cmd(a: &Args) -> Result<(), String> {
             }
         }
         s => return Err(format!("unknown owner command {s:?}: add, set, ls, rm")),
+    }
+    Ok(())
+}
+
+/// `margin data …`: the registry of datasets, and their records.
+fn data_cmd(a: &Args) -> Result<(), String> {
+    use data::{Dataset, Registry};
+    let st = store(a);
+    let sub = a.pos(0, "add|set|put|append|show|ls|rm")?;
+    let name = || a.pos(1, "name");
+    for f in ["--cap", "--file", "--owner", "--expect-every", "--as", "--last"] {
+        if a.has(f) && a.get(f).is_none() {
+            return Err(format!("{f} needs a value"));
+        }
+    }
+    let takes: &[&str] = match sub {
+        "add" | "set" => &["--cap", "--file", "--owner", "--expect-every"],
+        "put" | "append" => &["--as"],
+        "show" => &["--last", "--json"],
+        "ls" => &["--json"],
+        _ => &[],
+    };
+    if let Some((f, _)) = a.flags.iter().find(|(f, _)| !takes.contains(&f.as_str()) && !GLOBAL_FLAGS.contains(&f.as_str())) {
+        return Err(format!("margin data {sub} takes no {f}; margin data --help"));
+    }
+    let max = match sub {
+        "ls" => 1,
+        "append" => 3,
+        _ => 2,
+    };
+    if a.pos.len() > max {
+        return Err(format!("unexpected argument {:?}; margin data --help", a.pos[max]));
+    }
+    // each flag as Some(new value), where the word `none` clears it (set only)
+    let none = |v: &str| v == "none" && sub == "set";
+    let cap = match a.get("--cap") {
+        None => None,
+        Some(v) if none(v) => Some(None),
+        Some(v) => Some(Some(v.parse::<u64>().ok().filter(|n| *n >= 1).ok_or_else(|| format!("bad --cap {v:?}: a number of records, 1 or more"))?)),
+    };
+    let expect = match a.get("--expect-every") {
+        None => None,
+        Some(v) if none(v) => Some(None),
+        Some(v) => Some(Some(util::parse_duration(v).ok_or_else(|| format!("bad --expect-every {v:?}: a duration such as 10s, 5m, 1h"))?)),
+    };
+    let file = match a.get("--file") {
+        None => None,
+        Some(v) if none(v) => Some(None),
+        // absolute, from here: the pane and every later command run somewhere else
+        Some(v) => Some(Some(std::path::absolute(v).map_err(|e| format!("--file {v}: {e}"))?.display().to_string())),
+    };
+    let owner = match a.get("--owner") {
+        None => None,
+        Some(v) if none(v) => Some(None),
+        Some(v) => Some(Some(v.to_string())),
+    };
+    let describe = |n: &str, d: &Dataset| {
+        let mut parts = vec![match &d.file {
+            Some(f) => format!("reads {f} in place"),
+            None => "held by margin".to_string(),
+        }];
+        parts.extend(d.cap.map(|c| format!("newest {c} kept")));
+        parts.extend(d.owner.as_ref().map(|o| format!("written only by owner {o}")));
+        parts.extend(d.expect_every.map(|e| format!("expected every {}", feed::fmt_secs(e))));
+        format!("dataset {n}: {}", parts.join(", "))
+    };
+    match sub {
+        "add" => {
+            let n = name()?;
+            let d = Dataset { owner: owner.flatten(), cap: cap.flatten(), file: file.flatten(), expect_every: expect.flatten(), added: util::now_rfc3339() };
+            st.data_add(n, d.clone())?;
+            println!("{}", describe(n, &d));
+            match &d.file {
+                Some(f) if !std::path::Path::new(f).exists() => eprintln!("margin data: {f} is not there yet; a board bound to {n} says so until it is"),
+                Some(_) => {}
+                None => println!("write it with: margin data append {n} <value>{}", d.owner.as_ref().map(|o| format!(" --as {o}")).unwrap_or_default()),
+            }
+        }
+        "set" => {
+            let n = name()?;
+            if cap.is_none() && expect.is_none() && file.is_none() && owner.is_none() {
+                return Err("nothing to change: --cap, --file, --owner or --expect-every (each takes `none` to clear it)".into());
+            }
+            let d = st.data_set(n, |d| {
+                if let Some(c) = cap {
+                    d.cap = c;
+                }
+                if let Some(e) = expect {
+                    d.expect_every = e;
+                }
+                if let Some(f) = file.clone() {
+                    d.file = f;
+                }
+                if let Some(o) = owner.clone() {
+                    d.owner = o;
+                }
+            })?;
+            println!("{}", describe(n, &d));
+        }
+        "append" => {
+            let n = name()?;
+            let recs = match a.pos.get(2).map(String::as_str) {
+                None => return Err("missing the record: a number, a JSON object, or - for JSON lines on stdin".into()),
+                Some("-") => data::parse_records(&stdin())?,
+                Some(w) => vec![data::parse_record(w)?],
+            };
+            st.data_append(n, a.get("--as"), &recs)?;
+        }
+        "put" => {
+            let n = name()?;
+            let recs = data::parse_records(&stdin())?;
+            let kept = st.data_put(n, a.get("--as"), &recs)?;
+            println!("dataset {n}: {kept} record{}", if kept == 1 { "" } else { "s" });
+        }
+        "show" => {
+            let n = name()?;
+            let r = Registry::load_strict(&st.dir())?;
+            let d = r.datasets.get(n).ok_or_else(|| st.missing_data(n))?;
+            let last = match a.get("--last") {
+                None => 10,
+                Some(v) => v.parse::<usize>().ok().filter(|k| *k >= 1).ok_or_else(|| format!("bad --last {v:?}: a number of records"))?,
+            };
+            let p = st.data_path(n, d);
+            let t = data::read_tail(&p, last, data::format_of(&p)).map_err(|e| format!("dataset {n}: cannot read {} ({e})", p.display()))?;
+            if a.has("--json") {
+                println!("{}", json!({"v": 1, "name": n, "path": p.display().to_string(), "external": d.file.is_some(), "owner": d.owner, "cap": d.cap, "expect_every": d.expect_every, "stale": st.data_stale(n, d, util::epoch_now()).is_some(), "records": t.records}));
+                return Ok(());
+            }
+            for r in &t.records {
+                println!("{r}");
+            }
+        }
+        "ls" => {
+            let r = Registry::load_strict(&st.dir())?;
+            let now = util::epoch_now();
+            let rows: Vec<(&String, &Dataset, std::path::PathBuf, Option<u64>, Option<f64>, Option<String>)> = r
+                .datasets
+                .iter()
+                .map(|(n, d)| {
+                    let p = st.data_path(n, d);
+                    (n, d, p.clone(), std::fs::metadata(&p).ok().map(|m| m.len()), data::last_change(&p), st.data_stale(n, d, now))
+                })
+                .collect();
+            if a.has("--json") {
+                let v: Vec<Value> = rows.iter().map(|(n, d, p, len, at, stale)| json!({"name": n, "path": p.display().to_string(), "external": d.file.is_some(), "owner": d.owner, "cap": d.cap, "expect_every": d.expect_every, "added": d.added, "bytes": len, "changed": at.map(util::rfc3339), "stale": stale.is_some()})).collect();
+                println!("{}", json!({"v": 1, "datasets": v}));
+                return Ok(());
+            }
+            if rows.is_empty() {
+                println!("no datasets in project {}", st.project);
+            }
+            for (n, d, p, len, at, stale) in rows {
+                let size = match len {
+                    None => "missing".to_string(),
+                    Some(b) if b < 1024 => format!("{b} B"),
+                    Some(b) if b < 1024 * 1024 => format!("{:.1} kB", b as f64 / 1024.0),
+                    Some(b) => format!("{:.1} MB", b as f64 / 1048576.0),
+                };
+                let changed = at.map(|t| format!("changed {}", util::ago(now - t))).unwrap_or_else(|| "no records yet".into());
+                let health = match (stale, d.expect_every) {
+                    (Some(why), _) => format!("STALE: {why}"),
+                    (None, Some(e)) => format!("{changed} (expected every {})", feed::fmt_secs(e)),
+                    (None, None) => changed,
+                };
+                let mut notes = Vec::new();
+                notes.extend(d.file.as_ref().map(|_| format!("reads {}", p.display())));
+                notes.extend(d.cap.map(|c| format!("cap {c}")));
+                notes.extend(d.owner.as_ref().map(|o| format!("owner {o}")));
+                println!("{:<14} {:>9}  {health}{}", n, size, if notes.is_empty() { String::new() } else { format!("  ({})", notes.join(", ")) });
+            }
+        }
+        "rm" => {
+            let n = name()?;
+            match st.data_rm(n)? {
+                Some(kept) => println!("removed dataset {n}; its records are kept in {}", kept.display()),
+                None => println!("removed dataset {n}"),
+            }
+        }
+        s => return Err(format!("unknown data command {s:?}: add, set, put, append, show, ls, rm")),
     }
     Ok(())
 }

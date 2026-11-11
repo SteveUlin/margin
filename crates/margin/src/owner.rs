@@ -37,17 +37,25 @@ impl Owner {
     /// Why it is stale, or None: `last updated 3h ago, expected every 10m`. An owner that has
     /// never written is measured from its registration.
     pub fn stale(&self, now: f64) -> Option<String> {
-        let every = self.expect_every?;
-        let (at, wrote) = match crate::util::parse_rfc3339(&self.last_write) {
-            Some(t) => (t, true),
-            None => (crate::util::parse_rfc3339(&self.added)?, false),
-        };
-        if now - at <= every {
-            return None;
-        }
-        let every = crate::feed::fmt_secs(every);
-        Some(if wrote { format!("last updated {}, expected every {every}", crate::util::ago(now - at)) } else { format!("never updated, expected every {every}") })
+        overdue(self.expect_every, crate::util::parse_rfc3339(&self.last_write), crate::util::parse_rfc3339(&self.added), now)
     }
+}
+
+/// The staleness rule, for an owner's rows and for a dataset (data.rs) alike: with an expected
+/// interval `every`, a writer whose last write (`last`, epoch seconds) is older than that is
+/// overdue, and one that has never written is measured from its registration (`added`). Returns
+/// why, in the words the pane and the `ls` commands show.
+pub fn overdue(every: Option<f64>, last: Option<f64>, added: Option<f64>, now: f64) -> Option<String> {
+    let every = every?;
+    let (at, wrote) = match last {
+        Some(t) => (t, true),
+        None => (added?, false),
+    };
+    if now - at <= every {
+        return None;
+    }
+    let every = crate::feed::fmt_secs(every);
+    Some(if wrote { format!("last updated {}, expected every {every}", crate::util::ago(now - at)) } else { format!("never updated, expected every {every}") })
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]

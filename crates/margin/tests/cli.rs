@@ -133,6 +133,12 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("owner", s(&["add", "w", "--board", "a", "--owns", "ow"]), "", true),
         ("owner", s(&["ls"]), "", true),
         ("owner", s(&["rm", "w"]), "", true),
+        ("data", s(&["add", "nums", "--cap", "100"]), "", true),
+        ("data", s(&["append", "nums", "3.5"]), "", true),
+        ("data", s(&["put", "nums"]), "[1, 2, {\"v\": 3}]", true),
+        ("data", s(&["show", "nums"]), "", true),
+        ("data", s(&["ls"]), "", true),
+        ("data", s(&["rm", "nums"]), "", true),
         ("daemon", s(&["status"]), "", true),
         ("doctor", s(&[]), "", true),
         ("init", s(&["--dry-run", "--claude-dir", &claude_dir]), "", true),
@@ -706,6 +712,92 @@ fn queries_are_json_and_not_found_is_exit_3() {
         let (code, _, err) = run(&argv, "");
         assert!(code == 1 && !err.is_empty(), "{argv:?}: {code} {err}");
     }
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// Datasets from the command line: registered once, appended to from anywhere, read by a board
+/// that binds to them by name. New numbers change what the board draws and nothing about the
+/// board: its revision stays where it was. A file the provider already writes is read in place.
+#[test]
+fn a_dataset_feeds_a_board_without_touching_its_revision() {
+    let (decoy, home) = (temp("data-decoy"), temp("data-home"));
+    let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
+    let json = |out: &str| -> serde_json::Value { serde_json::from_str(out).unwrap_or_else(|e| panic!("{e}: {out}")) };
+    // create and change are separate; a write to an unregistered name is exit 3 with the fix
+    let (code, _, err) = run(&["data", "append", "requests", "1"], "");
+    assert!(code == 3 && err.contains("no dataset \"requests\" in project p: create it with margin data add requests"), "{code} {err}");
+    assert_eq!(run(&["data", "set", "requests", "--cap", "5"], "").0, 3);
+    assert_eq!(run(&["data", "add", "requests", "--cap", "50", "--expect-every", "1h"], "").0, 0);
+    let (code, _, err) = run(&["data", "add", "requests"], "");
+    assert!(code == 1 && err.contains("exists: change it with margin data set requests"), "{err}");
+    let (code, _, err) = run(&["data", "append", "request", "1"], "");
+    assert!(code == 3 && err.contains("(did you mean \"requests\"?)"), "{err}");
+    assert_eq!(run(&["data", "set", "requests", "--cap", "40"], "").0, 0);
+    assert_eq!(run(&["data", "add", "prs"], "").0, 0);
+    assert_eq!(run(&["data", "put", "prs"], r#"[{"id": 12, "title": "Cache the layout"}, {"id": 14, "title": "Fix the flaky test", "target": "https://example.com/14"}]"#).0, 0);
+    for (i, rps) in [70, 71, 90].iter().enumerate() {
+        assert_eq!(run(&["data", "append", "requests", &format!(r#"{{"t": {}, "rps": {rps}}}"#, 1000 + i)], "").0, 0);
+    }
+    assert_eq!(run(&["data", "append", "requests", "-"], "{\"t\": 1003, \"rps\": 60}\n{\"t\": 1004, \"rps\": 61}\n").0, 0);
+    for bad in [vec!["data", "append", "requests", "words"], vec!["data", "append", "requests"], vec!["data", "put", "requests"], vec!["data", "add", "bad name"], vec!["data", "show", "requests", "--cap", "3"]] {
+        let stdin = if bad[1] == "put" { "[\"text\"]" } else { "" };
+        let (code, out, err) = run(&bad, stdin);
+        assert!(code == 1 && out.is_empty() && !err.is_empty(), "{bad:?}: {code} {out}{err}");
+    }
+    let (_, out, _) = run(&["data", "show", "requests", "--last", "2"], "");
+    assert_eq!(out, "{\"t\":1003,\"rps\":60}\n{\"t\":1004,\"rps\":61}\n");
+    let v = json(&run(&["data", "show", "requests", "--last", "1", "--json"], "").1);
+    assert_eq!((v["records"][0]["rps"].as_u64(), v["cap"].as_u64(), v["external"].as_bool(), v["stale"].as_bool()), (Some(61), Some(40), Some(false), Some(false)));
+    let v = json(&run(&["data", "ls", "--json"], "").1);
+    assert_eq!((v["datasets"][0]["name"].as_str(), v["datasets"][1]["name"].as_str(), v["datasets"][1]["expect_every"].as_f64()), (Some("prs"), Some("requests"), Some(3600.0)));
+    // a board bound to both
+    let board = r#"{"title": "Board", "actions": [{"key": "p", "name": "poke"}], "blocks": [
+        {"type": "plot", "id": "load", "kind": "spark", "data": "requests", "y": ["rps"], "last": 3},
+        {"type": "table", "id": "pr", "rows": "prs", "key": "id", "columns": [{"key": "id", "title": "PR"}, {"key": "title", "title": "Title"}]},
+        {"type": "plot", "id": "gone", "data": "absent"}]}"#;
+    assert_eq!(run(&["new", "board"], board).0, 0);
+    let frame = |w: &str| run(&["render", "board", "--width", w, "--height", "14"], "").1;
+    let one = frame("60");
+    assert!(one.contains("rps") && one.contains("█▁▁") && one.contains("12 Cache the layout") && one.contains("14 Fix the flaky test"), "{one}");
+    assert!(one.contains("no dataset \"absent\" (margin data add absent)"), "{one}");
+    // new numbers, one record gone: another frame, the same revision
+    assert_eq!(run(&["data", "append", "requests", r#"{"t": 1005, "rps": 99}"#], "").0, 0);
+    assert_eq!(run(&["data", "put", "prs"], r#"{"id": 14, "title": "Fix the flaky test", "target": "https://example.com/14"}"#).0, 0);
+    let two = frame("60");
+    assert!(two.contains("▁▁█") && !two.contains("Cache the layout") && two.contains("14 Fix the flaky test"), "{two}");
+    let v = json(&run(&["show", "board", "--json"], "").1);
+    assert_eq!(v["doc"]["rev"].as_u64(), Some(1), "a dataset changing is not the board changing");
+    assert!(v["doc"]["blocks"][1].get("children").is_none(), "the rows are never written into the document");
+    // a row from a dataset takes actions, and the event carries the record
+    let (code, _, err) = run(&["act", "board", "pr-14", "open"], "");
+    assert_eq!(code, 0, "{err}");
+    let ev = json_lines(&run(&["events", "--json", "--name", "board.open", "--since", "0"], "").1);
+    assert_eq!((ev[0]["id"].as_str(), ev[0]["value"]["cells"]["title"].as_str(), ev[0]["value"]["target"].as_str()), (Some("pr-14"), Some("Fix the flaky test"), Some("https://example.com/14")));
+    assert_eq!(run(&["act", "board", "pr-12", "open"], "").0, 3, "the record that went is no row");
+    // a file its provider writes, registered by a relative path: read where it is, never written
+    std::fs::write(decoy.join("metrics.csv"), "t,rps\n1,5\n2,50\n3,5\n").unwrap();
+    assert_eq!(run(&["data", "add", "metrics", "--file", "metrics.csv"], "").0, 0);
+    let v = json(&run(&["data", "show", "metrics", "--json"], "").1);
+    assert_eq!((v["path"].as_str().map(|p| std::path::Path::new(p).is_absolute()), v["external"].as_bool(), v["records"][1]["rps"].as_f64()), (Some(true), Some(true), Some(50.0)));
+    let (code, _, err) = run(&["data", "append", "metrics", "1"], "");
+    assert!(code == 1 && err.contains("margin reads it and never writes it"), "{err}");
+    assert_eq!(std::fs::read_to_string(decoy.join("metrics.csv")).unwrap(), "t,rps\n1,5\n2,50\n3,5\n");
+    assert_eq!(run(&["set", "board", "load", "data=metrics"], "").0, 0);
+    assert!(frame("60").contains("▁█▁"), "{}", frame("60"));
+    // an owner's dataset takes writes only as that owner
+    assert_eq!(run(&["owner", "add", "probe", "--board", "board", "--owns", "probe"], "").0, 0);
+    assert_eq!(run(&["data", "set", "requests", "--owner", "probe"], "").0, 0);
+    let (code, _, err) = run(&["data", "append", "requests", "1"], "");
+    assert!(code == 1 && err.contains("margin data append requests --as probe"), "{err}");
+    assert_eq!(run(&["data", "append", "requests", "1", "--as", "probe"], "").0, 0);
+    // overdue: ls says so, and the bound plot is marked
+    assert_eq!(run(&["data", "set", "prs", "--expect-every", "1s"], "").0, 0);
+    wait_for("prs to be overdue", 10, || run(&["data", "ls"], "").1.contains("STALE: last updated"));
+    assert!(frame("90").contains("◷ stale · last updated"), "{}", frame("90"));
+    let (code, out, _) = run(&["data", "rm", "prs"], "");
+    assert!(code == 0 && out.contains("its records are kept in"), "{out}");
+    assert!(frame("60").contains("no dataset \"prs\" (margin data add prs)"));
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }

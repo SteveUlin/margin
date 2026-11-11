@@ -330,6 +330,14 @@ pub struct Scene {
     /// Overdue writers of this board (owner.rs): (the id prefix they own, why). Their rows get a
     /// quiet mark at the right edge, the first one with the reason.
     pub stale: Vec<(String, String)>,
+    /// Blocks bound to an overdue dataset (data.rs), by id: (the dataset, why). The same quiet
+    /// mark, the first block of each dataset with the reason.
+    pub stale_data: HashMap<String, (String, String)>,
+    /// The generation of the datasets the document on show was filled from (data.rs
+    /// `Snapshot::gen`): a new one is a new set of rows in a bound table, with the revision
+    /// unchanged. The app sets it before `set_doc` and `frame`.
+    pub data_gen: u64,
+    data_gen_seen: u64,
     /// What an action on a row came to, by block id: (the note, whether it is a warning). The
     /// app sets it after an action's key and clears it (app.rs `Sent`).
     pub sent: HashMap<String, (String, bool)>,
@@ -426,6 +434,9 @@ impl Scene {
             linked: false,
             ended: None,
             stale: Vec::new(),
+            stale_data: HashMap::new(),
+            data_gen: 0,
+            data_gen_seen: 0,
             sent: HashMap::new(),
             recap: None,
             stopped: false,
@@ -463,19 +474,33 @@ impl Scene {
 
     /// Take a new revision of the document: reconcile by id and start the animations it implies.
     pub fn set_doc(&mut self, doc: &Doc, state: &State, now: f64, m: Motion) {
-        if self.rev == Some(doc.rev) && self.prev.as_ref().map(|p| p.id == doc.id).unwrap_or(false) {
+        if self.rev == Some(doc.rev) && self.data_gen_seen == self.data_gen && self.prev.as_ref().map(|p| p.id == doc.id).unwrap_or(false) {
             return;
         }
+        self.data_gen_seen = self.data_gen;
         let first = self.rev.is_none();
         let mut list = Vec::new();
-        walk(&doc.blocks, &mut |b, _, _| list.push((b.id.clone(), b.hash())));
+        // rows that come from a dataset: they reconcile by id like any row (one that appears
+        // opens, one that goes collapses), and are never a change to the board
+        let mut from_data: HashSet<String> = HashSet::new();
+        walk(&doc.blocks, &mut |b, parent, _| {
+            list.push((b.id.clone(), b.hash()));
+            if parent.map(|p| p.kind == "table" && p.opt("rows").is_some()).unwrap_or(false) {
+                from_data.insert(b.id.clone());
+            }
+        });
         // a batch that lands after the last one was seen and faded starts the tour's list anew
         if !self.retained.nodes.values().any(|n| n.change.is_some()) {
             self.changed.clear();
         }
         let r = self.retained.update(list, now, m, first);
         if !first {
-            for id in r.inserted.iter().chain(r.changed.iter()) {
+            for id in r.inserted.iter().chain(r.changed.iter()).filter(|id| from_data.contains(*id)) {
+                let n = self.retained.node(id);
+                n.unseen = false;
+                n.change = None;
+            }
+            for id in r.inserted.iter().chain(r.changed.iter()).filter(|id| !from_data.contains(*id)) {
                 if !self.changed.contains(id) {
                     self.changed.push(id.clone());
                 }
@@ -1313,11 +1338,17 @@ impl Scene {
             if sy >= vtop as i32 && sy < vbot as i32 && !it.id.starts_with('~') {
                 let note = match self.sent.get(&it.id) {
                     Some((t, warn)) => Some((t.clone(), if *warn { p.yellow } else { p.aqua })),
-                    None => self.stale.iter().find(|(pre, _)| crate::store::owns(pre, &it.id)).map(|(pre, why)| {
-                        let first = !stale_said.contains(pre);
-                        stale_said.insert(pre.clone());
-                        (if first { format!("◷ stale · {why}") } else { "◷ stale".to_string() }, p.grey1)
-                    }),
+                    None => self
+                        .stale
+                        .iter()
+                        .find(|(pre, _)| crate::store::owns(pre, &it.id))
+                        .map(|(pre, why)| (pre.clone(), why))
+                        // a dataset's name could be an owner's prefix too: keep the two apart
+                        .or_else(|| self.stale_data.get(&it.id).map(|(set, why)| (format!("@{set}"), why)))
+                        .map(|(group, why)| {
+                            let first = stale_said.insert(group);
+                            (if first { format!("◷ stale · {why}") } else { "◷ stale".to_string() }, p.grey1)
+                        }),
                 };
                 if let Some((t, col)) = note {
                     let t = truncate(&t, iw.saturating_sub(4) as usize).into_owned();

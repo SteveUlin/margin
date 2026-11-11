@@ -147,13 +147,13 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "rule", about: "a horizontal line: a break between parts of a dashboard", children: false, action: "",
         fields: &[("text", Ty::Text, "a label inset at the left")] },
     Kind { name: "table", about: "a table: a header and aligned columns; its children are tr rows", children: true, action: "",
-        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state (default text), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows"), ("actions", Ty::Any, ACTIONS_NOTE)] },
+        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state (default text), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows"), ("rows", Ty::Text, "a dataset's name (margin data add): each of its records is a row, read by the pane when it draws; the table then holds no tr children of its own. A record's fields are the cells, by column key; its target and detail fields are the row's"), ("key", Ty::Text, "with rows: the record field that names a row (default id). The row's id is <table id>-<value>, so the focus and actions follow the record; records sharing a value are one row, the newest"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "tr", about: "one table row, only inside a table; give it a stable id so a rewrite reconciles", children: false, action: "open (click, when it has a target)",
         fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "runs", about: "a run strip: the last n outcomes as small squares, oldest left, a cross for a failure", children: false, action: "",
-        fields: &[("label", Ty::Text, "text at the left: what ran"), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed")] },
+        fields: &[("label", Ty::Text, "text at the left: what ran"), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed"), ("data", Ty::Text, "a dataset's name (margin data add): the outcomes are read from its newest records instead of values"), ("y", Ty::Text, "with data: the record field holding ok fail skip running (default outcome)"), ("last", Ty::Num, "with data: how many of the newest records to read (default: as many as fit)")] },
     Kind { name: "plot", about: "a plot drawn in the pane: lines, an area, bars, columns, a histogram, sparklines or heat strips", children: false, action: "",
-        fields: &[("kind", Ty::Enum(&["line", "area", "bars", "columns", "hist", "spark", "heat"]), "which plot (default line)"), ("series", Ty::Any, "list of {label, values, color?}: values are numbers, null for a gap; color is a palette name"), ("labels", Ty::List, "bars and columns: one label per value of the first series"), ("height", Ty::Num, "rows for line, area, columns and hist (default 8)"), ("threshold", Ty::Num, "a reference line at this value"), ("x", Ty::List, "line and area: the labels at the left and right ends of the x axis"), ("legend", Ty::Bool, "line: name each series under the plot")] },
+        fields: &[("kind", Ty::Enum(&["line", "area", "bars", "columns", "hist", "spark", "heat"]), "which plot (default line)"), ("series", Ty::Any, "list of {label, values, color?}: values are numbers, null for a gap; color is a palette name. With data: {label?, color?} for the fields of y, by position"), ("data", Ty::Text, "a dataset's name (margin data add): the values are read from its newest records when the pane draws, so new numbers need no write to the board"), ("y", Ty::Any, "with data: the record field to draw, or a list of fields, one series each, labeled by the field name (default: bare-number records as one series, else every numeric field)"), ("last", Ty::Num, "with data: how many of the newest records to draw (default: the plot's width in cells for line, area, spark and heat; 12 for bars and columns; 512 for hist)"), ("labels", Ty::List, "bars and columns: one label per value of the first series"), ("height", Ty::Num, "rows for line, area, columns and hist (default 8)"), ("threshold", Ty::Num, "a reference line at this value"), ("x", Ty::Any, "line and area: the labels at the left and right ends of the x axis, as a list of two texts. With data: a record field holding a time (RFC 3339 or epoch seconds), and the ends are labeled with ages (-5m, now); on bars and columns that field labels each bar"), ("legend", Ty::Bool, "line: name each series under the plot")] },
 ];
 
 /// The fields of the document itself: the envelope a whole-document `margin apply` takes
@@ -446,7 +446,63 @@ pub fn check_under(b: &Block, parent: Option<&Block>) -> Result<(), String> {
             check_runs(v, &format!("{}: runs values", b.id))?;
         }
     }
+    check_binding(b)?;
     b.children.iter().try_for_each(|c| check_under(c, Some(b)))
+}
+
+/// A component's binding to a dataset (data.rs): the name is a dataset's name, and the fields
+/// that only mean something with a binding are refused without one.
+fn check_binding(b: &Block) -> Result<(), String> {
+    let id = &b.id;
+    let field = match b.kind.as_str() {
+        "plot" | "runs" => "data",
+        "table" => "rows",
+        _ => return Ok(()),
+    };
+    let bound = b.opt(field);
+    if let Some(name) = bound {
+        if !valid_id(name) {
+            return Err(format!("{id}: {field} {name:?} isn't a dataset name (letters, digits, - and _)"));
+        }
+    }
+    let texts = |v: &Value| v.as_array().map(|a| !a.is_empty() && a.iter().all(|x| x.as_str().map(|s| !s.is_empty()).unwrap_or(false))).unwrap_or(false);
+    let needs = |f: &str| -> Result<(), String> {
+        match (b.f.get(f).filter(|v| !v.is_null()), bound) {
+            (Some(_), None) => Err(format!("{id}: {f} names a field of a dataset's records: it needs {field:?} (a dataset's name) beside it")),
+            _ => Ok(()),
+        }
+    };
+    if let Some(n) = b.f.get("last").filter(|v| !v.is_null()) {
+        needs("last")?;
+        if n.as_u64().filter(|n| *n >= 1).is_none() {
+            return Err(format!("{id}: last must be a number of records, 1 or more, got {n}"));
+        }
+    }
+    match b.kind.as_str() {
+        "plot" => {
+            match b.f.get("x").filter(|v| !v.is_null()) {
+                None => {}
+                Some(Value::String(s)) if bound.is_some() && !s.is_empty() => {}
+                Some(Value::String(_)) => return Err(format!("{id}: x as one text is a field of a dataset's records and needs \"data\"; without one, x is a list of two labels")),
+                Some(v) if v.as_array().map(|a| a.iter().all(|x| x.is_string())).unwrap_or(false) => {}
+                Some(v) => return Err(format!("{id}: plot x must be a list of two labels, or (with data) a record field, got {v}")),
+            }
+            if let Some(y) = b.f.get("y").filter(|v| !v.is_null()) {
+                needs("y")?;
+                if !(y.as_str().map(|s| !s.is_empty()).unwrap_or(false) || texts(y)) {
+                    return Err(format!("{id}: plot y must be a record field or a list of them, got {y}"));
+                }
+            }
+        }
+        "runs" => needs("y")?,
+        _ => {
+            needs("key")?;
+            if bound.is_some() && !b.children.is_empty() {
+                return Err(format!("{id}: a table whose rows come from a dataset holds no rows of its own (drop \"rows\", or the tr children)"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn pick(only: Option<&str>) -> Result<Vec<&'static Kind>, String> {
