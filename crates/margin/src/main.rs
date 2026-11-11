@@ -50,7 +50,6 @@ content (Claude): creating and changing are different commands, for an artifact 
                                                        whole doc); one that exists is refused
   margin apply <art> [--base-rev N] [--json] < input   update: ops, components (upsert by id), or a whole doc
   margin schema [type|document] [--json]              the document's fields, component types, fields, values
-  margin put <art> [--title T] [--kind K] < doc.json   replace the whole document of an existing artifact
   margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--before X|--after X] [--base-rev N]   create a component
   margin set <art> <id> <field> <value> | <field>=<value>... [--base-rev N]   change one (typed by the schema)
   margin rm <art> <id>          margin move <art> <id> --before X|--after X|--parent P
@@ -58,7 +57,6 @@ content (Claude): creating and changing are different commands, for an artifact 
   margin title <art> <title>                                        rename the artifact
   margin hints <art> [text...]                                      reminders at the pane's bottom (none: clear)
   margin purpose <art> [\"text\"]                                     the pane's one line of orientation (none: clear)
-  margin patch <art> < ops.json                        alias of apply
   margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W]
   margin propose <art> <id> <verb> [value] [--why W]                 offer a change to one of his decisions
   margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]
@@ -72,7 +70,6 @@ return channel:
   margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--follow] [--json]   the event log
   margin emit <name> [JSON|-] [--board B] [--id ID]                 append a named event (prints its seq)
   margin act <board> <id> <action> [VALUE]                          what an action's key does, from the CLI
-  margin wait <art>.<id> [--timeout 10m]                          block until sulin decides (exit 2 on timeout)
   margin hook start|prompt|pre-tool|post-tool|stop|permission|notify              Claude Code hook (stdin JSON)
   margin hook rewake [--timeout 58m]                              the Stop hook that waits: exit 2 wakes an idle Claude
 
@@ -133,7 +130,6 @@ global flags (before or after the command):
 const CMDS: &[Cmd] = &[
     Cmd { name: "apply", help: "margin apply <art> [--base-rev N] [--json] < input\n  state from a script: update an artifact that exists. stdin is the feed line grammar, applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a feed prints \"this is the state now\"); the\n  artifact itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n", flags: &["--base-rev", "--json", "--title", "--kind"], max_pos: Some(1) },
     Cmd { name: "new", help: "margin new <art> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes an artifact. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal or\n  an empty stdin it starts empty, titled <art> unless --title says otherwise. An artifact that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <art> --yes. Every\n  other writing command refuses an artifact that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
-    Cmd { name: "put", help: "margin put <art> [--title T] [--kind K] [--base-rev N] < doc.json\n  change: replace the whole document of an existing artifact (a bare array is the block list).\n  A missing artifact is an error: create it with margin new\n", flags: &["--title", "--kind", "--base-rev", "--json"], max_pos: Some(1) },
     Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "add", help: "margin add <art> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the artifact must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
     Cmd { name: "set", help: "margin set <art> <id> <field> <value> [--base-rev N]\nmargin set <art> <id> <field>=<value>... [--base-rev N]\n  change: set fields of a component that exists (a missing id is refused; create it with margin add); text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
@@ -142,7 +138,6 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "title", help: "margin title <art> <title> [--base-rev N]\n  change: rename an artifact that exists (its header line)\n", flags: &["--base-rev"], max_pos: Some(2) },
     Cmd { name: "hints", help: "margin hints <art> [text...] [--json]\n  change: the reminders of an artifact that exists, a line at the bottom of the pane while it is on screen (in a pane with\n  tabs, the tab on screen's). Each text is one reminder; `key  what it does` (two spaces) draws\n  the key as a key. No text clears them. They wrap; a whole-document put keeps them unless it\n  carries its own \"hints\"\n    margin hints reviews 'r  re-request review' 'merge queue freezes Fri 3pm'\n", flags: &["--json"], max_pos: None },
     Cmd { name: "purpose", help: "margin purpose <art> [\"text\"] [--json]\n  change: what the pane of an artifact that exists is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
-    Cmd { name: "patch", help: "margin patch <art> [--base-rev N] < ops.json\n  alias of margin apply (one op, an op array, or components): the artifact must exist\n", flags: &["--base-rev", "--json"], max_pos: Some(1) },
     Cmd { name: "ask", help: "margin ask <art> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  create: a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  An id that exists is refused (change it with margin set); the artifact must exist (margin new)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
     Cmd { name: "propose", help: "margin propose <art> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
     Cmd { name: "diff", help: "margin diff <art> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <art> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
@@ -153,7 +148,6 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
     Cmd { name: "emit", help: "margin emit <name> [JSON | -] [--board B] [--id ID]\n  append a named event to the project's log and print its seq. Anything can call it: cron, CI,\n  a script, a job. <name> is letters, digits and . _ - : (deploy.finished, ci.red); the value is one\n  JSON value (- reads it from stdin; text that is not JSON is an error; none: null)\n  --board B   the board it is about (must exist); --id ID a block in it\n  The event is logged as by you (or --by NAME), via emit. margin events --name 'deploy.*' reads\n  them, and a job registered with --on 'deploy.*' is run for them (margin help jobs)\n  The project comes from the working directory: from cron or another directory pass --project NAME\n    margin emit deploy.finished '{\"sha\":\"abc123\",\"ok\":true}' --project boards\n    jq -c .summary report.json | margin emit ci.report - --board ci\n", flags: &["--board", "--id"], max_pos: Some(2) },
     Cmd { name: "act", help: "margin act <board> <id> <action> [VALUE]\n  what an action's key does in the pane, from the command line: append the event\n  <board>.<action> with id <id> and a snapshot of that block (a table row's cells, target and\n  detail; any other block's fields), and print its seq. <id> - is the board itself. VALUE (JSON,\n  or text) rides along as value.arg. A job registered with --on '<board>.<action>' handles it\n  (margin help jobs). Works on feed-owned rows: it changes no content\n  refused, with exit 1 and the reason: a missing board or id, an action the block does not offer\n    margin act reviews pr-4812 open\n", flags: &["--json"], max_pos: Some(4) },
-    Cmd { name: "wait", help: "margin wait <art>.<id> [--timeout 10m]\n  block until sulin decides and print the decision; exit 2 on timeout\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "doc", help: "margin doc <art> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
     Cmd { name: "toast", help: "margin toast <art> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
@@ -455,7 +449,7 @@ fn report(art: &str, rev: u64, a: &Args) {
 }
 
 /// What a whole-document write does with the artifact it names: `margin new` creates it and
-/// refuses one that exists; `put` and a whole-document `apply` replace one that exists and
+/// refuses one that exists; a whole-document `apply` replaces one that exists and
 /// refuse a missing one. No command does whichever applies: a mistyped name once made a
 /// second board.
 #[derive(Clone, Copy, PartialEq)]
@@ -479,9 +473,9 @@ fn new_cmd(st: &Store, art: &str, input: &str, a: &Args) -> Result<(), String> {
     apply_cmd(st, art, input, a, true, Whole::Create)
 }
 
-/// `margin apply` (and `put`, `patch`): stdin in the feed line grammar, or a whole-document
+/// `margin apply`: stdin in the feed line grammar, or a whole-document
 /// envelope `{"title", "blocks"}`. One all-or-nothing write to an artifact that exists. `whole`:
-/// `put`'s reading, where a bare array is the block list, not an op list. `mode`: `margin new`
+/// `margin new`'s reading, where a bare array is the block list, not an op list. `mode`: `margin new`
 /// comes through here too, with `Whole::Create`.
 fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool, mode: Whole) -> Result<(), String> {
     let t = input.trim();
@@ -526,8 +520,12 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool, mode: Wh
         // the reminders are the artifact's, not this revision's: a whole document that doesn't
         // carry its own keeps the ones there
         // (and so is its purpose)
-        if v.get("hints").is_none() || v.get("purpose").is_none() {
+        if v.get("hints").is_none() || v.get("purpose").is_none() || v.get("title").is_none() {
             if let Ok(old) = st.load(art) {
+                // and its title: a document that names none keeps the one it has
+                if v.get("title").is_none() && mode == Whole::Replace {
+                    v["title"] = json!(old.title);
+                }
                 if v.get("hints").is_none() && !old.hints.is_empty() {
                     v["hints"] = json!(old.hints);
                 }
@@ -681,9 +679,9 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 print!("{}", who::say(&doc::schema_text(only)?));
             }
         }
-        "apply" | "patch" | "put" => {
+        "apply" => {
             let st = store(a);
-            apply_cmd(&st, a.pos(0, "artifact")?, &stdin(), a, cmd == "put", Whole::Replace)?;
+            apply_cmd(&st, a.pos(0, "artifact")?, &stdin(), a, false, Whole::Replace)?;
         }
         "new" => {
             let st = store(a);
@@ -965,45 +963,6 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 println!("{}", serde_json::to_string(&ev).unwrap());
             } else {
                 println!("{}", ev.seq);
-            }
-        }
-        "wait" => {
-            let st = store(a);
-            let target = a.pos(0, "artifact.id")?;
-            let (art, id) = target.split_once('.').ok_or("wait <artifact>.<id>")?;
-            let timeout = a.get("--timeout").and_then(util::parse_duration).unwrap_or(600.0);
-            let start = util::epoch_now();
-            // a missing id would wait out the whole timeout for a decision that can never come
-            let d = st.load(art)?;
-            if d.find(id).is_none() {
-                return Err(format!("no component {id:?} in {art}; margin show {art}"));
-            }
-            // a missing id would wait out the whole timeout for a decision that can never come
-            if st.load(art)?.find(id).is_none() {
-                return Err(format!("no component {id:?} in {art}; margin show {art}"));
-            }
-            let from = st.last_seq();
-            // a decision sulin already made counts: waiting only for new events missed a pick made
-            // before `wait` started and handed Claude the default instead
-            if let Some(d) = st.state(art).decisions.get(id).filter(|d| crate::who::is_human(&d.by)) {
-                println!("{}", d.value.as_str().map(String::from).unwrap_or(d.value.to_string()));
-                return Ok(());
-            }
-            loop {
-                if let Some(e) = st.events().into_iter().find(|e| e.seq > from && e.artifact == art && e.id == id && crate::who::is_human(&e.by) && !store::is_passive(&e.kind)) {
-                    println!("{}", e.value.as_str().map(String::from).unwrap_or(e.value.to_string()));
-                    return Ok(());
-                }
-                if util::epoch_now() - start > timeout {
-                    let d = st.load(art)?;
-                    let def = d.find(id).map(|b| b.s("default").to_string()).unwrap_or_default();
-                    eprintln!("timed out; no decision on {target}");
-                    if !def.is_empty() {
-                        println!("{def}");
-                    }
-                    std::process::exit(2);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
             }
         }
         "hook" => match a.pos.first().map(|s| s.as_str()).unwrap_or("prompt") {
@@ -1922,7 +1881,7 @@ mod tests {
         let whole = r#"{"title":"P","blocks":[]}"#;
         let comp = r#"{"type":"todo","id":"t2","text":"two"}"#;
         let op = r#"{"op":"set","id":"t1","fields":{"text":"x"}}"#;
-        for (what, input, bare) in [("apply a whole document", whole, false), ("apply a component", comp, false), ("apply/patch an op", op, false), ("put", whole, true), ("put an array", "[]", true), ("put nothing", "", true)] {
+        for (what, input, bare) in [("apply a whole document", whole, false), ("apply a component", comp, false), ("apply an op", op, false)] {
             assert_eq!(apply_cmd(&st, "paln", input, &a(&[]), bare, Whole::Replace).unwrap_err(), want, "{what}");
         }
         // doc writes a component through apply_cmd

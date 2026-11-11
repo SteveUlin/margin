@@ -10,7 +10,7 @@ The obvious first version of this idea re-renders a markdown file whenever it ch
 
 1. **Typed, stateful components with stable ids, not text.** A todo is a `todo` with a status, a finding carries a verdict, a question has options and an answer slot. Every one has an id that survives the AI rewriting the artifact. That makes them addressable (`mg:todo/plan.t3`) and lets updates land in place.
 2. **Owners, enforced.** The AI owns *content*. sulin owns *decisions* (ticks, verdicts, picks, strikes, pins). Each pane owns *view state* (folds, scroll, focus, what he has seen). Since 2026-11-06 a **feed** (a registered script, §7b) owns the ids under its prefix. The AI cannot overwrite a decision sulin made or a feed's components, and an AI update never resets his scroll or folds.
-3. **A return channel.** Every interaction becomes a typed event in an append-only log. The AI sees unread events at the start of its next turn (prompt hook), can block waiting for one (`margin wait`), and later gets them mid-turn (MCP channel).
+3. **A return channel.** Every interaction becomes a typed event in an append-only log. The AI sees unread events at the start of its next turn (prompt hook), can block waiting for one (`margin events --follow`), and later gets them mid-turn (MCP channel).
 4. **Live behaviour in the renderer.** Timers tick, spinners spin, progress eases to its new value, a changed block carries a change bar that fades once seen, a diff steps hunk by hunk, a graph steps through its stages. None of it costs a model round-trip.
 
 ---
@@ -24,7 +24,7 @@ The obvious first version of this idea re-renders a markdown file whenever it ch
 | engines | **use**: difftastic (structural diff), graphviz (graph layout), the `png` crate (decode), `unicode-width` and `unicode-segmentation`, `libc`, `serde_json`; tree-sitter later for highlighting | each is a hard, non-UI problem where a mature tool beats a rewrite |
 | artifact model | a **typed component tree** in JSON, keyed by id, plus a separate human-state file and view-state file | lets the reconciler keep view state across AI updates and enforce ownership |
 | AI interface | **CLI first** (`margin …` via the Bash tool), MCP server second with the same operations, plus a skill | the CLI works today with zero config; MCP adds typed tools and push (channels) |
-| return path | event log + prompt hook; `margin wait` for blocking questions | sulin's ticks reach the AI on its next turn without him typing |
+| return path | event log + prompt hook; `margin events --follow` for blocking questions | sulin's ticks reach the AI on its next turn without him typing |
 | pane control | **`zellij action` from outside, no plugin in v0** | 0.45's `--tab-id --no-focus` and `list-panes -j` meet every hard requirement (§6) |
 | pane shapes | **pinned float** (glanceable) or **tiled split** (working surface) | the only two focus-safe shapes measured; plain floats steal focus on tab return |
 | actions from the screen | **selection tokens** (`mg:…`) through Zellij's `copy_command`; keys when the pane has focus; mouse optional | selection works locally and over ssh; OSC 8 clicks don't over ssh |
@@ -81,7 +81,7 @@ Kinds: `tick`, `verdict` (approve/reject/ask on a hunk or finding), `pick` (answ
 
 The AI reads events three ways, in build order:
 1. **Next prompt (v0).** A UserPromptSubmit hook prints `margin events --unread --brief` (at most 8 lines, the rest summarised) and marks those events delivered for this session. That costs nothing when nothing happened. It runs beside any other UserPromptSubmit hook already registered.
-2. **Blocking (v0).** `margin wait plan.Q1 --timeout 10m` blocks until sulin answers. Use it only when the AI truly can't proceed; the default is to post the question with a default answer and carry on ("never block").
+2. **Blocking (v0).** `margin events --follow --name pick --artifact plan --json` blocks until sulin answers (`margin wait` did this until 2026-11; it was removed in favor of the event stream). Use it only when the AI truly can't proceed; the default is to post the question with a default answer and carry on ("never block").
 3. **Mid-turn (later).** An MCP server registered as a channel pushes events into a running session; a PostToolUse hook is the fallback. This was unverified at design time, so it waits until checked.
 
 Passive events (`fold`, `seen`) are logged but never pushed into the prompt. The AI asks for them (`margin events --kind seen`) when it wants to know whether he looked.
@@ -188,7 +188,6 @@ margin ask plan Q1 "MCP in v0?" cli mcp both --default cli
 margin propose plan Q1 pick mcp --why "the bug agent calls it"   # offer a change to one of his decisions
 margin show plan [--json]          # content + decisions merged, what sulin sees
 margin events [--unread] [--artifact plan] [--since 40]
-margin wait plan.Q1 [--timeout 10m]
 margin open plan [--float|--split] [--tab-id N]
 margin close plan
 margin ls
@@ -269,7 +268,7 @@ Design points, each with its reason:
 - `--float` (default for glanceable artifacts like a summary or plan): `new-pane --tab-id T --no-focus --floating --pinned true -x 62% -y 2 --width 37% --height 45% -n margin:plan -- margin view plan`
 - `--split` (for working surfaces like a review or explainer): `new-pane --tab-id T --no-focus -n margin:pr-412 -- margin view pr-412`, which lands in the biggest free space.
 
-`margin put/set/add` never touch Zellij at all. Updates reach the pane through the files, so the AI can update an artifact a hundred times with zero pane churn.
+`margin apply/set/add` never touch Zellij at all. Updates reach the pane through the files, so the AI can update an artifact a hundred times with zero pane churn.
 
 ### CLI-only versus a plugin
 

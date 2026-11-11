@@ -70,7 +70,7 @@ margin show reviews                               # the tree: type, id, text
 - From here on every write is an update, and an update never creates: `margin apply`, `add`,
   `set`, a feed's run and the rest fail on a name with no artifact (`no artifact "reveiws" …:
   create it with margin new reveiws (did you mean "reviews"?)`). To redo the layout, replace the
-  document with `margin put reviews < doc.json`, or start over: `margin rm reviews --yes`, then `new`.
+  document with `margin apply reviews < doc.json` (a whole document replaces), or start over: `margin rm reviews --yes`, then `new`.
 - A schema error names the block and the field and writes nothing; `margin schema <type>` lists
   a type's fields.
 - The last block above places the feed's health line (state, trigger, last write, the error when

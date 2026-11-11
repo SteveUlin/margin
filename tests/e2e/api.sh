@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e for the write API (2026-11-06 API review): apply, schema, stable ids, --owns, wait.
+# e2e for the write API (2026-11-06 API review): apply, schema, stable ids, --owns.
 # Runs the CLI against a throwaway MARGIN_HOME; needs no Zellij.
 #   tests/e2e/api.sh [path/to/margin]
 set -u
@@ -25,12 +25,12 @@ expect "new from a whole doc" '"rev":1' "$M" new p --json <<<'{"v":1,"title":"pl
 expect "new refuses a second time" 'p already exists (rev 1); change it with margin apply/add/set, or remove it with margin rm p --yes' "$M" new p </dev/null
 expect "apply upsert" "p rev 2" "$M" apply p <<<'{"type":"todo","id":"t2","text":"b","parent":"steps"}'
 expect "apply upsert again" "p rev 3" "$M" apply p <<<'{"type":"todo","id":"t2","text":"b2","parent":"steps"}'
-expect "patch takes a single op" "p rev 4" "$M" patch p <<<'{"op":"set","id":"t2","fields":{"note":"n","text":"bb"}}'
+expect "apply takes a single op" "p rev 4" "$M" apply p <<<'{"op":"set","id":"t2","fields":{"note":"n","text":"bb"}}'
 expect "all or nothing" 'no component "nope"' "$M" apply p <<<$'{"type":"todo","id":"t3","text":"c","parent":"steps"}\n{"op":"rm","id":"nope"}'
 expect "...nothing landed" "rev 4" "$M" show p
 expect "a first write never creates" 'create it with margin new fresh' "$M" apply fresh <<<'{"type":"row","id":"r1","text":"hi"}'
 expect "...and suggests a near name" '(did you mean "p"?)' "$M" add q - todo t1 x
-expect "...for every command" 'create it with margin new fresh' "$M" put fresh <<<'[]'
+expect "...for every command" 'create it with margin new fresh' "$M" apply fresh <<<'{"blocks":[]}'
 expect "...nothing was made" "p " "$M" ls
 expect "new empty" "fresh rev 1" "$M" new fresh --title Fresh </dev/null
 expect "then apply updates" "fresh rev 2" "$M" apply fresh <<<'{"type":"row","id":"r1","text":"hi"}'
@@ -53,14 +53,13 @@ expect "schema suggests" 'did you mean todo?' "$M" schema tod
 # stable ids: an insert before a ticked todo leaves the tick on it
 "$M" new s <<<'[{"type":"todo","text":"beta"},{"type":"todo","text":"gamma"}]' >/dev/null
 "$M" set s beta status done --by you >/dev/null
-"$M" put s <<<'[{"type":"todo","text":"alpha"},{"type":"todo","text":"beta"},{"type":"todo","text":"gamma"}]' >/dev/null
+"$M" apply s <<<'{"blocks":[{"type":"todo","text":"alpha"},{"type":"todo","text":"beta"},{"type":"todo","text":"gamma"}]}' >/dev/null
 expect "tick stays on beta" "todo beta [done] beta" "$M" show s
 expect "alpha unticked" "todo alpha [todo] alpha" "$M" show s
 
-# tick is an old spelling of todo; a bare token cycles like the circle (next first: done is Claude's); wait fails fast on a missing id
+# tick is an old spelling of todo; a bare token cycles like the circle (next first: done is Claude's)
 expect "mg:tick alias" "" "$M" select mg:tick/s.gamma
 expect "...ticked" "todo gamma [next]" "$M" show s
-expect "wait missing id" 'no component "zz"' timeout 5 "$M" wait s.zz --timeout 3s
 
 echo "$fails failed"
 exit $((fails > 0))

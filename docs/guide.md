@@ -270,7 +270,7 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 ### What the skill tells Claude (fold)
 
 - **Content is Claude's, decisions are yours.** To change something you decided, it says so in chat.
-- **Never block on a reversible fork.** It posts `margin ask … --default X --applies "<when>"`, carries on with the default, and checks events at that point. `margin wait plan.Q1 --timeout 10m` blocks only when it truly can't go on; on timeout it prints the default and exits 2.
+- **Never block on a reversible fork.** It posts `margin ask … --default X --applies "<when>"`, carries on with the default, and checks events at that point. To block on an answer from a script, follow the log: `margin events --follow --name pick --artifact plan --json` (see `margin help integrate`).
 - **A struck claim gets an answer:** re-check, then `margin set <art> <id> ack "…"`.
 - **Address by id, base on a rev** (`--base-rev`), and treat `margin:` lines as your input.
 - **Feed-owned ids are read-only,** and anything you want kept current becomes a feed, not a poll each turn.
@@ -301,14 +301,12 @@ Walkthrough 2 already did this: `tour` holds your steps and the `svc` feed. The 
 | `margin new A [--title T] [--purpose P] [< doc.json]` | create an artifact: empty, or from a whole doc (a bare array is the block list); refuses one that exists |
 | `margin apply A [--base-rev N] [--json] < in` | update (state from a script): ops, components (upsert by id), or a whole doc (replaces); all or none; A must exist |
 | `margin schema [TYPE] [--json]` | the component types, fields and allowed values every write is checked against |
-| `margin put A [--title T] < doc.json` | replace the whole document of an existing artifact; a bare array is the block list |
 | `margin add A PARENT\|- TYPE ID [text…] [k=v…]` | create a component (an id that exists is refused); every bare word is text; `--before X`/`--after X` |
 | `margin set A ID FIELD VALUE` or `A ID k=v…` | change a component's fields (a missing id is refused), typed by the schema (text stays text) |
 | `margin rm A ID` | remove (decisions on it show as orphaned) |
 | `margin rm A [--yes]` | remove a whole artifact: a preview without `--yes`; with it, its feeds are unregistered and it moves to `.archive/` |
 | `margin move A ID --before X\|--after X\|--parent P` | reorder |
 | `margin title A "T"` | rename |
-| `margin patch A < ops.json` | alias of apply (A must exist) |
 | `margin ask A ID "Q" opt… --default D` | a question; `--why` `--applies` `--parent` |
 | `margin diff A ID --old F --new F [--path L]` | a difftastic diff block |
 | `margin diff A ID --rev R [--to R2] FILE` | the same from jj revisions |
@@ -323,7 +321,6 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 | command | does |
 |---|---|
 | `margin events` | your actions; `--unread --session S`, `--artifact`, `--since N`, `--kind K`, `--all`, `--json` |
-| `margin wait A.ID [--timeout 10m]` | block until you decide; exit 2 + default on timeout |
 | `margin hook prompt\|post-tool` | the hooks (JSON on stdin) |
 | `margin open A [--float\|--split\|--stacked] [--tab-id N]` | place the pane (Zellij) or print the view command (plain; an absolute path when `margin` isn't on PATH) |
 | `margin panes A` / `margin close A` | where it shows / close it |

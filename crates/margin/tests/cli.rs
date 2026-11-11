@@ -88,7 +88,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("new", s(&["a", "--title", "walk"]), "", true),
         ("new", s(&["b"]), r#"[{"type":"todo","id":"x","text":"x"}]"#, true),
         ("apply", s(&["a"]), DOC, true),
-        ("put", s(&["b"]), r#"[{"type":"todo","id":"y","text":"y"}]"#, true),
+        ("apply", s(&["b"]), r#"{"blocks":[{"type":"todo","id":"y","text":"y"}]}"#, true),
         ("schema", s(&[]), "", true),
         ("add", s(&["a", "s", "todo", "t2", "two"]), "", true),
         ("set", s(&["a", "t2", "note=n"]), "", true),
@@ -97,7 +97,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("title", s(&["a", "Walk"]), "", true),
         ("hints", s(&["a", "k  what it does"]), "", true),
         ("purpose", s(&["a", "walk the table"]), "", true),
-        ("patch", s(&["a"]), r#"{"op":"set","id":"t3","fields":{"note":"n"}}"#, true),
+        ("apply", s(&["a"]), r#"{"op":"set","id":"t3","fields":{"note":"n"}}"#, true),
         ("ask", s(&["a", "q2", "Again?", "x", "y"]), "", true),
         ("propose", s(&["a", "t1", "tick", "done"]), "", true),
         ("diff", s(&["a", "d1", "--old", "/nonexistent-a", "--new", "/nonexistent-b"]), "", false),
@@ -108,7 +108,6 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("events", s(&["--all"]), "", true),
         ("emit", s(&["walk.done", r#"{"n":1}"#, "--board", "a"]), "", true),
         ("act", s(&["a", "t1", "poke"]), "", true),
-        ("wait", s(&["a.zz", "--timeout", "1s"]), "", false),
         ("hook", s(&["prompt"]), &hook_in, true),
         ("doc", s(&["a", "notes"]), "# Notes\n\nA line.\n", true),
         ("toast", s(&["a", "hello"]), "", true),
@@ -245,7 +244,7 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
     // a whole-document apply to it is an update; so is put
     let (ok, out) = run(&["apply", "plan"], DOC);
     assert!(ok && out.trim() == "plan rev 2", "{out}");
-    let (ok, out) = run(&["put", "plan"], DOC);
+    let (ok, out) = run(&["apply", "plan"], r#"{"blocks":[]}"#);
     assert!(ok, "{out}");
     let png = decoy.join("x.png");
     let want = "no artifact \"paln\" in project p: create it with margin new paln (did you mean \"plan\"?)";
@@ -253,9 +252,7 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
     let walk: Vec<(Vec<&str>, &str)> = vec![
         (vec!["apply", "paln"], DOC),
         (vec!["apply", "paln"], r#"{"type":"todo","id":"t9","text":"nine"}"#),
-        (vec!["put", "paln"], DOC),
-        (vec!["put", "paln"], ""),
-        (vec!["patch", "paln"], r#"{"op":"set","id":"t1","fields":{"note":"n"}}"#),
+        (vec!["apply", "paln"], r#"{"op":"set","id":"t1","fields":{"note":"n"}}"#),
         (vec!["add", "paln", "s", "todo", "t9", "nine"], ""),
         (vec!["set", "paln", "t1", "note=n"], ""),
         (vec!["rm", "paln", "t1"], ""),
@@ -279,7 +276,7 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
     let (_, out) = run(&["feed", "ls"], "");
     assert!(out.contains("no feeds in project p"), "no feed registered: {out}");
     let (_, out) = run(&["show", "plan"], "");
-    assert!(out.contains("rev 3") || out.contains("rev 2"), "plan is as the last put left it: {out}");
+    assert!(out.contains("rev 3") || out.contains("rev 2"), "plan is as the last apply left it: {out}");
     // a name further than two edits away gets no suggestion
     let (ok, out) = run(&["add", "scratch", "-", "todo", "t1", "x"], "");
     assert!(!ok && out.trim().ends_with("create it with margin new scratch"), "{out}");

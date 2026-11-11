@@ -546,7 +546,7 @@ impl Store {
 
     /// The store's whole-document write: create or replace, whichever applies. The CLI never
     /// calls it for a document someone named: `margin new` goes through `create` and
-    /// `margin put` / a whole-document `margin apply` through `replace`, which each allow one
+    /// a whole-document `margin apply` through `replace`, which each allow one
     /// of the two. What is left here is `margin demo` (which resets its own artifact) and code
     /// that has just loaded the document it writes back. With `base_rev`, refuse if the stored
     /// rev differs.
@@ -569,7 +569,7 @@ impl Store {
         self.put_locked(d, None)
     }
 
-    /// `margin put` and a whole-document `margin apply`: replace the document of an artifact
+    /// A whole-document `margin apply`: replace the document of an artifact
     /// that exists. A missing one is an error that names `margin new`, never a create.
     pub fn replace(&self, d: Doc, base_rev: Option<u64>) -> Result<u64, String> {
         let _l = self.lock().map_err(|e| e.to_string())?;

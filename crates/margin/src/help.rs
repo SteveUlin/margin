@@ -186,7 +186,7 @@ mod tests {
         for key in ["zebra", "zebra_color", "rule_glyph", "rule_color", "emphasis", "who.glyphs", "who.colors", "who.names", "runs.gap"] {
             assert!(d.contains(key), "dashboards doesn't name the theme key {key}");
         }
-        for cmd in ["margin new", "margin put", "margin apply", "margin feed add", "margin open", "margin tab", "margin view", "margin purpose", "margin hints", "margin render", "margin example", "margin help feeds", "--project"] {
+        for cmd in ["margin new", "margin apply", "margin feed add", "margin open", "margin tab", "margin view", "margin purpose", "margin hints", "margin render", "margin example", "margin help feeds", "--project"] {
             assert!(d.contains(cmd), "dashboards doesn't show {cmd}");
         }
         let f = topic("feeds").unwrap();
