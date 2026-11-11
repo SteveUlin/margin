@@ -25,10 +25,18 @@ Claude Code hooks as one line of context.
 - **Tables, run strips and name badges** for dashboards: a pull-request queue, service health, a
   work tracker (`margin example` prints three complete ones; see [docs/dashboards.md](docs/dashboards.md)).
 - **A detail panel** for the focused row: a pull request's description, a failing service's error.
-- **Feeds.** A registered script (on an interval, on a file change, or as a stream) prints JSON
-  lines and a per-project daemon applies them. The feed owns its rows; Claude and you cannot
-  overwrite them. Shipped feeds: a jj change ledger, a monitor of Claude Code sessions, a board
-  of queued messages, a turn ledger (`feeds/`).
+- **Handlers, owners and datasets** keep a board current with no AI involved, and the pane itself
+  runs nothing. A *handler* is a command margin's daemon runs when an event is appended
+  (`margin handler add`): a refresh that cron emits (`margin emit`), or a key you press on a row.
+  An *owner* is a program margin does not run, registered as the writer of its rows
+  (`margin owner add`, then `margin apply <board> --as <owner>`). A *dataset* holds numbers that
+  change often (`margin data add`, `margin data append`): a plot or a table bound to it by name
+  reads it when the pane draws, so a live plot needs no write to the board. Whoever keeps rows
+  current owns them; Claude and you cannot overwrite them. `margin help integrate` has the cron
+  and systemd recipes.
+- **Shipped scripts** for the older runner (`margin feed`, a script on margin's own timer, file
+  watch or stream): a jj change ledger, a monitor of Claude Code sessions, a board of queued
+  messages, a turn ledger (`feeds/`).
 - Also: structural diffs to approve or reject (through difftastic), PNG images (kitty graphics),
   toasts.
 
@@ -70,7 +78,8 @@ that exists; every other write refuses a name with no artifact (and suggests the
 typo is an error, never a second board. `margin demo` writes a larger sample plan (it needs
 difftastic), `margin example reviews | margin new reviews` a sample dashboard, and `margin help`
 lists every command and reference topic.
-[docs/guide.md](docs/guide.md) walks through an artifact, a feed, and a session with Claude.
+[docs/guide.md](docs/guide.md) walks through an artifact, a feed, and a session with Claude;
+`margin help dashboards` and `margin help handlers` cover standing boards.
 
 ## Requirements
 
@@ -92,7 +101,7 @@ lists every command and reference topic.
 | [docs/install.md](docs/install.md) | build, `margin init`, a first pane, undoing it |
 | [docs/guide.md](docs/guide.md) | the model, four walkthroughs, a cheat sheet of commands, keys and config |
 | [docs/dashboards.md](docs/dashboards.md) | tables, run strips, badges, rules, and the theme |
-| [docs/design.md](docs/design.md) | the original design: owners, events, the toolkit, panes, feeds |
+| [docs/design.md](docs/design.md) | the original design: owners, events, the toolkit, panes, feeds (the runner that handlers, owners and datasets have since replaced as the main path) |
 | [docs/research.md](docs/research.md), [docs/landscape.md](docs/landscape.md), [docs/research/](docs/research/) | the measurements and prior art behind the design |
 
 The design and research documents are dated notes from the build. Where they disagree with

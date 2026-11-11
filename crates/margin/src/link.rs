@@ -154,7 +154,7 @@ pub fn is_pane_write(tool: &str, input: &serde_json::Value) -> bool {
         return false;
     }
     let cmd = input["command"].as_str().unwrap_or("");
-    const VERBS: &[&str] = &["set", "add", "rm", "move", "patch", "put", "apply", "ask", "diff", "image", "title", "link", "open"];
+    const VERBS: &[&str] = &["set", "add", "rm", "move", "apply", "ask", "diff", "image", "title", "link", "open"];
     cmd.split(|c: char| c == ';' || c == '&' || c == '|' || c == '\n' || c == '(')
         .map(|part| part.split_whitespace().collect::<Vec<_>>())
         .any(|w| {
