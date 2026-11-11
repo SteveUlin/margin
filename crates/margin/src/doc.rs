@@ -101,6 +101,9 @@ pub struct Kind {
     pub action: &'static str,
 }
 
+/// What `actions` holds, said once for every type that takes it.
+const ACTIONS_NOTE: &str = "list of {key, name, label?}: with this block focused, the key appends the event <board>.<name> carrying the block's id and a snapshot of it; a handler registered for that name does the work (margin help handlers). key: one character the pane doesn't use itself; label: what the hint row shows (default: name). A table's actions apply to each of its rows";
+
 const PROPOSAL: (&str, Ty, &str) = ("proposal", Ty::Any, "written by margin propose");
 
 /// The component schema, checked on every write (CLI, apply, feeds) and printed by `margin
@@ -124,7 +127,7 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "timer", about: "elapsed since, or left until", children: false, action: "",
         fields: &[("since", Ty::Text, "RFC 3339"), ("until", Ty::Text, "RFC 3339"), ("label", Ty::Text, "text before the time")] },
     Kind { name: "status", about: "a check or job", children: false, action: "open",
-        fields: &[("text", Ty::Text, "what is checked"), ("state", Ty::Enum(&["running", "pass", "fail"]), "its glyph; fail marks the tab"), ("result", Ty::Text, "a short outcome at the right: exit 2, 14 passed"), ("spark", Ty::Nums, "recent values, drawn as a sparkline"), ("target", Ty::Text, "URL or mg: token")] },
+        fields: &[("text", Ty::Text, "what is checked"), ("state", Ty::Enum(&["running", "pass", "fail"]), "its glyph; fail marks the tab"), ("result", Ty::Text, "a short outcome at the right: exit 2, 14 passed"), ("spark", Ty::Nums, "recent values, drawn as a sparkline"), ("target", Ty::Text, "URL or mg: token"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "question", about: "a choice sulin makes", children: false, action: "pick (1-9, mg:pick/<id>=<opt>)",
         fields: &[("text", Ty::Text, "the question"), ("options", Ty::List, "the answers, two or more; each is a button"), ("suggest", Ty::Text, "one of options: your recommendation, a line on the card; no option is highlighted until sulin picks"), ("default", Ty::Text, "one of options; only when sulin asked for a default"), ("why", Ty::Text, "why it matters or what each answer costs; a line on the card"), ("applies", Ty::Text, "a step id (the default is taken when that step starts), or prose"), ("takes_at", Ty::Any, "RFC 3339: the default is taken then (a countdown on the card)"), ("applied", Ty::Bool, "you took the default"), ("applied_at", Ty::Text, "set for you when applied goes true"), PROPOSAL] },
     Kind { name: "claim", about: "an assumption sulin can strike", children: false, action: "strike (mg:strike/<id>, x)",
@@ -132,21 +135,21 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "decided", about: "a settled decision", children: false, action: "",
         fields: &[("text", Ty::Text, "what was decided; wraps; **bold**"), ("by", Ty::Text, "claude or you"), ("at", Ty::Text, "when: RFC 3339, or a short label")] },
     Kind { name: "link", about: "a link", children: false, action: "open",
-        fields: &[("text", Ty::Text, "the label shown"), ("target", Ty::Text, "URL or mg: token")] },
+        fields: &[("text", Ty::Text, "the label shown"), ("target", Ty::Text, "URL or mg: token"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "image", about: "a PNG", children: false, action: "",
         fields: &[("path", Ty::Text, "PNG"), ("alt", Ty::Text, "shown where images can't draw (default: the path)"), ("rows", Ty::Num, "most rows it takes (default 18)"), ("cols", Ty::Num, "most cells wide (default: the pane)")] },
     Kind { name: "diff", about: "a structural diff (made by margin diff)", children: false, action: "approve / reject / ask",
         fields: &[("path", Ty::Text, "the file's label in the header"), ("language", Ty::Any, "what difftastic detected"), ("adds", Ty::Num, "added lines"), ("dels", Ty::Num, "removed lines"), ("rows", Ty::Any, "the diff's lines, written by margin diff"), ("max_rows", Ty::Num, "rows shown before it is cut"), ("text", Ty::Text, "a plain-text diff when there are no rows"), PROPOSAL] },
     Kind { name: "row", about: "one line of a ledger or monitor", children: true, action: "open (click or enter, when it has a target)",
-        fields: &[("text", Ty::Text, "the line; cut at the edge, in full when focused; **bold** `code` @[name]"), ("glyph", Ty::Text, "spin done (ok) fail you (bell) perm (lock) idle ended commit wc file term, or any character; fail marks the tab"), ("tone", Ty::Enum(TONES), "the glyph's color"), ("tag", Ty::Text, "a short pill before the text: a ticket, a kind"), ("tag_tone", Ty::Enum(TONES), "the pill's color"), ("aside", Ty::Text, "dim text right of the text: exit 1, 3 files"), ("aside_tone", Ty::Enum(TONES), "the aside's color"), ("since", Ty::Any, "RFC 3339 or unix seconds"), ("meta", Ty::Text, "dim text at the far right, when there is no since"), ("detail", Ty::Text, "longer text under the row: wraps, three rows at most until the row has the focus"), ("text_tone", Ty::Enum(TONES), "the text's color"), ("bold", Ty::Bool, "the whole text bold"), ("who", Ty::Text, "a name, drawn as its badge (glyph + name in the name's color) before the text"), ("target", Ty::Text, "URL or mg: token, opened on click or enter")] },
+        fields: &[("text", Ty::Text, "the line; cut at the edge, in full when focused; **bold** `code` @[name]"), ("glyph", Ty::Text, "spin done (ok) fail you (bell) perm (lock) idle ended commit wc file term, or any character; fail marks the tab"), ("tone", Ty::Enum(TONES), "the glyph's color"), ("tag", Ty::Text, "a short pill before the text: a ticket, a kind"), ("tag_tone", Ty::Enum(TONES), "the pill's color"), ("aside", Ty::Text, "dim text right of the text: exit 1, 3 files"), ("aside_tone", Ty::Enum(TONES), "the aside's color"), ("since", Ty::Any, "RFC 3339 or unix seconds"), ("meta", Ty::Text, "dim text at the far right, when there is no since"), ("detail", Ty::Text, "longer text under the row: wraps, three rows at most until the row has the focus"), ("text_tone", Ty::Enum(TONES), "the text's color"), ("bold", Ty::Bool, "the whole text bold"), ("who", Ty::Text, "a name, drawn as its badge (glyph + name in the name's color) before the text"), ("target", Ty::Text, "URL or mg: token, opened on click or enter"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "feed", about: "a feed's health line (written by the daemon)", children: false, action: "",
         fields: &[("name", Ty::Text, "the feed's name"), ("state", Ty::Text, "not registered, live, restarting, failed, paused, removed, stopped"), ("trigger", Ty::Text, "every 30s, watch <path>, stream"), ("since", Ty::Any, "RFC 3339: when the state began"), ("until", Ty::Any, "RFC 3339: the next restart (a countdown)"), ("last", Ty::Any, "RFC 3339: its last write"), ("restarts", Ty::Num, "restarts so far"), ("note", Ty::Text, "the last error, shown under the line")] },
     Kind { name: "rule", about: "a horizontal line: a break between parts of a dashboard", children: false, action: "",
         fields: &[("text", Ty::Text, "a label inset at the left")] },
     Kind { name: "table", about: "a table: a header and aligned columns; its children are tr rows", children: true, action: "",
-        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state (default text), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows")] },
+        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state (default text), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "tr", about: "one table row, only inside a table; give it a stable id so a rewrite reconciles", children: false, action: "open (click, when it has a target)",
-        fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)")] },
+        fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "runs", about: "a run strip: the last n outcomes as small squares, oldest left, a cross for a failure", children: false, action: "",
         fields: &[("label", Ty::Text, "text at the left: what ran"), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed")] },
     Kind { name: "plot", about: "a plot drawn in the pane: lines, an area, bars, columns, a histogram, sparklines or heat strips", children: false, action: "",
@@ -160,6 +163,7 @@ pub const DOC_FIELDS: &[(&str, Ty, &str)] = &[
     ("purpose", Ty::Text, "what the pane is for, one line pinned at the top (margin purpose)"),
     ("hints", Ty::List, "reminders at the pane's bottom, one each; `key  text` (two spaces) draws a key (margin hints)"),
     ("kind", Ty::Text, "a free label for what the artifact is (plan, dashboard); listed by margin ls --json, never drawn"),
+    ("actions", Ty::Any, "list of {key, name, label?}: actions of the whole board, offered on every block that has none of its own under that key (see a row's actions)"),
     ("blocks", Ty::Any, "the top-level components, in order: a list of {type, id, fields…, children}"),
     ("v", Ty::Num, "the format version, optional: 1"),
 ];
@@ -335,6 +339,60 @@ fn check_cells(row: &Block, cols: &[(String, String)]) -> Result<(), String> {
     Ok(())
 }
 
+/// One declared action: the key that fires it, the event name's second half, the hint's words.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Action {
+    pub key: char,
+    pub name: String,
+    pub label: String,
+}
+
+/// An `actions` value, checked: a list of `{key, name, label?}` where each key is one character
+/// the pane does not bind itself (`reserved`: app.rs derives it from its own key table, so the
+/// two cannot drift), no key or name is used twice in the list, and `name` is an id. `what`
+/// names the block in the error.
+pub fn parse_actions(v: &Value, what: &str, reserved: &[char]) -> Result<Vec<Action>, String> {
+    if v.is_null() {
+        return Ok(Vec::new());
+    }
+    let list = v.as_array().ok_or_else(|| format!("{what}: actions must be a list of {{key, name, label}}, got {v}"))?;
+    let mut out: Vec<Action> = Vec::new();
+    for a in list {
+        let o = a.as_object().ok_or_else(|| format!("{what}: an action must be an object {{key, name, label}}, got {a}"))?;
+        if let Some(f) = o.keys().find(|f| !["key", "name", "label"].contains(&f.as_str())) {
+            return Err(format!("{what}: an action has an unknown field {f:?}{}; its fields: key name label", did_you_mean(f, ["key", "name", "label"])));
+        }
+        let name = o.get("name").and_then(|n| n.as_str()).filter(|n| valid_id(n)).ok_or_else(|| format!("{what}: an action needs a name (letters, digits, - and _), got {a}"))?;
+        let key = o.get("key").and_then(|k| k.as_str()).unwrap_or("");
+        let mut cs = key.chars();
+        let k = match (cs.next(), cs.next()) {
+            (Some(c), None) if !c.is_whitespace() && !c.is_control() => c,
+            _ => return Err(format!("{what}: action {name:?} needs a key of one character, got {key:?}")),
+        };
+        if reserved.contains(&k) {
+            let mut r: Vec<String> = reserved.iter().map(|c| c.to_string()).collect();
+            r.sort();
+            return Err(format!("{what}: action {name:?} can't use the key {k:?}: the pane uses it (taken: {})", r.join(" ")));
+        }
+        if let Some(d) = out.iter().find(|x| x.key == k) {
+            return Err(format!("{what}: actions {:?} and {name:?} share the key {k:?}", d.name));
+        }
+        if out.iter().any(|x| x.name == name) {
+            return Err(format!("{what}: two actions are named {name:?}"));
+        }
+        if name == "open" {
+            return Err(format!("{what}: open is the action every block with a target has already (enter); name this one something else"));
+        }
+        let label = match o.get("label") {
+            None | Some(Value::Null) => name.to_string(),
+            Some(Value::String(l)) if !l.trim().is_empty() => l.clone(),
+            Some(l) => return Err(format!("{what}: action {name:?} label must be text, got {l}")),
+        };
+        out.push(Action { key: k, name: name.to_string(), label });
+    }
+    Ok(out)
+}
+
 /// Check a block and its descendants against the schema, as a top-level block.
 pub fn check_block(b: &Block) -> Result<(), String> {
     check_under(b, None)
@@ -353,6 +411,9 @@ pub fn check_under(b: &Block, parent: Option<&Block>) -> Result<(), String> {
     }
     if !k.children && !b.children.is_empty() {
         return Err(format!("{}: a {} holds no children", b.id, k.name));
+    }
+    if let Some(v) = b.f.get("actions") {
+        parse_actions(v, &b.id, &crate::app::reserved_keys())?;
     }
     if b.kind == "question" {
         let opts = b.strs("options");
@@ -486,6 +547,10 @@ pub struct Doc {
     /// It stands where a Goal section used to, so the top of the pane goes to what changes.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub purpose: String,
+    /// Actions of the whole board (`{key, name, label?}`): offered on every block that has no
+    /// action of its own under that key, and with nothing focused.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub actions: Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -595,8 +660,31 @@ impl Doc {
     /// when it is given no document.
     #[cfg(test)]
     pub fn empty(id: &str) -> Doc {
-        Doc { v: 1, id: id.into(), title: id.into(), kind: String::new(), rev: 0, icon: None, blocks: vec![], updated: String::new(), sessions: vec![], by: String::new(), hints: vec![], purpose: String::new() }
+        Doc { v: 1, id: id.into(), title: id.into(), kind: String::new(), rev: 0, icon: None, blocks: vec![], updated: String::new(), sessions: vec![], by: String::new(), hints: vec![], purpose: String::new(), actions: Value::Null }
     }
+    /// The actions on offer for block `id` (None or empty: the board with nothing focused): the
+    /// block's own, then its table's when it is a table row, then the board's; a nearer one wins
+    /// its key and its name. `open` is not in the list: every block with a `target` has it.
+    pub fn actions_for(&self, id: Option<&str>) -> Vec<Action> {
+        let mut out: Vec<Action> = Vec::new();
+        let mut take = |v: Option<&Value>| {
+            // checked at write time: what is stored parses
+            for a in v.and_then(|v| parse_actions(v, "", &[]).ok()).unwrap_or_default() {
+                if !out.iter().any(|x| x.key == a.key || x.name == a.name) {
+                    out.push(a);
+                }
+            }
+        };
+        if let Some(b) = id.filter(|i| !i.is_empty()).and_then(|i| self.find(i)) {
+            take(b.f.get("actions"));
+            if b.kind == "tr" {
+                take(self.parent_of(&b.id).and_then(|t| t.f.get("actions")));
+            }
+        }
+        take(Some(&self.actions));
+        out
+    }
+
     pub fn find(&self, id: &str) -> Option<&Block> {
         let mut out = None;
         walk(&self.blocks, &mut |b, _, _| {

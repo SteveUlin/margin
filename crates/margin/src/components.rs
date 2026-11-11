@@ -178,6 +178,9 @@ pub struct Ctx<'a> {
     pub m: Motion,
     /// Highest event seq any Claude session has been handed.
     pub delivered: u64,
+    /// A Claude session keeps this board (link.rs). Without one nothing on it speaks of Claude:
+    /// a decision is "sent", with no promise about who reads it.
+    pub linked: bool,
     /// Flash intensity per id (selection acknowledgement).
     pub flash: &'a HashMap<String, f32>,
     /// Animated progress values per progress id.
@@ -1300,12 +1303,12 @@ fn draw_question(cx: &Ctx, b: &Block, w: u16) -> Drawn {
     let left = b.opt("takes_at").and_then(parse_rfc3339).map(|t| t - cx.wall);
     let mut tick = None;
     let (tail, tail_hot) = match (&picked, held) {
-        (Some(_), _) => (Some(format!("{} sent · Claude reads it next turn", icon::SEND)), false),
+        (Some(_), _) => (Some(if cx.linked { format!("{} sent · Claude reads it next turn", icon::SEND) } else { format!("{} sent", icon::SEND) }), false),
         (None, true) => {
             let at = step.map(|s| format!("at {}", s.id)).or(left.map(|_| "at its time".to_string())).unwrap_or_else(|| "where it applies".into());
             (Some(format!("{} you asked Claude to wait · it stops {at}", icon::USER)), false)
         }
-        (None, false) if talking => (Some(format!("{} sent · Claude raises it in chat", icon::SEND)), false),
+        (None, false) if talking => (Some(if cx.linked { format!("{} sent · Claude raises it in chat", icon::SEND) } else { format!("{} sent", icon::SEND) }), false),
         (None, false) if default.is_empty() => (None, false),
         (None, false) => match (step, left, b.opt("applies")) {
             (Some(s), _, _) if step_on => (Some(format!("{} started: taking the default now", s.id)), true),
@@ -2124,7 +2127,7 @@ mod dash_tests {
         let cx = Ctx {
             doc, state: &state, p: &EVERFOREST, now: 0.0, wall, m: Motion { on: false, slow: 1.0 }, delivered: 0, flash: &flash,
             progress: &progress, kitty: false, cell: (10, 20), images: &images, focused: None, pulse: &pulse, pulse_period: 2.4,
-            pulse_breaths: 0.0, mouse, hover: None, flog: false,
+            pulse_breaths: 0.0, mouse, hover: None, flog: false, linked: true,
         };
         let (mut text, mut drawn, mut first) = (String::new(), HashMap::new(), true);
         crate::doc::walk(&doc.blocks, &mut |b, _, depth| {

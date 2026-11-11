@@ -109,7 +109,14 @@ pub fn is_passive(kind: &str) -> bool {
 /// hand a Claude session as binding? Not a passive kind, and not a named event someone appended
 /// with `margin emit`: that is for whoever listens for its name, never an instruction to Claude.
 pub fn is_decision(e: &Event) -> bool {
-    crate::who::is_human(&e.by) && !is_passive(&e.kind) && e.via != "emit" && e.via != "handler"
+    crate::who::is_human(&e.by) && !is_passive(&e.kind) && e.via != "emit" && e.via != "handler" && !is_action(e)
+}
+
+/// Is this an action on a board (`<board>.<name>`: a declared action's key, or `open`)? An
+/// action is for the handler registered for its name. The hooks hand one to a Claude session
+/// only when the board is that session's own pane (hook.rs `actions_for_session`).
+pub fn is_action(e: &Event) -> bool {
+    !e.artifact.is_empty() && e.kind.strip_prefix(e.artifact.as_str()).map(|r| r.starts_with('.')).unwrap_or(false)
 }
 
 /// The log rotates once events.jsonl is this long: the append and a read of what is new stay
@@ -590,6 +597,7 @@ impl Store {
         }
         d.normalize()?;
         d.blocks.iter().try_for_each(crate::doc::check_block)?;
+        crate::doc::parse_actions(&d.actions, "the document", &crate::app::reserved_keys())?;
         // a doc that exists but won't parse is not a missing doc: replacing it would reset the rev
         // and skip archiving what was there
         let old = if self.doc_path(&d.id).exists() { Some(self.load(&d.id)?) } else { None };
@@ -1057,10 +1065,25 @@ impl Store {
         let _l = self.lock().map_err(|e| e.to_string())?;
         let d = self.load(board)?;
         let id = if id == "-" { "" } else { id };
-        let mut value = match id {
-            "" => json!({}),
-            _ => snapshot(d.find(id).ok_or_else(|| format!("no component {id:?} in {board}; margin show {board}"))?),
+        let block = match id {
+            "" => None,
+            _ => Some(d.find(id).ok_or_else(|| format!("no component {id:?} in {board}; margin show {board}"))?),
         };
+        // only what is on offer there: `open` wherever there is a target, else a declared action
+        let offered = d.actions_for(Some(id));
+        let has_target = block.map(|b| b.opt("target").is_some()).unwrap_or(false);
+        if !(action == "open" && has_target) && !offered.iter().any(|a| a.name == action) {
+            let what = if id.is_empty() { format!("the board {board}") } else { format!("{id:?} in {board}") };
+            if action == "open" {
+                return Err(format!("{what} has no target to open"));
+            }
+            let mut names: Vec<&str> = offered.iter().map(|a| a.name.as_str()).collect();
+            if has_target {
+                names.insert(0, "open");
+            }
+            return Err(format!("{what} offers no action {action:?}; {}", if names.is_empty() { "it declares none (an `actions` list on the block, its table or the document)".to_string() } else { format!("its actions: {}", names.join(" ")) }));
+        }
+        let mut value = block.map(snapshot).unwrap_or_else(|| json!({}));
         if let Some(a) = arg {
             value["arg"] = a;
         }
@@ -1184,6 +1207,14 @@ impl Store {
         let at = self.last_seq();
         create_cursor(&p, at);
         read_cursor(&p).unwrap_or(at)
+    }
+
+    /// Has any cursor that is not a handler's moved to `seq` or past it? That is an outside
+    /// tool following the log (`margin events --follow --cursor`): it took the event.
+    pub fn outside_cursor_passed(&self, seq: u64) -> bool {
+        fs::read_dir(self.dir().join("cursors"))
+            .map(|rd| rd.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with("handler.")).any(|e| read_cursor(&e.path()).map(|c| c >= seq).unwrap_or(false)))
+            .unwrap_or(false)
     }
 
     pub fn set_cursor(&self, name: &str, seq: u64) {
@@ -1885,7 +1916,8 @@ pub mod tests {
         let d: Doc = serde_json::from_value(json!({"id": "reviews", "title": "r", "blocks": [
             {"type": "table", "id": "pr", "columns": [{"key": "title"}], "children": [
                 {"type": "tr", "id": "pr-1", "target": "https://example.com/1", "detail": "d", "cells": {"title": "One"}}]},
-            {"type": "row", "id": "note", "text": "hello", "tag": "x"}]})).unwrap();
+            {"type": "row", "id": "note", "text": "hello", "tag": "x", "actions": [{"key": "e", "name": "ping"}]}],
+            "actions": [{"key": "u", "name": "refresh"}]})).unwrap();
         s.put(d, None).unwrap();
         fs::write(s.dir().join("feeds.json"), r#"{"feeds": [{"name": "reviews", "cmd": ["true"], "trigger": {"kind": "stream"}, "artifact": "reviews", "owns": "pr", "cwd": "/"}]}"#).unwrap();
         assert!(s.decide("reviews", "pr-1", "pin", json!(true), "key", None).unwrap_err().contains("read-only"));
@@ -1898,6 +1930,9 @@ pub mod tests {
         assert!(s.act("reviews", "nope", "open", None, "you", "act").unwrap_err().contains("no component \"nope\""));
         assert!(s.act("review", "pr-1", "open", None, "you", "act").unwrap_err().contains("did you mean \"reviews\""));
         assert!(s.act("reviews", "pr-1", "bad name", None, "you", "act").is_err());
+        // only what the block offers: open (it has a target) and the board's refresh
+        assert_eq!(s.act("reviews", "pr-1", "ping", None, "you", "act").unwrap_err(), "\"pr-1\" in reviews offers no action \"ping\"; its actions: open refresh");
+        assert_eq!(s.act("reviews", "note", "open", None, "you", "act").unwrap_err(), "\"note\" in reviews has no target to open");
         assert_eq!(s.events().len(), 3, "a refusal logs nothing");
         assert_eq!(s.load("reviews").unwrap().rev, 1, "and an action changes no content");
         fs::remove_dir_all(&s.home).ok();

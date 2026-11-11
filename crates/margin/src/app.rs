@@ -108,7 +108,24 @@ struct Live {
     saved: View,
     /// A key or click that is the pane's to carry out, not this tab's (switch tabs).
     pane_act: Option<PaneAct>,
+    /// Actions the person fired from this pane and what became of each, by block id.
+    sent: std::collections::HashMap<String, Sent>,
 }
+
+/// An action fired on a row, until its note on the row goes: the event it appended (or why it
+/// was refused), when, and the row's content then (a row that changes has been dealt with).
+struct Sent {
+    seq: u64,
+    kind: String,
+    at: f64,
+    hash: u64,
+    refused: Option<String>,
+}
+
+/// How long a row says `sent` before the pane asks who took the event.
+const SENT_GRACE: f64 = 1.5;
+/// How long a handler that exists may leave an event unread before the row says so.
+const SENT_LATE: f64 = 5.0;
 
 /// What a tab hands up to the pane.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -199,8 +216,25 @@ enum Act {
 /// The pane's bindings, vim's names where vim has one. `1-9` on a question picks an option
 /// (handled before the table, since a count would otherwise eat the digit).
 fn keys() -> vellum::keymap::Keymap<Act> {
+    vellum::keymap::Keymap::new(&bindings())
+}
+
+/// The characters a board's own actions may not use as their key: every character one of the
+/// pane's bindings starts with (so `g`, `z`, `]` too: they begin a sequence), the digits (a
+/// count), and review mode's reaction keys. Derived from the binding table, so a key added
+/// there is refused in `actions` from then on (doc.rs `parse_actions` checks it at write time).
+pub fn reserved_keys() -> Vec<char> {
+    let mut v: Vec<char> = bindings().iter().filter(|(k, _)| !k.starts_with('<')).filter_map(|(k, _)| k.chars().next()).collect();
+    v.extend('0'..='9');
+    v.extend(['+', '-', '=', '!']);
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn bindings() -> Vec<(&'static str, Act)> {
     use Act::*;
-    vellum::keymap::Keymap::new(&[
+    vec![
         ("j", Down), ("<Down>", Down), ("k", Up), ("<Up>", Up),
         ("gg", Top), ("<Home>", Top), ("G", Bottom), ("<End>", Bottom),
         ("<C-d>", HalfDown), ("<C-u>", HalfUp), ("<C-f>", PageDown), ("<C-b>", PageUp), ("<PageDown>", PageDown), ("<PageUp>", PageUp),
@@ -221,7 +255,7 @@ fn keys() -> vellum::keymap::Keymap<Act> {
         ("gt", TabNext), ("gT", TabPrev), ("<Right>", TabNext), ("<Left>", TabPrev),
         // the detail panel: d opens and closes it, J and K scroll it (j and k move the list)
         ("d", Detail), ("J", DetailDown), ("K", DetailUp),
-    ])
+    ]
 }
 
 impl Live {
@@ -269,6 +303,7 @@ impl Live {
             toast_seen: Default::default(),
             saved,
             pane_act: None,
+            sent: Default::default(),
         })
     }
 
@@ -291,6 +326,7 @@ impl Live {
         self.activity = crate::link::activity_for(&self.st, &self.art);
         self.scene.recap = crate::recap::for_pane(&self.st, &self.art);
         self.scene.stopped = self.st.stopped();
+        self.scene.linked = crate::link::all(&self.st).iter().any(|l| l.art == self.art);
         self.scene.stale = crate::owner::stale_on(&self.st, &self.art, epoch_now());
         self.scene.agents = crate::agents::for_pane(&self.st, &self.art);
         self.toasts = crate::toast::load(&self.st, &self.art);
@@ -342,6 +378,83 @@ impl Live {
         }
     }
 
+    /// Fire an action on a block (`id` empty: the board): append its event and note it on the
+    /// row. The pane runs nothing: whichever handler is registered for the event's name does
+    /// the work, and `sent_notes` says on the row what became of it.
+    fn fire(&mut self, id: &str, action: &str, via: &str, now: f64) {
+        let hash = self.doc.find(id).map(|b| b.hash()).unwrap_or(0);
+        let r = self.st.act(&self.art, id, action, None, crate::who::HUMAN, via);
+        let s = match r {
+            Ok(e) => Sent { seq: e.seq, kind: e.kind, at: epoch_now(), hash, refused: None },
+            Err(e) => {
+                select::log_line(&format!("action {action} on {id}: {e}"));
+                Sent { seq: 0, kind: format!("{}.{action}", self.art), at: epoch_now(), hash, refused: Some(e) }
+            }
+        };
+        self.sent.insert(id.to_string(), s);
+        self.scene.flash(id, now);
+        self.sent_notes(epoch_now());
+    }
+
+    /// The key `c` with the focus where it is: fire the action that declares it, if one does.
+    fn action_key(&mut self, c: char, now: f64) -> bool {
+        let focus = self.scene.focus.clone();
+        match self.doc.actions_for(focus.as_deref()).into_iter().find(|a| a.key == c) {
+            Some(a) => {
+                self.fire(focus.as_deref().unwrap_or(""), &a.name, "key", now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What each fired action's row says now (scene.sent), from the handler registry and the
+    /// cursors alone:
+    /// - `→ sent` at first;
+    /// - nothing once the row's content changed, or once the event was taken: every handler
+    ///   registered for its name has moved its cursor past it, or (no handler) some other named
+    ///   cursor has, which is an outside tool following the log;
+    /// - `nothing handles <name>` when no handler is registered for the name and nothing took it;
+    /// - `nothing has picked this up` when a handler is registered and has not read it after
+    ///   SENT_LATE seconds: the daemon is not running.
+    ///
+    /// True while a note is on show (the pane then comes back to look again).
+    fn sent_notes(&mut self, wall: f64) -> bool {
+        if self.sent.is_empty() {
+            self.scene.sent.clear();
+            return false;
+        }
+        let reg = crate::handler::Registry::load(&self.st.dir());
+        let mut notes = std::collections::HashMap::new();
+        let (st, doc) = (&self.st, &self.doc);
+        self.sent.retain(|id, s| {
+            let age = wall - s.at;
+            if let Some(why) = &s.refused {
+                notes.insert(id.clone(), (why.clone(), true));
+                return age < 6.0;
+            }
+            if doc.find(id).map(|b| b.hash() != s.hash).unwrap_or(!id.is_empty()) {
+                return false;
+            }
+            let hs: Vec<&crate::handler::Handler> = reg.for_kind(&s.kind).into_iter().filter(|h| !h.paused).collect();
+            let taken = if hs.is_empty() { st.outside_cursor_passed(s.seq) } else { hs.iter().all(|h| st.cursor(&h.cursor()).map(|c| c >= s.seq).unwrap_or(false)) };
+            if taken {
+                return false;
+            }
+            let note = match (hs.is_empty(), age) {
+                (_, a) if a < SENT_GRACE => ("→ sent".to_string(), false),
+                (true, a) if a < 12.0 => (format!("nothing handles {} · margin doctor", s.kind), true),
+                (false, a) if a < SENT_LATE => ("→ sent".to_string(), false),
+                (false, a) if a < 60.0 => ("nothing has picked this up · margin daemon status".to_string(), true),
+                _ => return false,
+            };
+            notes.insert(id.clone(), note);
+            true
+        });
+        self.scene.sent = notes;
+        !self.sent.is_empty()
+    }
+
     fn key(&mut self, k: Key, ctrl: bool, now: f64, term: &mut Terminal) {
         if self.search.is_some() {
             self.search_key(k);
@@ -385,6 +498,13 @@ impl Live {
                 self.decide(&b.id, "pick", json!(o), now);
             }
             return;
+        }
+        // a key one of the focused block's actions declares (never one of the pane's own: those
+        // are refused when the board is written)
+        if let (Key::Char(c), false, true) = (k, ctrl, self.keys.pending().is_empty()) {
+            if self.action_key(c, now) {
+                return;
+            }
         }
         // a count typed before this key: `3gt` is the third tab, `gt` the next one
         let counted = self.keys.pending().starts_with(|c: char| c.is_ascii_digit());
@@ -444,11 +564,8 @@ impl Live {
             }
             Act::Activate => match kind.as_str() {
                 "section" => self.toggle_fold(&focus.clone().unwrap(), None, true),
-                "link" | "status" => {
-                    let t = select::Token { verb: "open".into(), artifact: Some(self.art.clone()), id: focus.clone().unwrap(), value: None };
-                    let _ = select::apply_in(&self.st, &self.art, &t, "key", &self.cfg);
-                    self.scene.flash(&t.id, now);
-                }
+                // open is an action like any other: the event goes out, a handler opens it
+                "link" | "status" => self.fire(&focus.clone().unwrap(), "open", "key", now),
                 "todo" => {
                     // the circle's cycle: next → skipped → Claude's again
                     let b = fb.unwrap();
@@ -462,11 +579,7 @@ impl Live {
                 }
                 // any other block with a target opens it (a row, a table's row): what the
                 // detail panel's hint promises
-                _ if fb.as_ref().map(|b| b.opt("target").is_some()).unwrap_or(false) => {
-                    let t = select::Token { verb: "open".into(), artifact: Some(self.art.clone()), id: focus.clone().unwrap(), value: None };
-                    let _ = select::apply_in(&self.st, &self.art, &t, "key", &self.cfg);
-                    self.scene.flash(&t.id, now);
-                }
+                _ if fb.as_ref().map(|b| b.opt("target").is_some()).unwrap_or(false) => self.fire(&focus.clone().unwrap(), "open", "key", now),
                 _ => {}
             },
             Act::Strike if kind == "claim" => {
@@ -724,7 +837,17 @@ impl Live {
             }
             return;
         }
+        // an action's button: in the hint row, or its line in the detail panel
+        if let Some((id, name)) = button.as_deref().and_then(|b| b.strip_prefix("mg:act/")).and_then(|r| r.rsplit_once('/')).map(|(a, b)| (a.to_string(), b.to_string())) {
+            self.fire(&id, &name, "mouse", now);
+            return;
+        }
         if let Some(t) = button.or_else(|| token_at(grid, x, y)).as_deref().and_then(select::parse_token) {
+            // a click that opens a block's target is the open action: the same event as enter
+            if t.verb == "open" && t.artifact.as_deref().map(|a| a == self.art).unwrap_or(true) && self.doc.find(&t.id).is_some() {
+                self.fire(&t.id, "open", "mouse", now);
+                return;
+            }
             // the pane's own project and artifact, not whatever `resolve` finds first
             let art = t.artifact.clone().unwrap_or_else(|| self.art.clone());
             if select::apply_in(&self.st, &art, &t, "mouse", &self.cfg).is_ok() {
@@ -1075,7 +1198,7 @@ impl Pane {
     /// project's shared ones.
     fn watch(&self) -> Vec<std::path::PathBuf> {
         let st = &self.tabs[0].st;
-        let mut w = vec![st.dir(), st.dir().join("delivered"), st.activity_dir(), st.dir().join("toasts")];
+        let mut w = vec![st.dir(), st.dir().join("delivered"), st.dir().join("cursors"), st.activity_dir(), st.dir().join("toasts")];
         for l in &self.tabs {
             w.push(st.art(&l.art));
         }
@@ -1179,6 +1302,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         // an owner goes stale by the clock alone: looked at on every frame, with a wake-up
         // (below) for the moment the next one would
         lv.scene.stale = crate::owner::stale_on(&lv.st, &lv.art, wall);
+        let sent_wait = lv.sent_notes(wall);
         let next_stale = crate::owner::next_stale(&lv.st, &lv.art, wall);
         // toasts: start each one's clock when the pane is first on screen, drop the ones run out
         if !lv.toasts.is_empty() {
@@ -1316,6 +1440,10 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         let mut wake = frame.wake;
         if let Some(at) = next_stale {
             wake.at(t + (at - wall).max(0.0) + 0.5);
+        }
+        // a row saying `sent` is looked at again until its note goes
+        if sent_wait {
+            wake.at(t + 0.5);
         }
         // the tab mark and the phone push: a wake only for a look that is owed (attention.rs);
         // an idle Claude with nothing else pending asks for none. Across every tab's sessions
@@ -1685,6 +1813,235 @@ mod pane_tests {
         st.save_view("a", "tty", &v);
         assert!(pn.sync(&Config::default(), 3.0));
         assert_eq!((pn.set(), pn.active), (vec!["a".to_string(), "b".into()], 1));
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+    use crate::doc::Op;
+
+    /// A board with a feed-owned table whose rows offer `e retry`, one row with its own action,
+    /// and a board-wide `u refresh`.
+    fn board() -> (Store, Pane) {
+        let st = crate::store::tests::temp_store();
+        let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "ci", "title": "CI", "actions": [{"key": "u", "name": "refresh", "label": "refresh all"}], "blocks": [
+            {"type": "table", "id": "job", "columns": [{"key": "name"}], "actions": [{"key": "e", "name": "retry", "label": "retry the job"}], "children": [
+                {"type": "tr", "id": "job-1", "target": "https://example.com/job/1", "detail": "exit 2", "cells": {"name": "build"}},
+                {"type": "tr", "id": "job-2", "cells": {"name": "test"}, "actions": [{"key": "X", "name": "cancel"}]}]},
+            {"type": "text", "id": "note", "text": "a note"}]}))
+        .unwrap();
+        st.put(doc, None).unwrap();
+        // the table is a feed's: its rows are read-only content, and still take the person's actions
+        std::fs::write(st.dir().join("feeds.json"), r#"{"feeds": [{"name": "ci", "cmd": ["true"], "trigger": {"kind": "stream"}, "artifact": "ci", "owns": "job", "cwd": "/"}]}"#).unwrap();
+        let mut pn = Pane::open(&st, "ci", &[], &Config::default(), "tty", false, true).unwrap();
+        pn.reload(0.0);
+        (st, pn)
+    }
+
+    fn handler(st: &Store, name: &str, on: &str) {
+        let h = crate::handler::Handler { name: name.into(), cmd: vec!["true".into()], on: vec![on.into()], board: String::new(), owns: String::new(), paused: false, cwd: "/".into(), path: String::new(), timeout: 60.0, retries: 3, added: String::new() };
+        crate::handler::edit_registry(st, |r| r.add(h)).unwrap();
+        st.cursor_or_create(&format!("handler:{name}"));
+    }
+
+    fn frame(lv: &mut Live, w: u16) -> (String, Grid) {
+        let g = lv
+            .scene
+            .frame(&Input { doc: &lv.doc, state: &lv.state, view: &lv.view, delivered: 0, unread: 0, now: 10.0, wall: epoch_now(), cfg: &lv.cfg, kitty: false, cell: (10, 20), focused_pane: true, mouse: true, project: "proj", w, h: 30, activity: &[] })
+            .grid;
+        (g.to_text(), g)
+    }
+
+    /// An action's key on a feed-owned row appends `<board>.<name>` with the row's id and a
+    /// snapshot of it, by the person, via the key. The nearest declaration wins; a key nothing
+    /// declares is not an action; the pane's own keys can't be declared at all.
+    #[test]
+    fn an_action_key_appends_the_event_with_the_row_snapshot() {
+        let (st, mut pn) = board();
+        let lv = pn.lv();
+        lv.scene.focus = Some("job-1".into());
+        assert!(lv.action_key('e', 1.0));
+        let e = st.events().into_iter().find(|e| e.kind == "ci.retry").expect("the event");
+        assert_eq!((e.artifact.as_str(), e.id.as_str(), e.by.as_str(), e.via.as_str(), e.rev), ("ci", "job-1", "you", "key", 1));
+        assert_eq!(e.value, json!({"cells": {"name": "build"}, "target": "https://example.com/job/1", "detail": "exit 2"}));
+        assert_eq!(st.load("ci").unwrap().rev, 1, "an action changes no content");
+        // the row's own action, the table's, and the board's, each from the same row
+        lv.scene.focus = Some("job-2".into());
+        assert!(lv.action_key('X', 1.0) && lv.action_key('e', 1.0) && lv.action_key('u', 1.0));
+        assert!(!lv.action_key('y', 1.0), "nothing declares y");
+        // off the table only the board's action is on offer
+        lv.scene.focus = Some("note".into());
+        assert!(!lv.action_key('e', 1.0) && lv.action_key('u', 1.0));
+        let kinds: Vec<(String, String)> = st.events().into_iter().filter(|e| crate::store::is_action(e)).map(|e| (e.kind, e.id)).collect();
+        assert_eq!(kinds, [("ci.retry", "job-1"), ("ci.cancel", "job-2"), ("ci.retry", "job-2"), ("ci.refresh", "job-2"), ("ci.refresh", "note")].map(|(k, i)| (k.to_string(), i.to_string())));
+        // enter on a row with a target is the open action: an event, and nothing is run here
+        lv.fire("job-1", "open", "key", 2.0);
+        let e = st.events().into_iter().find(|e| e.kind == "ci.open").unwrap();
+        assert_eq!((e.id.as_str(), e.value["target"].as_str()), ("job-1", Some("https://example.com/job/1")));
+        // a row with no target has nothing to open: refused, said on the row, nothing logged
+        let n = st.events().len();
+        lv.fire("job-2", "open", "key", 2.0);
+        assert_eq!(st.events().len(), n);
+        assert!(lv.scene.sent["job-2"].0.contains("has no target to open") && lv.scene.sent["job-2"].1);
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// The keys an action may not take are the pane's own, read from its binding table; a
+    /// write that declares one is refused, as is a repeated key or name and a second `open`.
+    #[test]
+    fn a_reserved_or_repeated_action_key_is_refused_at_write() {
+        let reserved = reserved_keys();
+        for c in ['j', 'k', 'd', 'g', 'z', ']', '/', '?', 'q', 'o', 'x', 'r', 'a', '3', '+'] {
+            assert!(reserved.contains(&c), "{c} is the pane's");
+        }
+        for (k, _) in bindings() {
+            if !k.starts_with('<') {
+                assert!(reserved.contains(&k.chars().next().unwrap()), "{k} is bound and not reserved");
+            }
+        }
+        assert!(!reserved.contains(&'u') && !reserved.contains(&'R') && !reserved.contains(&'e'));
+        let st = crate::store::tests::temp_store();
+        st.create(crate::doc::Doc::empty("b")).unwrap();
+        let add = |actions: serde_json::Value| st.patch("b", &[Op::Replace { block: serde_json::from_value(json!({"type": "row", "id": "r1", "text": "t", "actions": actions})).unwrap(), parent: None }], None);
+        let e = add(json!([{"key": "j", "name": "jump"}])).unwrap_err();
+        assert!(e.contains("r1: action \"jump\" can't use the key 'j': the pane uses it"), "{e}");
+        assert!(add(json!([{"key": "e", "name": "a"}, {"key": "e", "name": "b"}])).unwrap_err().contains("share the key 'e'"));
+        assert!(add(json!([{"key": "e", "name": "a"}, {"key": "f", "name": "a"}])).unwrap_err().contains("two actions are named \"a\""));
+        assert!(add(json!([{"key": "ee", "name": "a"}])).unwrap_err().contains("a key of one character"));
+        assert!(add(json!([{"key": "e"}])).unwrap_err().contains("needs a name"));
+        assert!(add(json!([{"key": "e", "name": "open"}])).unwrap_err().contains("open is the action every block with a target has"));
+        assert!(add(json!([{"key": "e", "name": "a", "lable": "x"}])).unwrap_err().contains("did you mean label?"));
+        assert!(add(json!("e")).unwrap_err().contains("must be a list"));
+        assert_eq!(st.load("b").unwrap().rev, 1, "nothing was written");
+        add(json!([{"key": "e", "name": "edit"}, {"key": "R", "name": "rerun", "label": "run again"}])).unwrap();
+        let acts = st.load("b").unwrap().actions_for(Some("r1"));
+        assert_eq!(acts.iter().map(|a| (a.key, a.name.as_str(), a.label.as_str())).collect::<Vec<_>>(), [('e', "edit", "edit"), ('R', "rerun", "run again")]);
+        // a todo takes no actions of its own; the document does, under the same rule
+        let todo = Op::Add { parent: None, block: serde_json::from_value(json!({"type": "todo", "id": "t1", "text": "t", "actions": []})).unwrap(), before: None, after: None };
+        assert!(st.patch("b", &[todo], None).unwrap_err().contains("unknown field \"actions\" on todo"));
+        let mut d = st.load("b").unwrap();
+        d.actions = json!([{"key": "q", "name": "quit"}]);
+        assert!(st.replace(d, None).unwrap_err().contains("the document: action \"quit\" can't use the key 'q'"));
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// The row says what became of the action, from the registry and the cursors: `sent`, then
+    /// `nothing handles <name>` when no handler is registered for it; with a handler, the note
+    /// goes when its cursor passes the event, and says so when it never does.
+    #[test]
+    fn the_row_says_sent_then_who_took_it_or_that_nobody_did() {
+        let (st, mut pn) = board();
+        let lv = pn.lv();
+        lv.scene.focus = Some("job-1".into());
+        assert!(lv.action_key('e', 1.0));
+        let t0 = epoch_now();
+        assert_eq!(lv.scene.sent["job-1"], ("→ sent".to_string(), false));
+        assert!(frame(lv, 100).0.contains("→ sent"), "{}", frame(lv, 100).0);
+        // nobody is registered for ci.retry, and nothing took it
+        assert!(lv.sent_notes(t0 + SENT_GRACE + 0.5));
+        assert_eq!(lv.scene.sent["job-1"], ("nothing handles ci.retry · margin doctor".to_string(), true));
+        let text = frame(lv, 100).0;
+        assert!(text.lines().any(|l| l.contains("build") && l.contains("nothing handles ci.retry")), "on its row:
+{text}");
+        assert!(!lv.sent_notes(t0 + 30.0) && lv.scene.sent.is_empty(), "the notice goes after a while");
+        // an outside tool following the log with its own cursor took it: no notice at all
+        assert!(lv.action_key('e', 1.0));
+        let seq = st.last_seq();
+        st.set_cursor("mytool", seq);
+        assert!(!lv.sent_notes(epoch_now() + SENT_GRACE + 0.5) && lv.scene.sent.is_empty());
+        // a handler is registered: sent until its cursor passes the event
+        handler(&st, "retry", "ci.retry");
+        assert!(lv.action_key('e', 1.0));
+        let (seq, t0) = (st.last_seq(), epoch_now());
+        assert!(lv.sent_notes(t0 + 3.0));
+        assert_eq!(lv.scene.sent["job-1"].0, "→ sent", "a handler exists: it is given time");
+        assert!(lv.sent_notes(t0 + SENT_LATE + 1.0));
+        assert_eq!(lv.scene.sent["job-1"], ("nothing has picked this up · margin daemon status".to_string(), true));
+        st.set_cursor("handler:retry", seq);
+        assert!(!lv.sent_notes(t0 + SENT_LATE + 2.0) && lv.scene.sent.is_empty(), "its handler finished with it");
+        // a paused handler handles nothing
+        crate::handler::edit_registry(&st, |r| r.set_paused("retry", true)).unwrap();
+        assert!(lv.action_key('e', 1.0));
+        lv.sent_notes(epoch_now() + SENT_GRACE + 0.5);
+        assert!(lv.scene.sent["job-1"].0.starts_with("nothing handles ci.retry"));
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// The sent mark goes when the row's content changes: whoever handled it wrote the row.
+    #[test]
+    fn the_sent_mark_clears_when_the_row_changes() {
+        let (st, mut pn) = board();
+        let lv = pn.lv();
+        lv.scene.focus = Some("job-1".into());
+        assert!(lv.action_key('e', 1.0));
+        assert!(lv.scene.sent.contains_key("job-1"));
+        // another row changing is not this row changing
+        let w = crate::store::Writer::Feed { name: "ci".into(), owns: "job".into() };
+        st.feed_write("ci", &[vec![Op::Set { id: "job-2".into(), field: "detail".into(), value: json!("x") }]], &w, &[]);
+        lv.reload(2.0);
+        assert!(lv.sent_notes(epoch_now()) && lv.scene.sent.contains_key("job-1"));
+        st.feed_write("ci", &[vec![Op::Set { id: "job-1".into(), field: "detail".into(), value: json!("retrying") }]], &w, &[]);
+        lv.reload(3.0);
+        assert!(!lv.sent_notes(epoch_now()) && lv.scene.sent.is_empty());
+        assert!(!frame(lv, 100).0.contains("→ sent"));
+        // a row that is removed takes its note with it
+        assert!(lv.action_key('e', 1.0));
+        st.feed_write("ci", &[vec![Op::Rm { id: "job-1".into() }]], &w, &[]);
+        lv.reload(4.0);
+        assert!(!lv.sent_notes(epoch_now()));
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// The hint row leads with the focused block's actions, the detail panel lists them, and a
+    /// click on either fires the action; a block with a target says `⏎ open`.
+    #[test]
+    fn actions_show_in_the_hint_row_and_the_detail_panel_and_take_clicks() {
+        let (st, mut pn) = board();
+        let lv = pn.lv();
+        lv.scene.focus = Some("job-1".into());
+        let (text, g) = frame(lv, 100);
+        let help = text.lines().find(|l| l.contains("j/k move")).expect("the hint row");
+        assert!(help.trim_start().starts_with("e retry the job • u refresh all • j/k move"), "{help}");
+        assert!(help.contains("⏎ open"), "{help}");
+        let (x, y, _, tok) = lv.scene.hits.iter().find(|h| h.3 == "mg:act/job-1/retry").cloned().expect("the hint is a button");
+        assert_eq!(tok, "mg:act/job-1/retry");
+        lv.click(&g, x + 1, y, 5.0);
+        assert_eq!(st.events().into_iter().filter(|e| e.kind == "ci.retry").map(|e| (e.id, e.via)).collect::<Vec<_>>(), [("job-1".to_string(), "mouse".to_string())]);
+        // another row: its own action too
+        lv.scene.focus = Some("job-2".into());
+        let text = frame(lv, 100).0;
+        assert!(text.lines().any(|l| l.trim_start().starts_with("X cancel • e retry the job • u refresh all")), "{text}");
+        // the detail panel lists them under the fields, each a button
+        lv.view.detail = true;
+        lv.scene.focus = Some("job-1".into());
+        let (text, g) = frame(lv, 120);
+        assert!(text.contains("⏎ open the target") && text.lines().any(|l| l.trim_end().ends_with("e retry the job")) && text.lines().any(|l| l.trim_end().ends_with("u refresh all")), "{text}");
+        let (x, y) = lv.scene.hits.iter().filter(|h| h.3 == "mg:act/job-1/refresh").map(|h| (h.0, h.1)).max_by_key(|h| h.0).expect("the panel line is a button");
+        lv.click(&g, x, y, 6.0);
+        assert!(st.events().iter().any(|e| e.kind == "ci.refresh" && e.id == "job-1" && e.via == "mouse"));
+        // a click on the line that opens the target is the open action, not an opener
+        let (x, y) = lv.scene.hits.iter().find(|h| h.3 == "mg:open/job-1").map(|h| (h.0, h.1)).unwrap();
+        lv.click(&g, x, y, 7.0);
+        assert!(st.events().iter().any(|e| e.kind == "ci.open" && e.id == "job-1" && e.via == "mouse"));
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A board no Claude session keeps says nothing about Claude; one that is linked does.
+    #[test]
+    fn claude_is_named_only_on_a_board_a_session_keeps() {
+        let (st, mut pn) = board();
+        let lv = pn.lv();
+        lv.scene.help_open = true;
+        let text = frame(lv, 140).0;
+        assert!(!text.contains("Claude"), "no session is linked:
+{text}");
+        crate::link::set(&st, "sess-1", "ci", "explicit");
+        lv.reload(1.0);
+        let text = frame(lv, 200).0;
+        assert!(text.contains("Claude is current"), "{:?} {text}", crate::link::all(&st).len());
+        assert!(text.contains("stop Claude"), "{text}");
+        std::fs::remove_dir_all(&st.home).ok();
     }
 }
 

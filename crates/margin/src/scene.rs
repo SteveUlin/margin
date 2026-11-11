@@ -321,6 +321,9 @@ pub struct Scene {
     pub review: bool,
     /// `i`: every row shows its id, dim at its right edge, so any row can be named.
     pub show_ids: bool,
+    /// A Claude session keeps this board (the app and `margin render` set it from the links).
+    /// Without one the pane says nothing about Claude: no "Claude is current", no "stop Claude".
+    pub linked: bool,
     /// Overdue writers of this board (owner.rs): (the id prefix they own, why). Their rows get a
     /// quiet mark at the right edge, the first one with the reason.
     pub stale: Vec<(String, String)>,
@@ -417,6 +420,7 @@ impl Scene {
             pending_keys: String::new(),
             review: false,
             show_ids: false,
+            linked: false,
             stale: Vec::new(),
             sent: HashMap::new(),
             recap: None,
@@ -1344,20 +1348,32 @@ impl Scene {
         self.detail_rect = panel;
         if let Some(r) = panel {
             let body = crate::detail::body(r, panel_side);
-            let (lines, open) = match self.focus.as_ref().and_then(|f| inp.doc.find(f)) {
+            let (mut lines, open) = match self.focus.as_ref().and_then(|f| inp.doc.find(f)) {
                 Some(b) => crate::detail::lines(b, inp.state, inp.wall, body.w as usize),
                 None => (vec![vec![("no row has the focus (j / k)".to_string(), crate::detail::Run::Dim)]], None),
             };
+            // the panel's buttons: the line that opens the target, then a line per action
+            let fid = self.focus.clone().unwrap_or_default();
+            let mut buttons: Vec<(usize, String)> = open.map(|i| (i, format!("mg:open/{fid}"))).into_iter().collect();
+            let acts = inp.doc.actions_for(self.focus.as_deref());
+            if !acts.is_empty() {
+                if open.is_none() {
+                    lines.push(Vec::new());
+                }
+                for (a, l) in acts.iter().zip(crate::detail::action_lines(&acts)) {
+                    buttons.push((lines.len(), format!("mg:act/{fid}/{}", a.name)));
+                    lines.push(l);
+                }
+            }
             if self.detail_of != self.focus {
                 self.detail_of = self.focus.clone();
                 self.detail_scroll = 0;
             }
             self.detail_max = lines.len().saturating_sub(body.h as usize);
             self.detail_scroll = self.detail_scroll.min(self.detail_max);
-            if let Some((x, y, bw)) = crate::detail::draw(&mut g, r, panel_side, &lines, self.detail_scroll, open, p) {
-                if let Some(f) = &self.focus {
-                    self.hits.push((x, y, bw, format!("mg:open/{f}")));
-                }
+            let hits = crate::detail::draw(&mut g, r, panel_side, &lines, self.detail_scroll, &buttons, p);
+            if self.focus.is_some() {
+                self.hits.extend(hits);
             }
         }
 
@@ -1565,7 +1581,11 @@ impl Scene {
                 keys.push(("←/→", "tabs"));
             }
             if self.help_open {
-                keys.extend([("gg/G", "top/end"), ("zh", "fold head"), ("]]/[[", "sections"), ("]c/[c", "changes"), ("/", "find"), ("c", "review"), ("i", "ids"), ("S", "stop Claude"), ("zM/zR", "fold all"), ("m", if inp.mouse { "mouse off" } else { "mouse on" }), ("q", "quit")]);
+                keys.extend([("gg/G", "top/end"), ("zh", "fold head"), ("]]/[[", "sections"), ("]c/[c", "changes"), ("/", "find"), ("c", "review"), ("i", "ids")]);
+                if self.linked {
+                    keys.push(("S", "stop Claude"));
+                }
+                keys.extend([("zM/zR", "fold all"), ("m", if inp.mouse { "mouse off" } else { "mouse on" }), ("q", "quit")]);
             } else {
                 // while changes wait unseen, the key that walks them
                 if self.unseen_n > 0 {
@@ -1573,7 +1593,18 @@ impl Scene {
                 }
                 keys.push(("?", "more"));
             }
-            parts::help_line(&mut g, 2, help_y, &keys, p, p.bg0, Rect::new(2, help_y, w.saturating_sub(3), 1));
+            // the focused block's own actions lead the row, each a button: `r retry`
+            let clip = Rect::new(2, help_y, w.saturating_sub(3), 1);
+            let fid = self.focus.clone().unwrap_or_default();
+            let mut x = 2u16;
+            for a in inp.doc.actions_for(self.focus.as_deref()) {
+                let x0 = x;
+                x = g.put_clipped(x, help_y, &a.key.to_string(), Style::fg(p.aqua).on(p.bg0).bold(), clip);
+                x = g.put_clipped(x + 1, help_y, &a.label, Style::fg(p.grey2).on(p.bg0), clip);
+                self.hits.push((x0, help_y, x.saturating_sub(x0), format!("mg:act/{fid}/{}", a.name)));
+                x = g.put_clipped(x, help_y, " • ", Style::fg(p.bg4).on(p.bg0), clip);
+            }
+            parts::help_line(&mut g, x, help_y, &keys, p, p.bg0, clip);
         }
         // the reminders: the author's keys in aqua (the pane's own keys below are grey)
         for (i, row) in hint_rows.iter().enumerate() {
@@ -1617,10 +1648,14 @@ impl Scene {
         if open_q > 0 {
             nuggets.push((format!("{} {open_q} open", icon::QUESTION), LIPGLOSS_STATUS.nugget_a));
         }
-        nuggets.push((
-            if inp.unread > 0 { format!("{} {} for Claude", icon::SEND, inp.unread) } else { format!("{} Claude is current", icon::CHECK) },
-            LIPGLOSS_STATUS.nugget_b,
-        ));
+        // only on a board a Claude session keeps: a dashboard nobody's session is linked to
+        // has no Claude to be current
+        if self.linked {
+            nuggets.push((
+                if inp.unread > 0 { format!("{} {} for Claude", icon::SEND, inp.unread) } else { format!("{} Claude is current", icon::CHECK) },
+                LIPGLOSS_STATUS.nugget_b,
+            ));
+        }
         let sb = StatusBar { key: &format!("{} MARGIN", icon::LEAF), key_bg: None, text: &inp.doc.id, dim_text: &project_label(inp.project), nuggets };
         // glance mode: no status bar, the strip is the title and the head
         if !glance {
@@ -1632,6 +1667,7 @@ impl Scene {
 
     fn ctx<'a>(&'a self, inp: &'a Input, p: &'a vellum::color::Palette, flash: &'a HashMap<String, f32>, prog: &'a HashMap<String, f32>) -> Ctx<'a> {
         Ctx {
+            linked: self.linked,
             doc: inp.doc,
             state: inp.state,
             p,
@@ -1984,6 +2020,7 @@ fn components_resolved(inp: &Input, b: &Block) -> bool {
     let imgs = HashMap::new();
     let pulse = HashMap::new();
     let cx = Ctx {
+        linked: true,
         doc: inp.doc,
         state: inp.state,
         p: &EVERFOREST,
@@ -2568,6 +2605,7 @@ mod tests {
         for (state, want) in [(State::default(), "applies"), (picked, "reads it")] {
             for w in 56..=62u16 {
                 let mut sc = Scene::new(&cfg);
+                sc.linked = true;
                 let inp = Input {
                     doc: &doc, state: &state, view: &view, delivered: 0, unread: 0, now: 0.0, wall: 0.0, cfg: &cfg, kitty: false,
                     cell: (10, 20), focused_pane: false, mouse: false, project: "p", w, h: 30, activity: &[],

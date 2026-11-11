@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn an_owner_writes_its_prefix_and_only_it_does() {
         let st = temp_store();
-        st.create(crate::doc::Doc::empty("runs")).unwrap();
+        st.create(crate::doc::Doc { actions: json!([{"key": "X", "name": "cancel"}]), ..crate::doc::Doc::empty("runs") }).unwrap();
         st.create(crate::doc::Doc::empty("other")).unwrap();
         assert!(st.apply_as("runs", "queue", &block(json!({"type": "row", "id": "run-1", "text": "a"}))).unwrap_err().starts_with("no owner \"queue\""));
         st.add_owner(owner("queue", "run")).unwrap();

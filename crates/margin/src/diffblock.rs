@@ -344,7 +344,7 @@ pub fn draw(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
                 buttons.push((x0, y, e - x0, crate::select::short("ask", &b.id, Some("clear"))));
                 g.put(e + 1, y, "click to take back", Style::fg(p.grey1).on(g0));
             } else {
-                g.put(e + 1, y, "Claude reads it next turn", Style::fg(p.grey1).on(g0));
+                g.put(e + 1, y, if cx.linked { "Claude reads it next turn" } else { "sent" }, Style::fg(p.grey1).on(g0));
             }
         }
         None if cx.mouse => {

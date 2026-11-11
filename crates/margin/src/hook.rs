@@ -87,6 +87,10 @@ pub fn describe(st: &Store, e: &Event) -> String {
                 format!("sulin declined your proposal to {what} on {at} {text}: leave it as they have it")
             }
         }
+        // an action on a board: the name is the half after the board's
+        k if crate::store::is_action(e) && crate::who::is_human(&e.by) && e.via != "emit" => {
+            format!("sulin used the action `{}` on {at} {}", &k[e.artifact.len() + 1..], quote(&e.value["text"].as_str().map(String::from).or_else(|| e.value["cells"].as_object().and_then(|c| c.values().find_map(|v| v.as_str().map(String::from)))).unwrap_or_default()))
+        }
         // a named event (`margin emit`, an action, a job's emit): its name, what it is about, who
         k if e.via == "emit" || e.via == "handler" || k.contains('.') => {
             let about = match (e.artifact.is_empty(), e.id.is_empty()) {
@@ -105,6 +109,14 @@ pub fn describe(st: &Store, e: &Event) -> String {
 pub fn unread(st: &Store, session: &str) -> Vec<Event> {
     let from = st.delivered(session);
     st.events_since(from).into_iter().filter(crate::store::is_decision).collect()
+}
+
+/// The person's actions on the board `art` (a declared action's key on a row) since `from`,
+/// for the session that keeps that board. A dashboard's actions are for its handlers: a session
+/// hears only those of its own pane, so a key on some standing board never lands in an unrelated
+/// chat. Opening a target is never news to Claude.
+pub fn actions_for_session(st: &Store, art: &str, from: u64) -> Vec<Event> {
+    st.events_since(from).into_iter().filter(|e| e.artifact == art && crate::store::is_action(e) && crate::who::is_human(&e.by) && e.via != "emit" && !e.kind.ends_with(".open")).collect()
 }
 
 /// Mid-turn, an action younger than this waits: sulin often clicks and takes it back a moment
@@ -348,12 +360,20 @@ pub fn run(kind: &str) -> Result<(), String> {
     // sulin's actions are for the main session: a subagent shares its id, and handing them to the
     // subagent marked them read where Claude never saw them (2026-11-08: two skips went missing)
     let subagent = !v["agent_id"].as_str().unwrap_or("").is_empty();
-    let (evs, cursor) = if kind == "start" || subagent {
+    let (mut evs, mut cursor) = if kind == "start" || subagent {
         (vec![], None)
     } else {
         let settle = if kind == "post-tool" { SETTLE_SECS } else { 0.0 };
         pending(&st.events(), st.delivered(&session), crate::util::epoch_now(), settle)
     };
+    // actions on this session's own pane ride along with a prompt (not mid-turn, and never
+    // another board's)
+    if let (true, Some(l)) = (kind == "prompt" && !subagent, link.as_ref()) {
+        let acts = actions_for_session(&st, &l.art, st.delivered(&session));
+        cursor = cursor.max(acts.last().map(|e| e.seq));
+        evs.extend(acts);
+        evs.sort_by_key(|e| e.seq);
+    }
     if !evs.is_empty() {
         lines.insert(0, brief(&st, &evs));
     }
@@ -428,6 +448,32 @@ mod tests {
         st.set_delivered("B", 1);
         st.first_seen("B");
         assert_eq!(st.delivered("B"), 1);
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A dashboard's actions never reach an unrelated session: only the session whose pane the
+    /// board is hears them, and opening a target is nobody's news. Emitted events never do.
+    #[test]
+    fn actions_reach_only_the_session_that_keeps_the_board() {
+        let st = crate::store::tests::temp_store();
+        let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "ci", "title": "CI", "blocks": [
+            {"type": "row", "id": "j1", "text": "build", "target": "https://example.com/1", "actions": [{"key": "e", "name": "retry"}]}]})).unwrap();
+        st.put(doc, None).unwrap();
+        st.put(crate::store::tests::plan(), None).unwrap();
+        st.act("ci", "j1", "retry", None, crate::who::HUMAN, "key").unwrap();
+        st.act("ci", "j1", "open", None, crate::who::HUMAN, "key").unwrap();
+        st.emit("ci.red", "ci", "j1", Value::Null, crate::who::HUMAN, "emit").unwrap();
+        st.decide("plan", "t1", "tick", json!("next"), "key", None).unwrap();
+        // what every session is handed: the decision, and none of the board's traffic
+        let (net, cur) = pending(&st.events(), 0, crate::util::epoch_now(), 0.0);
+        assert_eq!((ids(&net), cur), (vec!["t1:tick".to_string()], Some(4)));
+        assert!(unread(&st, "any").iter().all(|e| e.kind == "tick"));
+        // the session linked to the board hears its action, not its open; one linked elsewhere hears neither
+        assert_eq!(ids(&actions_for_session(&st, "ci", 0)), ["j1:ci.retry"]);
+        assert!(actions_for_session(&st, "plan", 0).is_empty());
+        assert!(actions_for_session(&st, "ci", 1).is_empty(), "from the session's cursor on");
+        let line = describe(&st, &st.events()[0]);
+        assert_eq!(line, "sulin used the action `retry` on ci.j1 “build”");
         std::fs::remove_dir_all(&st.home).ok();
     }
 

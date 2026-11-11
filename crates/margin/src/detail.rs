@@ -58,7 +58,7 @@ pub fn place(w: u16, h: u16, top: u16, bottom: u16) -> Option<Rect> {
 
 /// Fields that say how a block draws, not what it is, and the ones the panel shows elsewhere.
 const SKIP: &[&str] = &[
-    "text", "title", "detail", "proposal", "rows", "spark", "tone", "tag_tone", "aside_tone", "text_tone", "bold", "folded", "style", "glyph", "max_rows", "cols", "columns",
+    "actions", "text", "title", "detail", "proposal", "rows", "spark", "tone", "tag_tone", "aside_tone", "text_tone", "bold", "folded", "style", "glyph", "max_rows", "cols", "columns",
 ];
 
 fn scalar(v: &Value) -> Option<String> {
@@ -182,11 +182,17 @@ pub fn lines(b: &Block, state: &State, wall: f64, w: usize) -> (Vec<Line>, Optio
     (out, open)
 }
 
+/// The lines that list a block's actions in the panel: `r  retry the job`, one each. A click on
+/// one fires it (the scene makes each line a button).
+pub fn action_lines(actions: &[crate::doc::Action]) -> Vec<Line> {
+    actions.iter().map(|a| vec![(a.key.to_string(), Run::Hint), (format!(" {}", a.label), Run::Dim)]).collect()
+}
+
 /// Draw the panel into `r` (its rule included) from line `scroll`. `side`: beside the list, a
-/// vertical rule down its left edge; else under it, a rule along its top. Returns the row the
-/// `open` line landed on, if it is in view, as (x, y, width).
+/// vertical rule down its left edge; else under it, a rule along its top. `buttons`: the lines
+/// that are clickable, each with its token; those in view come back as (x, y, width, token).
 #[allow(clippy::too_many_arguments)]
-pub fn draw(g: &mut Grid, r: Rect, side: bool, lines: &[Line], scroll: usize, open: Option<usize>, p: &Palette) -> Option<(u16, u16, u16)> {
+pub fn draw(g: &mut Grid, r: Rect, side: bool, lines: &[Line], scroll: usize, buttons: &[(usize, String)], p: &Palette) -> Vec<(u16, u16, u16, String)> {
     g.fill(r, Style::default().on(p.bg0));
     let body = body(r, side);
     if side {
@@ -198,7 +204,7 @@ pub fn draw(g: &mut Grid, r: Rect, side: bool, lines: &[Line], scroll: usize, op
             g.put(r.x + x, r.y, "─", Style::fg(p.bg2).on(p.bg0));
         }
     }
-    let mut hit = None;
+    let mut hits = Vec::new();
     for (i, line) in lines.iter().enumerate().skip(scroll).take(body.h as usize) {
         let y = body.y + (i - scroll) as u16;
         let clip = Rect::new(body.x, y, body.w, 1);
@@ -217,8 +223,8 @@ pub fn draw(g: &mut Grid, r: Rect, side: bool, lines: &[Line], scroll: usize, op
             };
             x = g.put_clipped(x, y, s, st, clip);
         }
-        if open == Some(i) {
-            hit = Some((body.x, y, x.saturating_sub(body.x).max(1)));
+        if let Some((_, tok)) = buttons.iter().find(|(l, _)| *l == i) {
+            hits.push((body.x, y, x.saturating_sub(body.x).max(1), tok.clone()));
         }
     }
     // more than fits: a track and thumb in its last column, as the list has
@@ -232,7 +238,7 @@ pub fn draw(g: &mut Grid, r: Rect, side: bool, lines: &[Line], scroll: usize, op
             g.put(sx, body.y + i as u16, if on { "┃" } else { "│" }, Style::fg(if on { p.grey0 } else { p.bg2 }).on(p.bg0));
         }
     }
-    hit
+    hits
 }
 
 /// The part of the panel text goes in: inside the rule, a column clear of it and of the edge.

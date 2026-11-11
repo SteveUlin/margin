@@ -71,7 +71,7 @@ fn command_table() -> Vec<String> {
     src.split("Cmd { name: \"").skip(1).map(|c| c.split('"').next().unwrap().to_string()).collect()
 }
 
-const DOC: &str = r#"{"title":"walk","blocks":[{"type":"section","id":"s","title":"S","children":[
+const DOC: &str = r#"{"title":"walk","actions":[{"key":"p","name":"poke"}],"blocks":[{"type":"section","id":"s","title":"S","children":[
   {"type":"todo","id":"t1","text":"one"},{"type":"todo","id":"t3","text":"three"},
   {"type":"question","id":"q1","text":"Which?","options":["x","y"]}]}]}"#;
 
@@ -685,7 +685,7 @@ fn queries_are_json_and_not_found_is_exit_3() {
     for argv in [
         vec!["show", "nope", "--json"],
         vec!["show", "plan", "zz", "--json"],
-        vec!["act", "plan", "zz", "open"],
+        vec!["act", "plan", "zz", "poke"],
         vec!["set", "plan", "zz", "text=x"],
         vec!["apply", "nope"],
         vec!["handler", "rm", "ghost"],
@@ -716,7 +716,7 @@ fn queries_are_json_and_not_found_is_exit_3() {
 fn an_outside_owner_registers_writes_and_goes_stale() {
     let (decoy, home) = (temp("owner-decoy"), temp("owner-home"));
     let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
-    assert_eq!(run(&["new", "runs"], r#"{"title":"Runs","blocks":[{"type":"section","id":"run","title":"Running"},{"type":"text","id":"note","text":"mine"}]}"#).0, 0);
+    assert_eq!(run(&["new", "runs"], r#"{"title":"Runs","actions":[{"key":"X","name":"cancel"}],"blocks":[{"type":"section","id":"run","title":"Running"},{"type":"text","id":"note","text":"mine"}]}"#).0, 0);
     let (code, out, _) = run(&["owner", "add", "queue", "--board", "runs", "--owns", "run"], "");
     assert!(code == 0 && out.trim() == "owner queue: owns \"run\" in runs; it writes with: margin apply runs --as queue", "{out}");
     let (code, _, err) = run(&["owner", "add", "queue", "--board", "runs", "--owns", "x"], "");

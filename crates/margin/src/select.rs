@@ -235,32 +235,18 @@ pub fn apply_in(st: &Store, art: &str, tok: &Token, via: &str, cfg: &Config) -> 
             let pinned = cur.map(|d| d.kind == "pin" && d.value == json!(true)).unwrap_or(false);
             st.decide(&art, &tok.id, "pin", json!(!pinned), via, None)?
         }
+        // a block with a target: the pane and `select` run nothing themselves. They append
+        // the event `<board>.open` (the block's id, a snapshot with its target), and the handler
+        // registered for it opens it: `margin handler add open --on '*.open' -- margin handle open`
+        "open" if block.is_some() => {
+            let by = if via == "handler" { "handler:open" } else { crate::who::HUMAN };
+            st.act(&art, &tok.id, "open", None, by, via)?
+        }
         "open" => {
-            if let Some(b) = block {
-                let target = b.s("target");
-                if target.starts_with("http://") || target.starts_with("https://") {
-                    open_url(target, cfg)?;
-                    st.log(&art, &tok.id, "open", json!(target), via)?;
-                    return Ok(Outcome::Opened(target.to_string()));
-                }
-                if let Some(t) = parse_token(target) {
-                    // a link that opens a link can loop (a link to itself overflowed the stack and
-                    // left the pane in raw mode); a link's token must act, not open again
-                    if t.verb == "open" {
-                        return Err(format!("{} links to {target}: a link's mg: target can't be another open", tok.id));
-                    }
-                    // in the link's own artifact unless the token names another
-                    return match &t.artifact {
-                        Some(_) => apply_token(&t, via, cfg),
-                        None => apply_in(st, &art, &t, via, cfg),
-                    };
-                }
-                st.log(&art, &tok.id, "open", Value::Null, via)?
-            } else {
-                // an artifact name: open its pane wherever the host puts panes
-                crate::host::pick(cfg, None).open(&st, &art, &crate::host::OpenOpts::default(), cfg)?;
-                return Ok(Outcome::Opened(art));
-            }
+            // an artifact's name, not a block: show its pane wherever the host puts panes (a
+            // view of the store, not an action on a row)
+            crate::host::pick(cfg, None).open(st, &art, &crate::host::OpenOpts::default(), cfg)?;
+            return Ok(Outcome::Opened(art));
         }
         "accept" | "decline" => {
             let b = block.ok_or_else(|| format!("no component {:?}", tok.id))?;

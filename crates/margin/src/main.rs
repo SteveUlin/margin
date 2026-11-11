@@ -606,8 +606,8 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool, mode: Wh
         }
         if let Some(m) = v.as_object_mut() {
             m.remove("v");
-            if let Some(k) = m.keys().find(|k| !["title", "kind", "blocks", "icon", "id", "hints", "purpose"].contains(&k.as_str())) {
-                return Err(format!("unknown envelope key {k:?}: an envelope is {{\"title\", \"kind\", \"blocks\", \"hints\", \"purpose\"}}"));
+            if let Some(k) = m.keys().find(|k| !["title", "kind", "blocks", "icon", "id", "hints", "purpose", "actions"].contains(&k.as_str())) {
+                return Err(format!("unknown envelope key {k:?}: an envelope is {{\"title\", \"kind\", \"blocks\", \"hints\", \"purpose\", \"actions\"}}"));
             }
         }
         v["id"] = json!(art);
@@ -629,7 +629,7 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool, mode: Wh
         // the reminders are the artifact's, not this revision's: a whole document that doesn't
         // carry its own keeps the ones there
         // (and so is its purpose)
-        if v.get("hints").is_none() || v.get("purpose").is_none() || v.get("title").is_none() {
+        if v.get("hints").is_none() || v.get("purpose").is_none() || v.get("title").is_none() || v.get("actions").is_none() {
             if let Ok(old) = st.load(art) {
                 // and its title: a document that names none keeps the one it has
                 if v.get("title").is_none() && mode == Whole::Replace {
@@ -640,6 +640,9 @@ fn apply_cmd(st: &Store, art: &str, input: &str, a: &Args, whole: bool, mode: Wh
                 }
                 if v.get("purpose").is_none() && !old.purpose.is_empty() {
                     v["purpose"] = json!(old.purpose);
+                }
+                if v.get("actions").is_none() && !old.actions.is_null() {
+                    v["actions"] = old.actions.clone();
                 }
             }
         }
@@ -1346,6 +1349,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             sc.restore(&v);
             sc.recap = recap::for_pane(&st, art);
             sc.stale = owner::stale_on(&st, art, util::epoch_now());
+            sc.linked = link::all(&st).iter().any(|l| l.art == art);
             sc.agents = agents::for_pane(&st, art);
             sc.toasts = toast::load(&st, art).into_iter().map(|t| (t, 1.0)).collect();
             if set.len() > 1 {
