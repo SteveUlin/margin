@@ -326,7 +326,7 @@ impl Live {
         self.activity = crate::link::activity_for(&self.st, &self.art);
         self.scene.recap = crate::recap::for_pane(&self.st, &self.art);
         self.scene.stopped = self.st.stopped();
-        self.scene.linked = crate::link::all(&self.st).iter().any(|l| l.art == self.art);
+        (self.scene.linked, self.scene.ended) = crate::link::liveness(&self.st, &self.art);
         self.scene.stale = crate::owner::stale_on(&self.st, &self.art, epoch_now());
         self.scene.agents = crate::agents::for_pane(&self.st, &self.art);
         self.toasts = crate::toast::load(&self.st, &self.art);
@@ -1210,6 +1210,18 @@ impl Pane {
     }
 }
 
+/// What a pane does on its way out, however it goes: every tab's view is saved, and the marks
+/// that say "a pane with this pid is in review mode" are removed (a mark left behind held back
+/// Claude's wake-up until something noticed the pid was dead).
+fn leave(pn: &mut Pane) {
+    for l in &mut pn.tabs {
+        l.save_view();
+        if l.review {
+            crate::wake::review_mark(&l.st, &l.pane, &l.art, false);
+        }
+    }
+}
+
 /// The kitty deletes for the placements on screen (the tab is about to change under them).
 fn take_down(imgs: &ImgSync, lv: &Live, fitted: &std::collections::HashMap<(u32, u16, u16), vellum::image::Image>) -> String {
     let mut out = String::new();
@@ -1652,9 +1664,14 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
             }
         }
     }
-    for l in &mut pn.tabs {
-        l.save_view();
+    // leaving (q, SIGTERM, SIGHUP: the tab or terminal closed): the view is kept, this pane's
+    // own marks go, and its images come down. The terminal itself (raw mode, mouse reporting,
+    // the alternate screen, the cursor) is restored when `term` drops, on a panic too (term.rs)
+    let down = take_down(&imgs, pn.lv(), &fitted);
+    if !down.is_empty() {
+        let _ = term.write(&down);
     }
+    leave(&mut pn);
     Ok(false)
 }
 

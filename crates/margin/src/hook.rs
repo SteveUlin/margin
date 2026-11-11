@@ -246,6 +246,8 @@ pub fn record(st: &Store, kind: &str, session: &str, v: &Value) {
         "post-tool" => ("thinking", String::new(), String::new()),
         "prompt" => ("thinking", String::new(), "reading your message".to_string()),
         "stop" => ("idle", String::new(), String::new()),
+        // the session is over (SessionEnd): the pane drops its live strip and says when
+        "end" => ("ended", String::new(), v["reason"].as_str().unwrap_or("").to_string()),
         // Claude is blocked on sulin: a permission prompt, or Claude Code's own "needs you"
         // notification (its idle reminder is just the turn having ended: leave that as idle)
         "permission" => ("waiting", tool.clone(), format!("allow {}", label(&tool, &v["tool_input"])).trim_end().to_string()),
@@ -282,7 +284,17 @@ pub fn run(kind: &str) -> Result<(), String> {
     if !st.dir().exists() {
         return Ok(());
     }
+    // a subagent ending is not the session ending
+    if kind == "end" && !v["agent_id"].as_str().unwrap_or("").is_empty() {
+        return Ok(());
+    }
     record(&st, kind, &session, &v);
+    if kind == "end" {
+        // what only a live session needs goes; the board, its events, the session's link and
+        // its cursor stay (a resume of this session, or the next one, picks them up)
+        crate::wake::end_session(&session);
+        return Ok(());
+    }
     // from its first hook on, a session's unread is measured from its own cursor
     st.first_seen(&session);
     // the session's inbox, so the pane can wake it when sulin finishes (wake.rs); not a subagent's
@@ -344,6 +356,15 @@ pub fn run(kind: &str) -> Result<(), String> {
             }
         }
         ("prompt", Some(l)) => lines.push(link::status_line(&st, l)),
+        // a new session with no pane of its own (after a reboot nothing links it to one): say
+        // which boards the project already has, so it takes one up instead of making another
+        ("start", None) if v["agent_id"].as_str().unwrap_or("").is_empty() => {
+            let docs = st.list();
+            if !docs.is_empty() {
+                let names: Vec<String> = docs.iter().take(4).map(|d| format!("{} (“{}”, rev {}, updated {})", d.id, vellum::text::truncate(&d.title, 40), d.rev, d.updated)).collect();
+                lines.push(format!("margin: this project already has {} board{}: {}{}. If one is this work's pane, keep using it: `margin link <art>` (then `margin show <art>`); don't start a second one for the same work.", docs.len(), if docs.len() == 1 { "" } else { "s" }, names.join("; "), if docs.len() > 4 { "; …" } else { "" }));
+            }
+        }
         // a subagent shares its parent's session id but owns no pane: its calls neither count
         // against the pane nor get the nudge (2026-11-08: research agents were nudged, and their
         // calls made the parent's pane look stale)

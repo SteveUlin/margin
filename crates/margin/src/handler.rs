@@ -122,7 +122,7 @@ impl Registry {
         }
     }
     pub fn save(&self, dir: &Path) -> Result<(), String> {
-        write_atomic(&Self::path(dir), serde_json::to_string_pretty(self).unwrap().as_bytes()).map_err(|e| e.to_string())
+        crate::store::write_durable(&Self::path(dir), serde_json::to_string_pretty(self).unwrap().as_bytes()).map_err(|e| e.to_string())
     }
     pub fn get(&self, name: &str) -> Option<&Handler> {
         self.handlers.iter().find(|h| h.name == name)

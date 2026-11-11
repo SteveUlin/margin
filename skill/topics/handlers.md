@@ -134,7 +134,7 @@ key. `margin help integrate` has the cron, systemd-timer and file-watch recipes 
 - SIGTERM stops it cleanly: running handlers are stopped with their whole process group (TERM,
   then KILL after a second), recorded as `stopped`, not failed, and their events stay pending.
   After any stop, clean or not, handlers resume from their cursors: nothing appended while it
-  was down is lost, and nothing handled is handled again.
+  was down is lost, and nothing handled is handled again (`margin help lifecycle`).
 
 ## Managing handlers
 

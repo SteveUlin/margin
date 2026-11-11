@@ -41,6 +41,9 @@ pub const HOOKS: &[Hook] = &[
     hook("SessionStart", "start", false),
     hook("PermissionRequest", "permission", true),
     hook("Notification", "notify", false),
+    // the session is over: its runtime files go and the pane stops showing it as live (a crash
+    // runs no hook: `margin doctor` and the readers' own liveness checks cover that)
+    hook("SessionEnd", "end", false),
 ];
 
 impl Hook {
@@ -368,13 +371,13 @@ mod tests {
         let mut o = opts("fresh");
         o.user_name = Some("robin".into());
         let out = run(&o).unwrap();
-        assert!(out.contains("installed (") && out.contains("added 8") && out.contains("wrote 3 files"), "{out}");
+        assert!(out.contains("installed (") && out.contains("added 9") && out.contains("SessionEnd") && out.contains("wrote 3 files"), "{out}");
         assert_eq!(crate::config::read_key(&o.config, "user_name").as_deref(), Some("robin"));
         let s = skill(&o);
         assert!(s.contains("robin owns decisions") && !s.contains("{{") && s.contains("/opt/margin/bin/margin"));
         // the shape Claude Code reads, the same as the hand-written one it replaces
         let v = settings(&o);
-        assert_eq!(v["hooks"].as_object().unwrap().len(), 7, "seven events; Stop has two hooks");
+        assert_eq!(v["hooks"].as_object().unwrap().len(), 8, "eight events; Stop has two hooks");
         assert_eq!(v["hooks"]["PostToolUse"], json!([{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/margin/bin/margin hook post-tool", "timeout": 5}]}]));
         assert_eq!(v["hooks"]["SessionStart"], json!([{"hooks": [{"type": "command", "command": "/opt/margin/bin/margin hook start", "timeout": 5}]}]));
         for h in HOOKS {
@@ -413,7 +416,7 @@ mod tests {
         // a new build somewhere else: same entries, new path, the skill's path follows
         o.bin = PathBuf::from("/home/someone/margin/target/release/margin");
         let out = run(&o).unwrap();
-        assert!(out.contains("updated 8 to this binary"), "{out}");
+        assert!(out.contains("updated 9 to this binary"), "{out}");
         let v = settings(&o);
         for h in HOOKS {
             let n = HOOKS.iter().filter(|x| x.event == h.event).count();
@@ -432,7 +435,7 @@ mod tests {
             {"type": "command", "command": "/x/margin hook stop", "timeout": 7},
             {"type": "command", "command": "/x/margin hook rewake", "timeout": 5}]}]}});
         let (added, updated) = merge_hooks(&mut v, "/x/margin").unwrap();
-        assert_eq!((added.len(), updated), (6, vec!["Stop rewake".to_string()]));
+        assert_eq!((added.len(), updated), (7, vec!["Stop rewake".to_string()]));
         assert_eq!(v["hooks"]["Stop"], json!([{"hooks": [
             {"type": "command", "command": "/x/margin hook stop", "timeout": 7},
             {"type": "command", "command": "/x/margin hook rewake", "timeout": 3600, "asyncRewake": true}]}]));
@@ -462,7 +465,7 @@ mod tests {
         let text = serde_json::to_string_pretty(&before).unwrap();
         std::fs::write(o.claude_dir.join("settings.json"), &text).unwrap();
         let out = run(&o).unwrap();
-        assert!(out.contains("added 6") && out.contains("Stop rewake") && out.contains("updated 2 to this binary (Stop, SessionStart)"), "{out}");
+        assert!(out.contains("added 7") && out.contains("Stop rewake") && out.contains("updated 2 to this binary (Stop, SessionStart)"), "{out}");
         let v = settings(&o);
         for k in ["model", "permissions", "statusLine"] {
             assert_eq!(v[k], before[k], "{k}");
@@ -518,7 +521,7 @@ mod tests {
         o.dry_run = true;
         o.user_name = Some("robin".into());
         let out = run(&o).unwrap();
-        assert!(out.contains("dry run") && out.contains("would write 3 files") && out.contains("added 8"), "{out}");
+        assert!(out.contains("dry run") && out.contains("would write 3 files") && out.contains("added 9"), "{out}");
         assert!(!o.claude_dir.exists() && !o.config.exists());
         // over an existing install too: the file is byte-for-byte what it was
         std::fs::create_dir_all(&o.claude_dir).unwrap();

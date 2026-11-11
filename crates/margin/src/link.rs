@@ -88,6 +88,21 @@ pub fn remove(st: &Store, session: &str) -> bool {
     fs::remove_file(dir(st).join(format!("{}.json", key(session)))).is_ok()
 }
 
+/// Is `art` some live Claude session's pane, and if only ended sessions are linked to it, when
+/// did the last one end (local HH:MM)? A session is over once its SessionEnd hook said so
+/// (`margin hook end`). (linked to a live session, when the last linked session ended)
+pub fn liveness(st: &Store, art: &str) -> (bool, Option<String>) {
+    let links: Vec<Link> = all(st).into_iter().filter(|l| l.art == art).collect();
+    if links.is_empty() {
+        return (false, None);
+    }
+    let ended: Vec<f64> = links.iter().filter_map(|l| st.activity(&l.session).filter(|a| a.state == "ended").and_then(|a| crate::util::parse_rfc3339(&a.since))).collect();
+    if ended.len() < links.len() {
+        return (true, None);
+    }
+    (false, ended.into_iter().max_by(|a, b| a.total_cmp(b)).map(crate::util::local_hm))
+}
+
 /// What the Claude sessions behind `art` are doing, newest first: a pane linked to sessions shows
 /// only theirs; an unlinked pane shows the project's.
 pub fn activity_for(st: &Store, art: &str) -> Vec<crate::store::Activity> {

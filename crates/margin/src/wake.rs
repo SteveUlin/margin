@@ -119,6 +119,34 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// A session ended: remove what only a live session needs. Its inbox address, the rewake
+/// watcher's mark (the watcher sees its mark gone at its next look and exits) and the record of
+/// what a wake-up covered. Returns how many files went. The store is not touched.
+pub fn end_session(session: &str) -> usize {
+    [dir().join(format!("{}.json", key(session))), watch_path(session), woke_path(session)].iter().filter(|p| std::fs::remove_file(p).is_ok()).count()
+}
+
+/// The runtime files of sessions that are gone without saying so (a crash runs no hook): rewake
+/// marks whose watcher's pid is dead. For `margin doctor`.
+pub fn dead_marks() -> Vec<PathBuf> {
+    std::fs::read_dir(dir())
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".rewake"))
+                .filter(|e| std::fs::read_to_string(e.path()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v["pid"].as_u64()).map(|p| !pid_alive(p as u32)).unwrap_or(true))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Review marks of panes that died in review mode (`<store>/review/<pid>-…`, pid dead).
+pub fn dead_review_marks(st: &crate::store::Store) -> Vec<PathBuf> {
+    std::fs::read_dir(review_dir(st))
+        .map(|rd| rd.flatten().filter(|e| !e.file_name().to_string_lossy().split('-').next().and_then(|p| p.parse::<u32>().ok()).map(pid_alive).unwrap_or(false)).map(|e| e.path()).collect())
+        .unwrap_or_default()
+}
+
 // --- the rewake watcher's mark (rewake.rs): `<session>.rewake`, {pid, start, until} ---
 
 fn watch_path(session: &str) -> PathBuf {

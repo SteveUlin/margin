@@ -15,6 +15,7 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("dashboards", include_str!("../../../skill/topics/dashboards.md")),
     ("handlers", include_str!("../../../skill/topics/handlers.md")),
     ("integrate", include_str!("../../../skill/topics/integrate.md")),
+    ("lifecycle", include_str!("../../../skill/topics/lifecycle.md")),
     ("feeds", include_str!("../../../skill/topics/feeds.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
     ("diffs", include_str!("../../../skill/topics/diffs.md")),

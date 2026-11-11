@@ -12,6 +12,7 @@ mod demo;
 mod detail;
 mod diffblock;
 mod doc;
+mod doctor;
 mod example;
 mod feed;
 mod graph;
@@ -66,7 +67,7 @@ content (Claude): creating and changing are different commands, for an artifact 
   margin image <art> <id> <png> [--alt A] [--parent P] [--rows N]
   margin doc <art> <id> [--title T] < notes.md                      long-form markdown as a section
   margin toast <art> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
-  margin show <art> [--json]    margin ls [--json]    margin gc
+  margin show <art> [<id>] [--json]    margin ls [--json]    margin gc    margin doctor [--fix]
 
 return channel:
   margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--follow] [--json]   the event log
@@ -153,11 +154,11 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "image", help: "margin image <art> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "show", help: "margin show <art> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <art> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such artifact,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ls", help: "margin ls [--json]\n  this project's artifacts (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
-    Cmd { name: "gc", help: "margin gc [--days N]\n  archive artifacts untouched for N days (default: config archive_days)\n", flags: &["--days"], max_pos: Some(0) },
+    Cmd { name: "gc", help: "margin gc [--days N]\n  archive artifacts untouched for N days (default: config archive_days), and remove the cursors of\n  Claude sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
     Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
     Cmd { name: "emit", help: "margin emit <name> [JSON | -] [--board B] [--id ID]\n  append a named event to the project's log and print its seq. Anything can call it: cron, CI,\n  a script, a job. <name> is letters, digits and . _ - : (deploy.finished, ci.red); the value is one\n  JSON value (- reads it from stdin; text that is not JSON is an error; none: null)\n  --board B   the board it is about (must exist); --id ID a block in it\n  The event is logged as by you (or --by NAME), via emit. margin events --name 'deploy.*' reads\n  them, and a job registered with --on 'deploy.*' is run for them (margin help jobs)\n  The project comes from the working directory: from cron or another directory pass --project NAME\n    margin emit deploy.finished '{\"sha\":\"abc123\",\"ok\":true}' --project boards\n    jq -c .summary report.json | margin emit ci.report - --board ci\n", flags: &["--board", "--id"], max_pos: Some(2) },
     Cmd { name: "act", help: "margin act <board> <id> <action> [VALUE]\n  what an action's key does in the pane, from the command line: append the event\n  <board>.<action> with id <id> and a snapshot of that block (a table row's cells, target and\n  detail; any other block's fields), and print its seq. <id> - is the board itself. VALUE (JSON,\n  or text) rides along as value.arg. A job registered with --on '<board>.<action>' handles it\n  (margin help jobs). Works on feed-owned rows: it changes no content\n  refused, with exit 1 and the reason: a missing board or id, an action the block does not offer\n    margin act reviews pr-4812 open\n", flags: &["--json"], max_pos: Some(4) },
-    Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
+    Cmd { name: "hook", help: "margin hook start|prompt|pre-tool|post-tool|stop|permission|notify|end\n  Claude Code hook: reads the hook JSON on stdin; prints sulin's new decisions, the linked pane's\n  one-line state (start, prompt) and a nudge when the pane has gone stale (post-tool)\nmargin hook rewake [--timeout 58m]\n  the Stop hook that waits (\"asyncRewake\": true): blocks until sulin is done in the pane, then\n  prints his decisions on stderr and exits 2, which wakes an idle Claude; exits 0 when a newer turn\n  starts, the session has no pane, or the timeout passes\n", flags: &["--timeout"], max_pos: Some(1) },
     Cmd { name: "doc", help: "margin doc <art> <id> [--title T] [--parent P] < notes.md\n  long-form beside the chat: markdown (headings, paragraphs, nested lists, fences, tables,\n  quotes) becomes one section <id>, replaced in place on every write. Ids follow the content,\n  so a revision marks only what changed.\n", flags: &["--title", "--parent", "--base-rev", "--json"], max_pos: Some(2) },
     Cmd { name: "toast", help: "margin toast <art> <text> [--at ID] [--level ok|info|warn|error] [--ttl SECS]\n  a short message that goes away by itself: on the row --at names (drawn on its right, nothing\n  moves), else floating over the pane's bottom. Its time starts once the pane is seen; an error\n  stays until clicked. Stored beside the doc: no revision.\n", flags: &["--at", "--level", "--ttl", "--countdown", "--border"], max_pos: None },
     Cmd { name: "stop", help: "margin stop [<art>]\n  the stop signal: Claude's tool calls in this project are refused until sulin next sends a\n  message (the pane's S key does the same)\n", flags: &[], max_pos: Some(1) },
@@ -172,6 +173,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "daemon", help: DAEMON_HELP, flags: &["--stay", "--unit-dir", "--json"], max_pos: Some(1) },
+    Cmd { name: "doctor", help: "margin doctor [--fix] [--days N]\n  what was left behind by a session, a pane or a daemon that went without saying so, and what on\n  a board cannot work yet. Lists, and removes nothing without --fix:\n    stale  rewake and review marks whose process is gone; the cursor, activity entry and pane view\n           of a session or pane untouched for N days (default: config archive_days, else 30); the\n           pid file of a daemon that is not running; a handler recorded as running when none is\n    note   a board whose rows have targets or actions that no handler takes (with the line that\n           registers one); history.jsonl files, which margin no longer writes (delete them by hand)\n  --fix removes the stale items. It never touches a board, an event, a named cursor (a tool's or a\n  handler's) or a registration, and it is safe to run at any time. margin help lifecycle\n", flags: &["--fix", "--days"], max_pos: Some(0) },
     Cmd { name: "handler", help: HANDLER_HELP, flags: &[], max_pos: None },
     Cmd { name: "handle", help: "margin handle open\n  a ready-made handler command: reads events on stdin (one JSON object per line) and opens each\n  event's value.target: a URL with the configured opener (config key opener; default xdg-open, or\n  `opener` over ssh), an mg: token by applying it, mg:open/<artifact> by showing that artifact.\n  With $MARGIN_DRY_OPEN=FILE it appends each target to FILE and opens nothing. A target that fails\n  to open is reported on stderr and the run still exits 0 (a retry would open the others twice)\n  The pane never opens anything itself: enter or a click on a row with a target appends the event\n  <board>.open, and this is the handler for it. Register it once per project:\n    margin handler add open --on '*.open' -- margin handle open\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "owner", help: OWNER_HELP, flags: &["--board", "--owns", "--expect-every", "--json"], max_pos: Some(2) },
@@ -445,7 +447,7 @@ struct Args {
 }
 
 const BOOL_FLAGS: &[&str] = &[
-    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit", "--stay",
+    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit", "--stay", "--fix",
 ];
 
 impl Args {
@@ -1068,6 +1070,21 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             for m in st.archive_stale(days) {
                 println!("archived {m}");
             }
+            // and the cursors of sessions that long gone (never a named cursor: a tool's or a handler's)
+            for p in st.stale_session_cursors(days) {
+                if std::fs::remove_file(&p).is_ok() {
+                    println!("removed the cursor of a session not seen for {days} days: {}", p.file_name().unwrap_or_default().to_string_lossy());
+                }
+            }
+        }
+        "doctor" => {
+            let st = store(a);
+            let days = match a.get("--days") {
+                Some(d) => d.parse().map_err(|_| format!("bad --days {d:?}: a whole number of days"))?,
+                None if cfg.archive_days > 0 => cfg.archive_days,
+                None => 30,
+            };
+            print!("{}", doctor::run(&st, a.has("--fix"), days));
         }
         "events" => events_cmd(&store(a), a)?,
         "emit" => {
@@ -1349,7 +1366,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             sc.restore(&v);
             sc.recap = recap::for_pane(&st, art);
             sc.stale = owner::stale_on(&st, art, util::epoch_now());
-            sc.linked = link::all(&st).iter().any(|l| l.art == art);
+            (sc.linked, sc.ended) = link::liveness(&st, art);
             sc.agents = agents::for_pane(&st, art);
             sc.toasts = toast::load(&st, art).into_iter().map(|t| (t, 1.0)).collect();
             if set.len() > 1 {

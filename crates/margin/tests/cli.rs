@@ -134,6 +134,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("owner", s(&["ls"]), "", true),
         ("owner", s(&["rm", "w"]), "", true),
         ("daemon", s(&["status"]), "", true),
+        ("doctor", s(&[]), "", true),
         ("init", s(&["--dry-run", "--claude-dir", &claude_dir]), "", true),
         ("example", s(&[]), "", true),
         ("skill", s(&[]), "", true),
@@ -975,6 +976,70 @@ fn a_row_is_opened_by_the_registered_handler_through_the_daemon() {
         ok(&["handler", "rm", h], "");
     }
     wait_for("the daemon to leave with its last handler", 10, || daemon_pid().is_none());
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// A Claude session ends (`margin hook end`, Claude Code's SessionEnd): its runtime files go and
+/// the pane stops speaking of Claude, saying once when the session ended; the board, its events,
+/// the session's cursor and its link stay. A new session started later, with nothing but the
+/// store left (as after a reboot), is told the board exists.
+#[test]
+fn a_session_end_cleans_up_and_the_next_session_finds_the_board() {
+    let (decoy, home, rt) = (temp("end-decoy"), temp("end-home"), temp("end-runtime"));
+    let run = |argv: &[&str], stdin: &str| {
+        let mut ch = bare(&decoy, &home, argv).env("XDG_RUNTIME_DIR", &rt).spawn().unwrap();
+        ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let o = ch.wait_with_output().unwrap();
+        (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let hook = |kind: &str, session: &str, extra: &str| run(&["hook", kind], &format!(r#"{{"cwd":"{}","session_id":"{session}"{extra}}}"#, decoy.display()));
+    assert_eq!(run(&["new", "plan"], DOC).0, 0);
+    assert_eq!(run(&["link", "plan", "--session", "S1"], "").0, 0);
+    assert_eq!(run(&["select", "mg:todo/plan.t1=next"], "").0, 0);
+    let (code, out, _) = hook("prompt", "S1", "");
+    assert!(code == 0 && out.contains("margin:"), "{out}");
+    assert_eq!(hook("stop", "S1", "").0, 0);
+    // a live, linked session: the board speaks of Claude
+    let (_, frame, _) = run(&["render", "plan", "--width", "100"], "");
+    assert!(frame.contains("Claude is current") && !frame.contains("ended at"), "{frame}");
+    // what a live session leaves in the runtime directory
+    let rtm = rt.join("margin");
+    std::fs::create_dir_all(&rtm).unwrap();
+    for f in ["S1.json", "S1.rewake", "S1.woke", "other.json"] {
+        std::fs::write(rtm.join(f), "{}").unwrap();
+    }
+    let (code, out, err) = hook("end", "S1", r#","reason":"prompt_input_exit""#);
+    assert!(code == 0 && out.is_empty(), "{out}{err}");
+    for f in ["S1.json", "S1.rewake", "S1.woke"] {
+        assert!(!rtm.join(f).exists(), "{f} is the ended session's");
+    }
+    assert!(rtm.join("other.json").exists(), "another session's files are not touched");
+    let act: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("p/activity/S1.json")).unwrap()).unwrap();
+    assert_eq!((act["state"].as_str(), act["text"].as_str()), (Some("ended"), Some("prompt_input_exit")));
+    // everything durable is where it was
+    assert!(home.join("p/plan/doc.json").exists() && home.join("p/delivered/S1").exists());
+    assert_eq!(json_lines(&run(&["events", "--json"], "").1).len(), 1);
+    assert!(run(&["link", "--session", "S1"], "").1.starts_with("plan"), "the link stays: a resume takes it up");
+    // the pane: no Claude wording, and one line saying when
+    let (_, frame, _) = run(&["render", "plan", "--width", "100"], "");
+    assert!(!frame.contains("Claude") && frame.contains("the session that kept this board ended at "), "{frame}");
+    // a subagent ending is not the session ending
+    assert_eq!(hook("stop", "S3", "").0, 0);
+    assert_eq!(hook("end", "S3", r#","agent_id":"a1""#).0, 0);
+    assert!(std::fs::read_to_string(home.join("p/activity/S3.json")).unwrap().contains("\"idle\""));
+    // a reboot: the runtime directory is gone, only the store remains; a new session starts
+    std::fs::remove_dir_all(&rt).unwrap();
+    let (code, out, _) = hook("start", "S2", r#","source":"startup""#);
+    assert!(code == 0 && out.contains("this project already has 1 board: plan") && out.contains("margin link <art>"), "{out}");
+    assert_eq!(run(&["link", "plan", "--session", "S2"], "").0, 0);
+    let (_, out, _) = hook("start", "S2", "");
+    assert!(out.contains("plan") && out.contains("linked to this session"), "{out}");
+    let (_, frame, _) = run(&["render", "plan", "--width", "100"], "");
+    assert!(frame.contains("Claude is current") && !frame.contains("ended at"), "a live session keeps it again: {frame}");
+    // and the doctor has nothing stale to report in a store that went through all that
+    let (code, out, _) = run(&["doctor"], "");
+    assert!(code == 0 && !out.contains("stale "), "{out}");
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }

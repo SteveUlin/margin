@@ -35,9 +35,8 @@ plan "…"`) pinned above the content; long reasoning goes in its own artifact (
   direct answers, reasoning, what you did and how you know, disagreement, and anything that needs
   a reply now. Reference material (reviews, research, logs) gets its own artifact too, and a `link`
   row (`target: mg:open/<art>`). **Why:** in chat a long piece scrolls away while they answer it.
-- **Keep the next item explained.** The top item of Next gets a folded explainer in its own
-  top-level section right after Next (`margin doc <art> <id>x --title "About <id>: …"`): what,
-  why, what it would look like, what's open. A `+ more` note on another Next item asks for one.
+- **Keep the next item explained.** The top item of Next gets a folded explainer section right
+  after Next (`margin doc <art> <id>x --title "About <id>: …"`); a `+ more` note asks for one.
 - **Name a row by an id {{user}} can see, plus a few words of its text**: "t3 (seed the RNG)",
   never a bare hash. Todos, questions, claims and decided rows show short ids (8 characters or
   fewer, no dash), so give those ids like `t3`, `Q1`, `A1`; quote any other row's text.
@@ -141,6 +140,7 @@ Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 - `dashboards`: standing boards: tables, run strips, tabs, badges, the theme; design to handler, step by step.
 - `handlers`: commands margin runs for an event (a key on a row, a refresh): the contract, the daemon.
 - `integrate`: other programs: cron and systemd recipes, following events, owning rows, JSON queries.
+- `lifecycle`: what survives a session end, a closed pane, a reboot; `margin doctor`, `daemon status`.
 - `feeds`: the older script runner (jj ledger, agent monitor, queue, turns), and the line grammar.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
 - `diffs`: `margin diff`, a structural diff {{user}} approves or rejects.

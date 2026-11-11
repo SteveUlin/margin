@@ -378,6 +378,22 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// `write_atomic`, and then the directory is synced too, so the rename itself survives a power
+/// loss. For the files whose loss would lose one of the person's decisions or move a cursor
+/// back: state.json, the cursors, the registries. The rest (view files, status files, activity,
+/// the seq sidecar, toasts) are rebuilt or rewritten in the normal course of things, and
+/// events.jsonl is appended without a sync: a power loss may cost the last events, which the
+/// torn-line rule then tolerates, and syncing every append would put a disk flush on every key.
+pub fn write_durable(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    write_atomic(path, data)?;
+    if let Some(d) = path.parent() {
+        if let Ok(f) = fs::File::open(d) {
+            let _ = f.sync_all();
+        }
+    }
+    Ok(())
+}
+
 fn read_json<T: for<'a> Deserialize<'a> + Default>(p: &Path) -> T {
     fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
@@ -549,7 +565,7 @@ impl Store {
         st.decisions.retain(|k, v| v.kind != "time" || k.split('#').next().map(|id| ids.contains(id)).unwrap_or(false));
         st.decisions.retain(|k, v| k.contains('#') || ids.contains(k) || (crate::who::is_human(&v.by) && v.seq > handed));
         if st.decisions.len() != before {
-            let _ = write_atomic(&self.state_path(&d.id), serde_json::to_string_pretty(&st).unwrap().as_bytes());
+            let _ = write_durable(&self.state_path(&d.id), serde_json::to_string_pretty(&st).unwrap().as_bytes());
         }
     }
 
@@ -880,7 +896,7 @@ impl Store {
                     Decision { kind: "status".into(), value: v, by: self.author.clone(), at: now_rfc3339(), reason: None, via: Some("cli".into()), seq: 0, under: None },
                 );
             }
-            write_atomic(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+            write_durable(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
         }
         Ok(rev)
     }
@@ -908,7 +924,7 @@ impl Store {
         } else {
             st.decisions.insert(key, Decision { kind: "note".into(), value, by: crate::who::HUMAN.into(), at: ev.at.clone(), reason: None, via: Some(via.into()), seq: ev.seq, under: None });
         }
-        write_atomic(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+        write_durable(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
         Ok(ev)
     }
 
@@ -948,7 +964,7 @@ impl Store {
         } else {
             st.decisions.insert(key, dec);
         }
-        write_atomic(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+        write_durable(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
         Ok(ev)
     }
 
@@ -965,7 +981,7 @@ impl Store {
         let ev = self.append_event_locked(a, id, "proposal", v, crate::who::HUMAN, via, d.rev)?;
         let dec = Decision { kind: "proposal".into(), value: json!({"at": proposal["at"], "accepted": accepted}), by: crate::who::HUMAN.into(), at: ev.at.clone(), reason: None, via: Some(via.into()), seq: ev.seq, under: None };
         st.decisions.insert(format!("{id}#proposal"), dec);
-        write_atomic(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+        write_durable(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
         Ok(ev)
     }
 
@@ -981,7 +997,7 @@ impl Store {
         let mut st = self.state_rw(a)?;
         let ev = self.append_event_locked(a, id, if own { "own" } else { "unown" }, json!(own), crate::who::HUMAN, via, d.rev)?;
         st.decisions.insert(format!("{id}#own"), Decision { kind: "own".into(), value: json!(own), by: crate::who::HUMAN.into(), at: ev.at.clone(), reason: None, via: Some(via.into()), seq: ev.seq, under: None });
-        write_atomic(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+        write_durable(&self.state_path(a), serde_json::to_string_pretty(&st).unwrap().as_bytes()).map_err(|e| e.to_string())?;
         Ok(ev)
     }
 
@@ -1218,7 +1234,7 @@ impl Store {
     }
 
     pub fn set_cursor(&self, name: &str, seq: u64) {
-        let _ = write_atomic(&self.cursor_path(name), seq.to_string().as_bytes());
+        let _ = write_durable(&self.cursor_path(name), seq.to_string().as_bytes());
     }
 
     /// The last event seq handed to `session`: a cursor like any other, kept under `delivered/`
@@ -1245,7 +1261,21 @@ impl Store {
     }
 
     pub fn set_delivered(&self, session: &str, seq: u64) {
-        let _ = write_atomic(&self.delivered_path(session), seq.to_string().as_bytes());
+        let _ = write_durable(&self.delivered_path(session), seq.to_string().as_bytes());
+    }
+
+    /// Session cursors (`delivered/<session>`) not touched for `days`: a session that long gone
+    /// will not be back for its unread decisions. Named cursors (`cursors/`: a tool's, a
+    /// handler's) are never listed: nothing says their owner is gone. For `margin gc` and
+    /// `margin doctor`.
+    pub fn stale_session_cursors(&self, days: u32) -> Vec<PathBuf> {
+        if days == 0 {
+            return vec![];
+        }
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(days as u64 * 86400);
+        fs::read_dir(self.dir().join("delivered"))
+            .map(|rd| rd.flatten().filter(|e| e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false)).map(|e| e.path()).collect())
+            .unwrap_or_default()
     }
 
     /// Where the tool hooks record what each Claude session is doing (one file per session or

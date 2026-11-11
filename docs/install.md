@@ -31,10 +31,10 @@ target/release/margin init --user-name "<your name>"
   says "the user".
 - **Skill.** Installs the skill Claude loads to `~/.claude/skills/margin/SKILL.md`, rendered with
   your name and the binary's path. A copy that differs is replaced. `margin skill` prints it.
-- **Hooks.** Merges eight hooks into `~/.claude/settings.json`, each running this binary:
+- **Hooks.** Merges nine hooks into `~/.claude/settings.json`, each running this binary:
   `UserPromptSubmit` → `hook prompt`, `PostToolUse` → `hook post-tool`, `PreToolUse` → `hook
   pre-tool`, `Stop` → `hook stop` and `hook rewake`, `SessionStart` → `hook start`,
-  `PermissionRequest` → `hook permission`, `Notification` → `hook notify`. Your other hooks and
+  `PermissionRequest` → `hook permission`, `Notification` → `hook notify`, `SessionEnd` → `hook end`. Your other hooks and
   settings stay as they are, and the file as it was is kept as `settings.json.bak` the first time
   `init` changes it.
 
