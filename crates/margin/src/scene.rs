@@ -1057,7 +1057,9 @@ impl Scene {
                                 more.push((node, if current { p.yellow } else { p.blue }, l, if current { p.fg } else { p.grey2 }));
                             }
                         }
-                        for (k, l) in capped(&result).into_iter().enumerate() {
+                        // only a finished agent has a result: wrapping an empty one still gave a
+                        // row, a lone green node under a running agent's notes
+                        for (k, l) in capped(&result).into_iter().enumerate().filter(|_| !result.is_empty()) {
                             let node = (k == 0 && n > 0).then(|| crate::graph::node_glyph(&crate::graph::Row { up: true, ..Default::default() }, true));
                             more.push((node, p.green, l, p.fg));
                         }
@@ -2922,6 +2924,23 @@ mod tests {
             cell: (10, 20), focused_pane: false, mouse: false, project: "p", w, h: 24, activity: &[],
         };
         sc.frame(&inp)
+    }
+
+    #[test]
+    fn an_opened_running_agent_has_no_empty_result_row() {
+        let t0 = parse_rfc3339("2026-11-10T18:00:00Z").unwrap();
+        let edits: Vec<(u32, &str, serde_json::Value, bool)> = (0..4).map(|i| (10 + i * 5, "Edit", json!({"file_path": "/r/src/a.rs"}), true)).collect();
+        let mut a = crate::agents::parsed_for_test("Build the thing", &agent_lines(&edits));
+        a.id = "w".into();
+        a.notes = vec!["one".into(), "two".into(), "three".into()];
+        let mut sc = Scene::new(&Config::default());
+        sc.agents = vec![crate::agents::Group { prompt: "p".into(), agents: vec![a] }];
+        sc.agents_open.insert("w".into());
+        let t = agents_frame(&mut sc, 0.0, t0 + 40.0, 60).grid.to_text();
+        let rows: Vec<&str> = t.lines().skip_while(|l| !l.contains("Build the thing")).skip(1).take_while(|l| !l.trim().is_empty()).collect();
+        // its three notes and nothing after them: a result row belongs to a finished agent
+        assert_eq!(rows.len(), 3, "{t}");
+        assert!(rows[2].contains("three"), "{t}");
     }
 
     #[test]
