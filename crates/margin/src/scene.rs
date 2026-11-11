@@ -324,6 +324,9 @@ pub struct Scene {
     /// A Claude session keeps this board (the app and `margin render` set it from the links).
     /// Without one the pane says nothing about Claude: no "Claude is current", no "stop Claude".
     pub linked: bool,
+    /// The board is linked to a Claude session that has ended, and to none that is live: when
+    /// it ended (local HH:MM), for one quiet line where the live strip was.
+    pub ended: Option<String>,
     /// Overdue writers of this board (owner.rs): (the id prefix they own, why). Their rows get a
     /// quiet mark at the right edge, the first one with the reason.
     pub stale: Vec<(String, String)>,
@@ -421,6 +424,7 @@ impl Scene {
             review: false,
             show_ids: false,
             linked: false,
+            ended: None,
             stale: Vec::new(),
             sent: HashMap::new(),
             recap: None,
@@ -940,8 +944,13 @@ impl Scene {
                     }
                     let mut gg = Grid::new(iw, 2);
                     gg.fill(gg.area(), Style::default().on(p.bg0));
-                    gg.put(1, 1, icon::ROBOT, Style::fg(p.blue).on(p.bg0).bold());
-                    let x = gg.put(1 + components::TX, 1, "Agents", Style::fg(p.green).on(p.bg0).bold());
+                    // a fold chevron like a section's: the block folds on a click, and by itself
+                    // once nothing is running
+                    let folded = self.agents_folded.unwrap_or(run + wait == 0);
+                    let (ch, chc) = if folded { (icon::RIGHT, p.grey1) } else { (icon::DOWN, p.purple) };
+                    gg.put(1, 1, ch, Style::fg(chc).on(p.bg0).bold());
+                    gg.put(3, 1, icon::ROBOT, Style::fg(p.blue).on(p.bg0).bold());
+                    let x = gg.put(3 + components::TX, 1, "Agents", Style::fg(p.green).on(p.bg0).bold());
                     let counts: Vec<String> = [(run, "running"), (wait, "waiting"), (done, "done")].into_iter().filter(|(n, _)| *n > 0).map(|(n, l)| format!("{n} {l}")).collect();
                     gg.put(x + 2, 1, &counts.join(" · "), Style::fg(p.grey1).on(p.bg0));
                     components::Drawn { grid: Some(gg), buttons: vec![(0, 1, iw, "mg:agents".into())], ..Default::default() }
@@ -1506,6 +1515,12 @@ impl Scene {
                 wake.every(now, if act.state == "running" && m.on { 0.1 } else { age_pace(age) });
             }
         }
+        // the session this board was linked to is over: one quiet line where its strip was
+        let ended_show = self.ended.is_some() && live.is_none() && h >= 12 && !focus_on && !glance && self.prompt.is_none() && !self.review;
+        if let (Some(at), true) = (&self.ended, ended_show) {
+            g.fill(Rect::new(1, help_y, w.saturating_sub(2), 1), Style::default().on(p.bg0));
+            g.put_clipped(2, help_y, &format!("the session that kept this board ended at {at}"), Style::fg(p.grey0).on(p.bg0), Rect::new(2, help_y, w.saturating_sub(3), 1));
+        }
         // toasts: full-width boxes at the bottom of the view, the oldest lowest and newer ones
         // stacking above it, two at most (sulin, 2026-11-08: "take the entire width, always be on
         // the bottom, stack, borders", then "oldest at the bottom")
@@ -1545,7 +1560,7 @@ impl Scene {
             g.fill(Rect::new(1, help_y, w.saturating_sub(2), 1), Style::default().on(p.bg0));
             parts::help_line(&mut g, 2, help_y, &keys, p, p.bg0, Rect::new(2, help_y, w.saturating_sub(3), 1));
         }
-        if h >= 12 && self.prompt.is_none() && !self.review && !glance && (live.is_none() || (focus_on && !self.help_open)) {
+        if h >= 12 && self.prompt.is_none() && !self.review && !glance && !ended_show && (live.is_none() || (focus_on && !self.help_open)) {
             let mut keys: Vec<(&str, &str)> = vec![("j/k", "move")];
             match self.focus_kind.as_str() {
                 "section" => keys.push(("za", "fold")),
@@ -2153,7 +2168,7 @@ pub fn note_glyph(r: &str) -> &'static str {
 fn live_activity(acts: &[crate::store::Activity], wall: f64) -> Option<(crate::store::Activity, usize)> {
     let age = |a: &crate::store::Activity| wall - crate::util::parse_rfc3339(&a.since).unwrap_or(0.0);
     // a turn that ended stays "your turn" for an hour; a session silent mid-turn for 15 minutes is gone
-    let fresh = |a: &&crate::store::Activity| age(a) < if a.state == "idle" { 3600.0 } else { 900.0 };
+    let fresh = |a: &&crate::store::Activity| a.state != "ended" && age(a) < if a.state == "idle" { 3600.0 } else { 900.0 };
     let agents = acts.iter().filter(|a| !a.agent.is_empty() && a.state != "idle" && age(a) < 300.0).count();
     let main = acts.iter().filter(|a| a.agent.is_empty()).find(fresh).or_else(|| acts.iter().filter(|a| !a.agent.is_empty() && age(a) < 300.0).next())?;
     let agents = if main.agent.is_empty() { agents } else { agents.saturating_sub(1) };
