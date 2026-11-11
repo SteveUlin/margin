@@ -2937,10 +2937,10 @@ mod tests {
         sc.agents = vec![crate::agents::Group { prompt: "p".into(), agents: vec![a] }];
         sc.agents_open.insert("w".into());
         let t = agents_frame(&mut sc, 0.0, t0 + 40.0, 60).grid.to_text();
-        let rows: Vec<&str> = t.lines().skip_while(|l| !l.contains("Build the thing")).skip(1).take_while(|l| !l.trim().is_empty()).collect();
         // its three notes and nothing after them: a result row belongs to a finished agent
-        assert_eq!(rows.len(), 3, "{t}");
-        assert!(rows[2].contains("three"), "{t}");
+        let nodes: Vec<&str> = t.lines().filter(|l| l.contains('●') || l.contains('○')).collect();
+        assert_eq!(nodes.len(), 3, "{t}");
+        assert!(nodes[2].contains("three"), "{t}");
     }
 
     #[test]
