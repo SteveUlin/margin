@@ -143,7 +143,7 @@ global flags (before or after the command):
 
 const CMDS: &[Cmd] = &[
     Cmd { name: "apply", help: "margin apply <board> [--base-rev N] [--json] < input\n  state from a script: update a board that exists. stdin is the line grammar a handler prints (margin help handlers), applied all-or-nothing\n    {\"op\":\"set\",\"id\":\"t1\",\"fields\":{\"status\":\"done\"}}       an op (add set rm move title replace)\n    [ {op}, {op} ]                                          an op array\n    {\"type\":\"todo\",\"id\":\"t1\",\"text\":\"…\",\"parent\":\"steps\"}  a component: upsert by id\n    {\"v\":1,\"title\":\"…\",\"blocks\":[…]}                        a whole document (replaces the one there)\n  several lines are one write. Components upsert by id (a script prints \"this is the state now\"); the\n  board itself must exist: a missing one is an error naming margin new, never created\n  --json prints {\"v\":1,\"artifact\",\"rev\"}; field names and values: margin schema\n  --as OWNER   write as a registered owner (margin owner add): only inside its id prefix, ops and\n               components only, and its last-write time moves even when nothing changed\n", flags: &["--base-rev", "--json", "--title", "--kind", "--as"], max_pos: Some(1) },
-    Cmd { name: "new", help: "margin new <board> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes a board. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal or\n  an empty stdin it starts empty, titled <board> unless --title says otherwise. A board that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <board> --yes. Every\n  other writing command refuses a board that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
+    Cmd { name: "new", help: "margin new <board> [--title T] [--purpose P] [--kind K] [--json] [< doc.json]\n  create: the one command that makes a board. With a document on stdin ({\"title\", \"purpose\",\n  \"hints\", \"blocks\"}, or a bare array of blocks) it starts with that content; with a terminal, an\n  empty or a closed stdin it starts empty, titled <board> unless --title says otherwise; it never\n  waits on a stdin that stays open and silent (after 500 ms it starts empty and says so). A board that exists\n  is refused: change it with margin apply/add/set, or remove it with margin rm <board> --yes. Every\n  other writing command refuses a board that does not exist, so a mistyped name is an error\n  (with the nearest name), not a second board\n    margin new plan --title 'Fix flaky CI' --purpose 'test_sync passes 200 runs'\n    margin example reviews | margin new reviews\n", flags: &["--title", "--purpose", "--kind", "--json"], max_pos: Some(1) },
     Cmd { name: "schema", help: "margin schema [type|document] [--json]\n  the document's own fields (title, purpose, hints, kind, blocks), then the component types:\n  each field, its type, its allowed values and what it is (what every write is checked against)\n", flags: &["--json"], max_pos: Some(1) },
     Cmd { name: "add", help: "margin add <board> <parent|-> <type> <id> [text] [k=v ...] [--json '{...}'] [--before X|--after X] [--base-rev N]\n  create: one component under <parent> (- = top level). An id that exists is refused (change it\n  with margin set); the board must exist (margin new)\n", flags: &["--json", "--before", "--after", "--base-rev"], max_pos: None },
     Cmd { name: "set", help: "margin set <board> <id> <field> <value> [--base-rev N]\nmargin set <board> <id> <field>=<value>... [--base-rev N]\n  change: set fields of a component that exists (a missing id is refused; create it with margin add); text fields keep the value as typed, others read it as JSON (margin schema);\n  an empty value (field=) removes the field\n", flags: &["--base-rev", "--json"], max_pos: None },
@@ -547,6 +547,33 @@ fn json_or_str(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
 }
 
+/// How long `margin new` waits for the first byte of a document on a stdin that is open and
+/// silent. A pipeline's producer (`margin example reviews | margin new reviews`) starts beside
+/// this process and writes a few milliseconds later, so zero would race it and drop its
+/// document; a stdin nobody will ever write to (inherited from a script runner) costs this long
+/// once instead of hanging the script.
+const NEW_STDIN_GRACE_MS: i32 = 500;
+
+/// The document `margin new` was given on stdin, and whether it gave up on a stdin that stayed
+/// open and silent. Never blocks for longer than `grace_ms` unless a document is arriving:
+/// a terminal has none to give (reading it would wait for a ctrl-d nobody knows to type); a
+/// closed stdin, `/dev/null` and a pipe whose writer left without writing are empty at once; a
+/// stdin with data ready (a file, a heredoc, a pipe that has started) is read to its end.
+fn stdin_document(grace_ms: i32) -> (String, bool) {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return (String::new(), false);
+    }
+    let mut p = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+    let n = unsafe { libc::poll(&mut p, 1, grace_ms) };
+    if n > 0 && p.revents & libc::POLLIN != 0 {
+        return (stdin(), false);
+    }
+    // POLLHUP alone: the writer closed having written nothing. POLLNVAL: fd 0 is closed.
+    // n == 0: someone holds the write end and says nothing
+    (String::new(), n == 0)
+}
+
 fn stdin() -> String {
     let mut s = String::new();
     let _ = std::io::stdin().read_to_string(&mut s);
@@ -858,11 +885,12 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         }
         "new" => {
             let st = store(a);
-            // a terminal has no document to give: the artifact starts empty (reading it would
-            // wait for a ctrl-d nobody knows to type)
-            use std::io::IsTerminal;
-            let input = if std::io::stdin().is_terminal() { String::new() } else { stdin() };
-            new_cmd(&st, a.pos(0, "board")?, &input, a)?;
+            let board = a.pos(0, "board")?;
+            let (input, silent) = stdin_document(NEW_STDIN_GRACE_MS);
+            new_cmd(&st, board, &input, a)?;
+            if silent {
+                eprintln!("margin new: nothing arrived on stdin within {NEW_STDIN_GRACE_MS} ms, so {board} starts empty; a document that comes later goes in with `margin apply {board} < doc.json`");
+            }
         }
         "add" => {
             let st = store(a);

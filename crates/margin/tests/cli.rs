@@ -328,6 +328,59 @@ fn a_feed_run_against_a_missing_artifact_fails_without_creating_it() {
     let _ = std::fs::remove_dir_all(&decoy);
 }
 
+/// `margin new <board>` with no document never waits for one that is not coming (it hung a
+/// script for two minutes, 2026-11-10): `/dev/null` and a pipe whose writer has gone are empty
+/// at once, a pipe that stays open and silent is given a moment and then the board starts
+/// empty, with a line saying so. A pipe that carries a document is still read to its end.
+#[test]
+fn new_without_a_document_never_waits_on_stdin() {
+    let decoy = temp("newstdin-decoy");
+    let home = temp("newstdin-home");
+    let new = |name: &str, stdin: Stdio| {
+        let mut c = bare(&decoy, &home, &["new", name]);
+        c.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
+        c.spawn().unwrap()
+    };
+    let done = |ch: std::process::Child| {
+        let o = ch.wait_with_output().unwrap();
+        (o.status.success(), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    // < /dev/null
+    let t = Instant::now();
+    let (ok, out, err) = done(new("devnull", Stdio::null()));
+    assert!(ok && out.trim() == "devnull rev 1" && err.is_empty() && t.elapsed() < Duration::from_millis(400), "{out}{err} after {:?}", t.elapsed());
+    // a pipe whose write end is already closed: end of file with nothing in it
+    let (r, w) = std::io::pipe().unwrap();
+    drop(w);
+    let t = Instant::now();
+    let (ok, out, err) = done(new("closed", Stdio::from(r)));
+    assert!(ok && out.trim() == "closed rev 1" && err.is_empty() && t.elapsed() < Duration::from_millis(400), "{out}{err} after {:?}", t.elapsed());
+    // a pipe someone holds open and never writes to (stdin inherited from a script runner)
+    let (r, w) = std::io::pipe().unwrap();
+    let t = Instant::now();
+    let (ok, out, err) = done(new("silent", Stdio::from(r)));
+    assert!(ok && out.trim() == "silent rev 1" && t.elapsed() < Duration::from_secs(5), "{out}{err} after {:?}", t.elapsed());
+    assert!(err.contains("nothing arrived on stdin within 500 ms, so silent starts empty") && err.contains("margin apply silent"), "{err}");
+    drop(w);
+    // a real pipe with content, more than a pipe's buffer, written as the command runs
+    let rows: Vec<String> = (0..2000).map(|i| format!(r#"{{"type":"text","id":"x{i}","text":"a line long enough to fill the pipe's buffer several times over"}}"#)).collect();
+    let doc = format!(r#"{{"title":"full","blocks":[{}]}}"#, rows.join(","));
+    assert!(doc.len() > 128 * 1024);
+    let mut ch = new("full", Stdio::piped());
+    let mut stdin = ch.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(doc.as_bytes()).unwrap());
+    let (ok, out, err) = done(ch);
+    writer.join().unwrap();
+    assert!(ok && out.trim() == "full rev 1" && err.is_empty(), "{out}{err}");
+    for (name, blocks) in [("devnull", 0), ("closed", 0), ("silent", 0), ("full", 2000)] {
+        let (_, shown) = at(&decoy, &home, &["show", name, "--json"], "");
+        let v: serde_json::Value = serde_json::from_str(&shown).unwrap_or_else(|e| panic!("{name}: {e}: {shown}"));
+        assert_eq!(v["doc"]["blocks"].as_array().unwrap().len(), blocks, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
 /// Each bundled example, by the steps `margin example <name>` prints: piped into `margin new`
 /// it creates the board, its script's stored output applies as an update that changes nothing,
 /// the script registers on it as a handler, and a second pipe into `new` is refused.
