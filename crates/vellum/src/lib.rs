@@ -15,6 +15,7 @@ pub mod input;
 pub mod keymap;
 pub mod layout;
 pub mod parts;
+pub mod plot;
 pub mod retained;
 pub mod style;
 pub mod term;
