@@ -827,7 +827,9 @@ impl Scene {
         let mut drawn: Vec<(Item, components::Drawn, i32, u16)> = Vec::new();
         let mut y = 0i32;
         let mut new_pos = HashMap::new();
-        let mut first_top = true;
+        // the first top-level block sits tight under the head, unless something of the pane's own
+        // (the Agents block, a recap) is drawn above it: then it keeps its breathing room
+        let mut first_top = matches!(items.first().map(|i| &i.kind), Some(Kind::Block { .. }) | None);
         // dependency lanes, per section: its todos in order with their `after` ids (graph.rs)
         let mut graphs: HashMap<String, crate::graph::Row> = HashMap::new();
         walk(&inp.doc.blocks, &mut |b, _, _| {
