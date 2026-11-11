@@ -34,7 +34,7 @@ Claude Code hooks as one line of context.
   reads it when the pane draws, so a live plot needs no write to the board. Whoever keeps rows
   current owns them; Claude and you cannot overwrite them. `margin help integrate` has the cron
   and systemd recipes.
-- **Shipped scripts** (`feeds/`): a jj change ledger, a monitor of Claude Code sessions, a board
+- **Shipped scripts** (`providers/`): a jj change ledger, a monitor of Claude Code sessions, a board
   of queued messages, a turn ledger. Each one's header gives the handler (or owner) registration
   and the cron line that run it.
 - Also: long-form notes beside the chat (`margin doc`), and toasts.
@@ -99,11 +99,13 @@ lists every command and reference topic.
 | [docs/install.md](docs/install.md) | build, `margin init`, a first pane, undoing it |
 | [docs/guide.md](docs/guide.md) | the model, four walkthroughs, a cheat sheet of commands, keys and config |
 | [docs/dashboards.md](docs/dashboards.md) | tables, run strips, badges, rules, and the theme |
-| [docs/design.md](docs/design.md) | the original design: owners, events, the toolkit, panes, and the feed runner, now legacy (handlers, owners and datasets replaced it) |
+| [docs/design.md](docs/design.md) | the original design, in its dated terms: owners, events, the toolkit, panes, and a feed runner that has since been removed (handlers, owners and datasets replaced it) |
 | [docs/research.md](docs/research.md), [docs/landscape.md](docs/landscape.md), [docs/research/](docs/research/) | the measurements and prior art behind the design |
 
 The design and research documents are dated notes from the build; they say "artifact" for what
-the tool now calls a board. Where they disagree with
+the tool now calls a board, and describe a feed runner (`margin feed`, a command on margin's own
+timer) that has been removed: a handler run by an event that cron emits, an outside owner or a
+dataset keeps a board current now. Where they disagree with
 `margin help` or the guide, the tool is right.
 
 ## Status

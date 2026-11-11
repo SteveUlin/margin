@@ -32,8 +32,6 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 
 ### Components (fold)
 
-![Every component type rendered once: a section with done, doing and blocked todos, a progress bar, a timer, a status line, warn text, a claim, a decided row, a link, a feed row and a small diff with approve and reject tokens](img/guide/parts.png "Each type once, from one `margin put` plus a `margin diff`. Real render through pyte, not Ghostty.")
-
 | type | fields you write | you act |
 |---|---|---|
 | `section` | `title` `note` `children` `folded` `tone` | fold (⏎, or click the header) |
@@ -43,12 +41,11 @@ margin is a folder of JSON files plus programs that write and draw it. You, Clau
 | `progress` | `of` (a section id) or `value` 0–1, `label` | — |
 | `timer` | `since` or `until` (RFC 3339), `label` | — |
 | `status` | `text` `state`: running, pass, fail; `result` `spark` `target` | open (⏎) |
-| `question` | `text` `options` `default` `why` `applies` `applied` | pick (1–9) |
+| `question` | `text` `options` `suggest` `why` | pick (1–9) |
 | `claim` | `text` `ack` | strike (x) |
 | `decided` | `text` `by`: claude or you, `at` | — |
 | `link` | `text` `target`: a URL or an `mg:` token | open (⏎) |
 | `row` | `text` `glyph` `tag` `aside` `since` or `meta` `detail`, tones | — |
-| `feed` | legacy: the health line of the older feed runner, written by the daemon | — |
 
 An unknown `type` draws as a red "unknown component" line instead of failing, so a typo shows up on screen.
 
@@ -94,7 +91,7 @@ A token is `mg:<verb>/[<board>.]<id>[=<value>]`. The pane prints the short form 
 | `mg:pin/x` | toggles a pin |
 | `mg:open/L1` | opens a link's URL or runs its token; a board name opens its pane |
 
-Each one appends an event. Passive kinds (`view`, `fold`, `seen`, `open`, `feed`) are logged but never handed to Claude; `margin events --all` shows them.
+Each one appends an event. Passive kinds (`view`, `fold`, `seen`, `open`) are logged but never handed to Claude; `margin events --all` shows them.
 
 ## Walkthrough 1: a board by hand
 
@@ -120,13 +117,12 @@ No Claude, no Zellij. You need two terminals.
 
    `-` means top level. Extra `key=value` words become fields (values parse as JSON, else text); a bare word becomes `text`.
 
-3. [ ] **Ask a question with a default, and mark progress.**
+3. [ ] **Ask a question, and mark progress.** A question has no default: `--suggest` marks the answer you recommend, as a line on the card, and no option is highlighted until someone picks.
 
    ```fish
    margin ask tour Q1 "Which script do you write first?" \
-     jj services --default services \
-     --why "services.json is one file to watch" \
-     --applies "at walkthrough 2"
+     jj services --suggest services \
+     --why "services.json is one file to watch"
    margin set tour t1 status done
    margin set tour t2 status doing
    ```
@@ -140,8 +136,6 @@ No Claude, no Zellij. You need two terminals.
    ```
 
    Run that in the second terminal (with the binary's full path if `margin` isn't on PATH there). `q` quits.
-
-   ![The tour board in the pane: Steps with one done, one doing, one open; a progress bar at 1/3; the Q1 card with jj and services, services marked as the default](img/guide/a-open.png "What step 4 shows. The default is already selected; Claude would carry on with it. Real render through pyte, not Ghostty.")
 
 5. [ ] **Tick t3 and pick an option with keys.** `j`/`k` move focus, and the help line at the bottom shows what the focused component takes: `space` on a todo, `1`–`9` on a question, `x` on a claim. With the plain host the mouse is on, so a click on a token works too.
 
@@ -247,7 +241,7 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 | rows a program of your own already computes | an **owner**: `margin owner add`, then `margin apply <board> --as <owner>` whenever it likes | nothing |
 | numbers that change often (a rate, a latency) | a **dataset**: `margin data add`, `margin data append`; a plot or table reads it by name | nothing |
 
-`--timeout 60s` stops a handler run that hangs; a failed run is retried after 1, 2, 4 … s (`--retries 3`), then passed over with a `handler.failed` event. The scripts in `feeds/` are worked examples; their header comments give the registration and the cron line.
+`--timeout 60s` stops a handler run that hangs; a failed run is retried after 1, 2, 4 … s (`--retries 3`), then passed over with a `handler.failed` event. The scripts in `providers/` are worked examples; their header comments give the registration and the cron line.
 
 ## Walkthrough 3: with Claude
 
@@ -255,7 +249,7 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 
 2. [ ] **Run `claude`.** `margin init` ([install.md](install.md)) puts the hooks in `~/.claude/settings.json`, so every session gets your clicks back. Before `init`, only a project whose own `.claude/settings.json` carries the hooks does.
 
-3. [ ] **Ask for it in words.** The skill only acts on request: "start a margin for this", "track this", "keep a plan up", "watch the agents". On a long task Claude may offer once in one line. It then `put`s a plan, runs `margin open plan` (a split in its own tab; your focus doesn't move) and ticks steps as it works.
+3. [ ] **Ask for it in words.** The skill only acts on request: "start a margin for this", "track this", "keep a plan up", "watch the agents". On a long task Claude may offer once in one line. It then creates a plan with `margin new plan`, runs `margin open plan` (a split in its own tab; your focus doesn't move) and ticks steps as it works.
 
 4. [ ] **Act in the pane.** Double-click a token, or focus the pane and use keys. The card says "sent".
 
@@ -273,7 +267,7 @@ Write `"since": "2026-11-06T14:33:12Z"` on a row, never `"aside": "3h ago"`. The
 ### What the skill tells Claude (fold)
 
 - **Content is Claude's, decisions are yours.** To change something you decided, it says so in chat.
-- **Never block on a reversible fork.** It posts `margin ask … --default X --applies "<when>"`, carries on with the default, and checks events at that point. To block on an answer from a script, follow the log: `margin events --follow --name pick --board plan --json` (see `margin help integrate`).
+- **A question has no default.** It posts `margin ask … --suggest X --why "…"`, goes on with the work that does not depend on the answer, and takes your pick from the next `margin:` line. "Talk about this" on a card means it raises the question in chat and leaves the card open. To block on an answer from a script, follow the log: `margin events --follow --name pick --board plan --json` (see `margin help integrate`).
 - **A struck claim gets an answer:** re-check, then `margin set <board> <id> ack "…"`.
 - **Address by id, base on a rev** (`--base-rev`), and treat `margin:` lines as your input.
 - **Owned ids are read-only,** and anything you want kept current becomes a handler on a refresh event, not a poll each turn.
@@ -310,7 +304,7 @@ Walkthrough 2 already did this: `tour` holds your steps and the handler's `svc` 
 | `margin rm A [--yes]` | remove a whole board: a preview without `--yes`; with it, it moves to `.archive/` |
 | `margin move A ID --before X\|--after X\|--parent P` | reorder |
 | `margin title A "T"` | rename |
-| `margin ask A ID "Q" opt… --default D` | a question; `--why` `--applies` `--parent` |
+| `margin ask A ID "Q" opt… [--suggest S]` | a question (no default; `--suggest` marks a recommendation); `--why` `--parent` |
 | `margin show A [--json]` | content + your decisions |
 | `margin ls` / `margin gc [--days N]` | list; archive untouched ones (30 days) |
 
@@ -342,9 +336,9 @@ Every write takes `--base-rev N`. Every command takes `--home DIR`, `--project N
 | `margin handler pause\|resume\|rm N` | stop or start it; `rm` keeps what it wrote |
 | `margin owner add N --board B --owns P [--expect-every 10m]` | rows an outside program writes with `margin apply B --as N` |
 | `margin data add N` / `margin data append N VALUE` | a dataset a plot or table reads by name |
-| `margin daemon [status]` | the dispatcher; the CLI starts it for you |
-
-`margin feed`, the older runner with its own timer, is legacy: `margin help feeds` says what replaces each of its triggers.
+| `margin daemon [status]` | the dispatcher of events to handlers; the CLI starts it for you |
+| `margin daemon install\|uninstall` | write (or remove) a systemd user unit that keeps it up across a login; it prints the `systemctl --user enable --now …` line |
+| `margin doctor [--fix]` | leftovers of crashed sessions and panes; in a store from before the feed runner was removed, the command that replaces each old feed |
 
 ### Keys in the pane (fold)
 
@@ -383,12 +377,15 @@ as its first row, `↺`, for six hours. After a compaction or a resume, the sess
 Claude for a read-back instead: 2–3 claims in a `readback` section at the top, which you strike if
 they're wrong.
 
-### When Claude goes ahead (fold)
+### When a question is open (fold)
 
-A question card says when its default will be taken: "taken when t4 starts" when its `applies`
-names a step (that step shows `? Q1`), a countdown when it has `takes_at`, "taking the default now"
-in yellow once the moment comes, and the time Claude took it once it has. **wait for me** holds it:
-Claude stops at that step and waits for your pick; **release** lets the default stand.
+A question has no default, so nothing is taken for you. The card shows the options as buttons,
+Claude's recommendation (`suggest`) and its reason (`why`) as lines, and no option is highlighted
+until you pick. While it is open Claude works on what does not depend on the answer; your pick
+(a click, `1`–`9`, or `mg:pick/Q1=<opt>`) reaches it as a `margin:` line at its next hook. **talk
+about this** tells Claude to raise the question in chat and leave the card open. Claude changes a
+card with `margin set` and adds work with `margin add` or `margin apply`; it never rewrites the
+board to move past a question.
 
 ### Toasts (fold)
 
@@ -472,7 +469,7 @@ Everything lives in `crates/margin/src`. A type is a row in `doc.rs` `SCHEMA` (i
 
 ### Handlers in any language (fold)
 
-The daemon runs argv with no shell, in the directory you registered it from, with the pending events on stdin, and reads stdout lines. Deno, Python and Rust all work: print one JSON value per line and exit 0. Keep a fetcher read-only towards the world, and safe to run twice on one event. A script that writes to what a file watcher watches retriggers itself forever; that's why `feeds/jj` reads with `--ignore-working-copy`.
+The daemon runs argv with no shell, in the directory you registered it from, with the pending events on stdin, and reads stdout lines. Deno, Python and Rust all work: print one JSON value per line and exit 0. Keep a fetcher read-only towards the world, and safe to run twice on one event. A script that writes to what a file watcher watches retriggers itself forever; that's why `providers/jj` reads with `--ignore-working-copy`.
 
 ## Limits today
 
@@ -481,9 +478,9 @@ The daemon runs argv with no shell, in the directory you registered it from, wit
 - **Double-click tokens need `margin session`.** In a plain Zellij session the selection is only copied. In the plain host, keys and mouse clicks in the pane work.
 - **`margin demo` needs difftastic.** The nix build wraps it in; a dev build looks in `$MARGIN_DIFFT`, then PATH, then config `difft`, then the nix profile dirs, and names those fixes when it finds none.
 - **Nothing is checked in Ghostty yet.** Every render here went through pyte, a fake terminal: kitty images, colours and the feel of double-click need your eyes.
-- **The agents script (`feeds/agents`) can't see permission prompts.** A tool call pending over a minute shows "running or waiting on permission"; a Notification hook would make it exact.[^agents]
+- **The agents script (`providers/agents`) can't see permission prompts.** A tool call pending over a minute shows "running or waiting on permission"; a Notification hook would make it exact.[^agents]
 - **The design doc runs ahead of the build.** `margin propose`, `p` to pin, and `n`/`N` across diff hunks are designed but not built; design.md marks them so.
 - **A todo `status` write doesn't bump `rev`.** It lands in `state.json`, so `--base-rev` doesn't guard it (api-review.md §3).
 
 [^hook]: [research.md](research.md) §7 (PostToolUse `additionalContext` reaches the model on its next call) and design.md §7b: with a script writing 20 revisions a second, `margin hook prompt` took a median 2.2 ms, max 8.9 ms.
-[^agents]: [design.md](design.md) §7 and the header of `feeds/agents`: "the transcript can't tell those apart".
+[^agents]: [design.md](design.md) §7 and the header of `providers/agents`: "the transcript can't tell those apart".
