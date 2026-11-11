@@ -55,7 +55,9 @@ margin handler ls                                                  # state, even
   Every event carries `seq`; a handler with side effects remembers the last `seq` it finished.
 - **It never receives** an event it emitted itself; a `handler.*` event unless one of its `--on`
   globs starts with `handler.` (`--on 'handler.failed'` is how one handler reports another's
-  failure); the pane's passive kinds (`seen`, `view`, `fold`) unless named exactly.
+  failure); the pane's passive kinds (`seen`, `view`, `fold`) unless named exactly. A board's view events
+  (`reviews.shown`, `.hidden`, `.detail`) are also selected by a glob that names the board
+  (`'reviews.*'`), never by `'*'` or `'*.detail'`.
 - **Its board is optional.** With `--board B --owns PREFIX` it owns the ids `PREFIX` and
   `PREFIX-…` on B: its lines may write only those, and nobody else may write them. Without a
   board it can still emit, or do something outside margin.

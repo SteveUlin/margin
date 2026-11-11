@@ -77,12 +77,13 @@ Every field is always present.
   given a value. Anything else is what `margin emit <name>` or a handler's `{"emit": …}` line
   chose: name yours `<your tool or board>.<what happened>`. Names starting `handler.` are the
   runner's: `handler.failed` (`value`: `handler`, `error`, `stderr`, `attempts`, `skipped`
-  as `{from, to, count}`). Emit nothing under `handler.` or the retired `job.` (a handler's emit
-  line refuses the first, `margin emit` the second).
+  as `{from, to, count}`). Emit nothing under `handler.`: a handler's emit
+  line and `margin emit` both refuse it.
 - **Passive events**, the pane's bookkeeping: `seen`, `view`, `fold`, `unfold`, and the view
   events. They are never handed to a Claude session, are not decisions, are left out of `margin
   events` unless `--all`, `--name` or `--kind` asks, and reach a handler only when its `--on`
-  **is the exact name** (`--on reviews.detail`; `'reviews.*'` and `'*'` do not select them).
+  **is the exact name**. The view events alone are also selected by a glob that names their
+  board (`--on reviews.detail` or `--on 'reviews.*'`; `'*'` and `'*.detail'` do not select them).
 
 **The view events** say what is being looked at, so a provider can load what is on screen and
 stop when it is not. All have `by: "you"`, `via: "pane"`:
@@ -106,11 +107,12 @@ stop when it is not. All have `by: "you"`, `via: "pane"`:
 
 ## A board, and one block
 
-`margin show <board> --json`: the document as stored and the decisions made on it. The version
-is `doc.v` (this answer has no `v` of its own).
+`margin show <board> --json`: the document as stored and the decisions made on it. The answer
+carries `v`, as every JSON answer does; `doc.v` is the stored document's own.
 
 ```json
-{"doc": {"v": 1, "id": "reviews", "title": "Reviews", "kind": "", "rev": 1,
+{"v": 1,
+ "doc": {"v": 1, "id": "reviews", "title": "Reviews", "kind": "", "rev": 1,
    "blocks": [
      {"type": "table", "id": "pr",
       "children": [{"type": "tr", "id": "pr-7", "target": "https://example.com/pr/7", "detail": "Fails one run in five.", "cells": {"title": "Fix the flaky test"}}],
@@ -210,7 +212,7 @@ A write to a dataset is not a write to a board: no revision, no event.
   gets the same events again. Make the command safe to run twice; with side effects, remember
   the last `seq` finished and skip events at or below it.
 - **Never given**: its own emits; `handler.*` unless a glob of its own starts `handler.`; a
-  passive event unless named exactly. A new handler starts at the end of the log.
+  passive event unless named exactly (a view event: or by `'<board>.*'`). A new handler starts at the end of the log.
 
 `margin handler ls --json`: `{"v":1,"daemon":{"running","pid"},"handlers":[{"name","on","cmd",
 "board","owns","paused","state","cursor","pending","attempts","last_run","last_outcome",

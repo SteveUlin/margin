@@ -152,7 +152,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "propose", help: "margin propose <board> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
     Cmd { name: "diff", help: "margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n  not part of the documented set; may be removed\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "image", help: "margin image <board> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n  a PNG in the pane (kitty graphics, else half-blocks); the document stores the file's path\n  not part of the documented set; may be removed\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
-    Cmd { name: "show", help: "margin show <board> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <board> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such board,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
+    Cmd { name: "show", help: "margin show <board> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"v\":1, \"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <board> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such board,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ls", help: "margin ls [--json]\n  this project's boards (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
     Cmd { name: "gc", help: "margin gc [--days N]\n  archive boards untouched for N days (default: config archive_days), and remove the cursors of\n  Claude sessions not seen for that long (never a named cursor: a tool's or a handler's)\n", flags: &["--days"], max_pos: Some(0) },
     Cmd { name: "events", help: EVENTS_HELP, flags: &["--unread", "--session", "--board", "--artifact", "--since", "--kind", "--name", "--all", "--json", "--follow", "--cursor", "--no-commit", "--commit"], max_pos: Some(0) },
@@ -256,7 +256,8 @@ margin handler set <name> [--on <glob>...] [--board B --owns PREFIX | --board no
   change: only what you pass changes (--on replaces the whole list); a missing name is refused
   --on GLOB       an event name or a glob of one, quoted: reviews.open, '*.open', 'ci.*'. Never
                   matches the handler's own emits; handler.* events only via a glob starting
-                  with handler.; the pane's passive kinds (seen, view, fold) only by exact name
+                  with handler.; the pane's passive kinds (seen, view, fold) only by exact name;
+                  a board's view events (shown, hidden, detail) also via 'BOARD.*'
   --board B --owns PREFIX   the board its stdout writes and the id prefix it owns there (PREFIX
                   and PREFIX-...; * = all). The board must exist. Without them it writes no board
   --timeout 60s   a run is stopped after this long, and counts as failed
@@ -1023,7 +1024,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 let b = d.find(id).ok_or_else(|| format!("no component {id:?} in {art}; margin show {art}"))?;
                 println!("{}", serde_json::to_string_pretty(&json!({"v": 1, "artifact": art, "rev": d.rev, "block": b, "decision": s.decisions.get(id)})).unwrap());
             } else if a.has("--json") {
-                println!("{}", serde_json::to_string_pretty(&json!({"doc": d, "state": s})).unwrap());
+                println!("{}", serde_json::to_string_pretty(&json!({"v": 1, "doc": d, "state": s})).unwrap());
             } else {
                 print!("{}", crate::who::say(&show_text(&d, &s, &st.claims(art), st.delivered_max())));
             }
@@ -1077,8 +1078,8 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 }
                 Some(raw) => serde_json::from_str(raw).map_err(|e| format!("the value is not JSON ({e}): {}; quote text as '\"text\"'", vellum::text::truncate(raw, 60)))?,
             };
-            if name.starts_with("job.") {
-                return Err("event names starting with job. are the runner's own (job.failed)".into());
+            if name.starts_with("handler.") {
+                return Err("event names starting with handler. are the runner's own (handler.failed)".into());
             }
             for f in ["--board", "--id"] {
                 if a.has(f) && a.get(f).is_none() {
@@ -1734,7 +1735,7 @@ fn handler_cmd(a: &Args, cmd: Vec<String>) -> Result<(), String> {
             }
             match running {
                 Some(p) if p > 0 => println!("daemon: running, pid {p}"),
-                Some(_) => println!("daemon: running"),
+                Some(_) => println!("daemon: starting"),
                 None => println!("daemon: not running{}", if r.handlers.iter().any(|h| !h.paused) { " (the next event appended starts it; or: margin daemon)" } else { "" }),
             }
             if r.handlers.is_empty() {
@@ -2143,6 +2144,8 @@ fn daemon_cmd(a: &Args) -> Result<(), String> {
                 return Ok(());
             }
             match (running, up) {
+                // it holds the lock and has not written its pid yet: just started
+                (Some(0), _) => println!("daemon: starting for project {}", st.project),
                 (Some(p), Some(t)) => println!("daemon: running for project {}, pid {p}, up since {} ({})", st.project, util::rfc3339(t), util::ago(now - t)),
                 (Some(p), None) => println!("daemon: running for project {}, pid {p}", st.project),
                 _ => println!("daemon: not running for project {}", st.project),

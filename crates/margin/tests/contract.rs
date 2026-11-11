@@ -183,7 +183,7 @@ fn a_view_event_reaches_only_a_handler_that_names_it_and_starts_no_daemon_otherw
     std::fs::create_dir_all(&out).unwrap();
     let script = r#"cat >> "$0/$MARGIN_HANDLER.stdin"; env | grep '^MARGIN_' | sort > "$0/$MARGIN_HANDLER.env"; pwd > "$0/$MARGIN_HANDLER.cwd"; echo "$@" > "$0/$MARGIN_HANDLER.argv"; echo '{"op":"set","id":"pr-7","fields":{"detail":"more, from the handler"}}'"#;
     let outs = out.display().to_string();
-    t.ok(&["handler", "add", "approve", "--on", "reviews.approve", "--on", "reviews.*", "--", "sh", "-c", script, &outs, "one", "two"], "");
+    t.ok(&["handler", "add", "approve", "--on", "reviews.approve", "--on", "*.*", "--", "sh", "-c", script, &outs, "one", "two"], "");
     t.stop_daemon();
     // nobody names the view events: they are logged, and nothing is started for them
     for name in ["reviews.shown", "reviews.hidden", "reviews.detail"] {
@@ -222,7 +222,7 @@ fn a_view_event_reaches_only_a_handler_that_names_it_and_starts_no_daemon_otherw
     assert_eq!(std::fs::read_to_string(out.join("more.argv")).unwrap().trim(), "one two");
     let cwd = std::fs::read_to_string(out.join("more.cwd")).unwrap();
     assert_eq!(std::fs::canonicalize(cwd.trim()).unwrap(), std::fs::canonicalize(t.work()).unwrap(), "it runs where it was registered");
-    // the handler registered for an action, and by a board glob, was given none of the view events
+    // the handler registered for an action, and by a glob that names no board, was given none of the view events
     assert!(!out.join("approve.stdin").exists(), "{:?}", std::fs::read_to_string(out.join("approve.stdin")));
     let ls = t.json(&["handler", "ls", "--json"]);
     has(&ls, &[("v", "number"), ("daemon", "object"), ("handlers", "list")], "handler ls");
@@ -235,6 +235,12 @@ fn a_view_event_reaches_only_a_handler_that_names_it_and_starts_no_daemon_otherw
     let got: Value = serde_json::from_str(std::fs::read_to_string(out.join("approve.stdin")).unwrap().lines().next().unwrap()).unwrap();
     assert_eq!(got["kind"], json!("reviews.approve"));
     assert_eq!(std::fs::read_to_string(out.join("approve.env")).unwrap().lines().filter(|l| l.starts_with("MARGIN_BOARD=") || l.starts_with("MARGIN_OWNS=")).count(), 0, "no board, no MARGIN_BOARD");
+    // a glob that names the board selects its view events too: `reviews.*` is everything about reviews
+    t.ok(&["handler", "add", "board", "--on", "reviews.*", "--", "sh", "-c", script, &outs], "");
+    let shown: u64 = t.ok(&["emit", "reviews.shown", r#"{"since":3}"#, "--board", "reviews"], "").trim().parse().unwrap();
+    wait_for("the board-glob handler to get the view event", || std::fs::read_to_string(out.join("board.stdin")).map(|s| s.lines().any(|l| serde_json::from_str::<Value>(l).map(|e| e["seq"] == json!(shown) && e["kind"] == json!("reviews.shown")).unwrap_or(false))).unwrap_or(false));
+    assert!(!std::fs::read_to_string(out.join("approve.stdin")).unwrap().contains("reviews.shown"), "`*.*` names no board");
+    t.ok(&["handler", "rm", "board"], "");
     t.ok(&["handler", "rm", "more"], "");
     t.ok(&["handler", "rm", "approve"], "");
     wait_for("the daemon to leave with its last handler", || !t.daemon_running());
@@ -266,8 +272,8 @@ fn a_board_and_a_block_have_the_documented_shape() {
     t.ok(&["new", "reviews"], BOARD);
     t.ok(&["set", "reviews", "t1", "status", "done"], "");
     let b = t.json(&["show", "reviews", "--json"]);
-    has(&b, &[("doc", "object"), ("state", "object")], "show");
-    assert!(b.get("v").is_none(), "the topic says this answer has no v of its own: update it");
+    has(&b, &[("v", "number"), ("doc", "object"), ("state", "object")], "show");
+    assert!(b["v"] == json!(1), "every JSON answer carries v: {b}");
     let doc = &b["doc"];
     has(doc, &[("v", "number"), ("id", "string"), ("title", "string"), ("kind", "string"), ("rev", "number"), ("blocks", "list"), ("updated", "string"), ("by", "string"), ("actions", "list")], "a document");
     assert!(doc["v"] == json!(1) && doc["id"] == json!("reviews") && doc["rev"] == json!(1) && rfc3339(&doc["updated"]), "{doc}");

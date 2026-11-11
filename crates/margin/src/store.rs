@@ -189,12 +189,8 @@ pub struct Store {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Writer {
     Claude,
-    /// A registered feed and the id prefix it owns in its artifact (`*` = the whole artifact).
-    /// The prefix travels with the writer, so the daemon can still mark a removed feed's status
-    /// line "removed" after the registry has forgotten it.
-    Feed { name: String, owns: String },
-    /// Any other registered owner of a prefix: a handler (`by` is `handler:<name>`) or an
-    /// outside program (`owner:<name>`). The same rule as a feed: only inside its prefix.
+    /// A registered owner of a prefix: a handler (`by` is `handler:<name>`) or an outside
+    /// program (`owner:<name>`). It writes only inside its prefix (`*` = the whole board).
     Named { by: String, owns: String },
 }
 
@@ -202,7 +198,6 @@ impl Writer {
     pub fn by(&self) -> String {
         match self {
             Writer::Claude => "claude".into(),
-            Writer::Feed { name, .. } => format!("feed:{name}"),
             Writer::Named { by, .. } => by.clone(),
         }
     }
@@ -243,7 +238,6 @@ pub fn check_owner(op: &Op, doc: &Doc, w: &Writer, claims: &[Claim]) -> Result<(
     // a writer with a prefix: who it is, in words, and the prefix
     let prefixed = match w {
         Writer::Claude => None,
-        Writer::Feed { name, owns } => Some((format!("feed {name}"), owns)),
         Writer::Named { by, owns } => Some((by.replacen(':', " ", 1), owns)),
     };
     match prefixed {
@@ -751,7 +745,7 @@ impl Store {
         let (rev, mut errs) = match (groups.is_empty(), a.is_empty()) {
             (true, _) => (None, Vec::new()),
             (false, true) => (None, vec![format!("{} line(s) write a board, and this handler has none: register it with --board B --owns PREFIX", groups.len())]),
-            (false, false) => self.feed_write_locked(a, groups, w, &[]),
+            (false, false) => self.owned_write_locked(a, groups, w),
         };
         let at = if a.is_empty() { 0 } else { self.load(a).map(|d| d.rev).unwrap_or(0) };
         for (name, value) in emits {
@@ -786,19 +780,11 @@ impl Store {
         }
     }
 
-    /// A feed's write: groups of ops (one group per stdout line), each applied all-or-nothing, so
-    /// one bad line is rejected and logged without losing its neighbours. `on_change` ops (the
-    /// feed's "last write" stamp) apply only when the groups changed content, so a feed that
-    /// re-prints the same state costs no revision. A feed updates its artifact and never creates
-    /// it: a missing one fails the write with the message that names `margin new`.
-    pub fn feed_write(&self, a: &str, groups: &[Vec<Op>], w: &Writer, on_change: &[Op]) -> (Option<u64>, Vec<String>) {
-        match self.lock() {
-            Ok(_l) => self.feed_write_locked(a, groups, w, on_change),
-            Err(e) => (None, vec![e.to_string()]),
-        }
-    }
-
-    fn feed_write_locked(&self, a: &str, groups: &[Vec<Op>], w: &Writer, on_change: &[Op]) -> (Option<u64>, Vec<String>) {
+    /// A handler's write: groups of ops (one group per stdout line), each applied all-or-nothing,
+    /// so one bad line is rejected and logged without losing its neighbours. A script that
+    /// re-prints the same state costs no revision. It updates its board and never creates it: a
+    /// missing one fails the write with the message that names `margin new`.
+    fn owned_write_locked(&self, a: &str, groups: &[Vec<Op>], w: &Writer) -> (Option<u64>, Vec<String>) {
         let mut errs = Vec::new();
         let old = match self.load(a) {
             Ok(d) => d,
@@ -821,12 +807,6 @@ impl Store {
         }
         if d.blocks == base_blocks && d.title == base_title {
             return (None, errs);
-        }
-        for op in on_change {
-            let mut t = d.clone();
-            if check_owner(op, &t, w, &claims).and_then(|_| t.apply(op)).is_ok() {
-                d = t;
-            }
         }
         match self.save_doc_locked(&mut d, Some(&old), &w.by()) {
             Ok(rev) => (Some(rev), errs),
@@ -1615,8 +1595,8 @@ pub mod tests {
         assert_eq!(s.replace(Doc::empty("scratch"), None).unwrap_err(), plain);
         assert_eq!(s.load("scratch").unwrap_err(), plain);
         assert_eq!(s.archive("scratch").unwrap_err(), plain);
-        let w = Writer::Feed { name: "f".into(), owns: "f".into() };
-        assert_eq!(s.feed_write("scratch", &[vec![set]], &w, &[]), (None, vec![plain.to_string()]));
+        let w = Writer::Named { by: "handler:f".into(), owns: "f".into() };
+        assert_eq!(s.handler_commit("scratch", &[vec![set]], &w, &[], None), (None, vec![plain.to_string()]));
         assert!(!s.exists("scratch") && !s.art("scratch").exists(), "a refused write leaves no trace");
         // replace is the update of a whole document
         assert_eq!(s.replace(Doc { title: "Reviews".into(), ..Doc::empty("reviews") }, None).unwrap(), 2);

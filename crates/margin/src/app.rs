@@ -2552,17 +2552,17 @@ mod action_tests {
         assert!(lv.action_key('e', 1.0));
         assert!(lv.scene.sent.contains_key("job-1"));
         // another row changing is not this row changing
-        let w = crate::store::Writer::Feed { name: "ci".into(), owns: "job".into() };
-        st.feed_write("ci", &[vec![Op::Set { id: "job-2".into(), field: "detail".into(), value: json!("x") }]], &w, &[]);
+        let w = crate::store::Writer::Named { by: "handler:ci".into(), owns: "job".into() };
+        st.handler_commit("ci", &[vec![Op::Set { id: "job-2".into(), field: "detail".into(), value: json!("x") }]], &w, &[], None);
         lv.reload(2.0);
         assert!(lv.sent_notes(epoch_now()) && lv.scene.sent.contains_key("job-1"));
-        st.feed_write("ci", &[vec![Op::Set { id: "job-1".into(), field: "detail".into(), value: json!("retrying") }]], &w, &[]);
+        st.handler_commit("ci", &[vec![Op::Set { id: "job-1".into(), field: "detail".into(), value: json!("retrying") }]], &w, &[], None);
         lv.reload(3.0);
         assert!(!lv.sent_notes(epoch_now()) && lv.scene.sent.is_empty());
         assert!(!frame(lv, 100).0.contains("→ sent"));
         // a row that is removed takes its note with it
         assert!(lv.action_key('e', 1.0));
-        st.feed_write("ci", &[vec![Op::Rm { id: "job-1".into() }]], &w, &[]);
+        st.handler_commit("ci", &[vec![Op::Rm { id: "job-1".into() }]], &w, &[], None);
         lv.reload(4.0);
         assert!(!lv.sent_notes(epoch_now()));
         std::fs::remove_dir_all(&st.home).ok();
@@ -2689,8 +2689,8 @@ mod action_tests {
         let text = frame(lv, 120).0;
         assert!(text.contains("no answer yet") && !text.contains("asked for more"), "{text}");
         // the answer: whoever handled it wrote the block
-        let w = crate::store::Writer::Feed { name: "ci".into(), owns: "job".into() };
-        st.feed_write("ci", &[vec![Op::Set { id: "job-1".into(), field: "detail".into(), value: json!("exit 2: the linker ran out of memory") }]], &w, &[]);
+        let w = crate::store::Writer::Named { by: "handler:ci".into(), owns: "job".into() };
+        st.handler_commit("ci", &[vec![Op::Set { id: "job-1".into(), field: "detail".into(), value: json!("exit 2: the linker ran out of memory") }]], &w, &[], None);
         lv.reload(3.0);
         lv.asked_note(wall + ASKED_SECS + 2.0);
         let text = frame(lv, 120).0;

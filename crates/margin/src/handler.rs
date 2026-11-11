@@ -87,16 +87,23 @@ impl Handler {
     }
     /// Is this event one of the handler's? A glob in `--on` matches the event's name. Never an
     /// event the handler emitted itself (it would loop); a `handler.*` event only through a glob
-    /// that says `handler.` itself; a passive kind (seen, view, fold) only by its exact name. So
-    /// `--on '*'` means every fact, not the runner's or the pane's noise.
+    /// that says `handler.` itself; a passive kind (seen, view, fold) only by its exact name,
+    /// and a board's view events also by a glob that names the board (`reviews.*`). So `--on
+    /// '*'` means every fact, not the runner's or the pane's noise.
     pub fn wants(&self, e: &Event) -> bool {
         e.by != self.by() && self.on.iter().any(|g| matches(g, &e.kind))
     }
 }
 
-/// Does the glob `g` of an `--on` select events named `kind`?
+/// Does the glob `g` of an `--on` select events named `kind`? A passive kind only by its exact
+/// name, with one exception: the pane's view events (`<board>.shown|hidden|detail`) are also
+/// selected by a glob that names their board outright (`reviews.*`), since a provider that asks
+/// for everything about its board means them too. `*.open` and `*` name no board and do not.
 pub fn matches(g: &str, kind: &str) -> bool {
-    crate::util::glob_match(g, kind) && (!kind.starts_with("handler.") || g.starts_with("handler.")) && (!crate::store::is_passive(kind) || g == kind)
+    let names_the_board = || g.split_once('.').map(|(b, _)| !b.contains('*') && !b.is_empty()).unwrap_or(false);
+    crate::util::glob_match(g, kind)
+        && (!kind.starts_with("handler.") || g.starts_with("handler."))
+        && (!crate::store::is_passive(kind) || g == kind || (crate::store::is_view(kind) && names_the_board()))
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -833,6 +840,12 @@ mod tests {
         assert!(!all.wants(&ev("handler.failed", "handler:h")) && !all.wants(&ev("seen", "you")) && !all.wants(&ev("fold", "you")));
         assert!(handler("f", &["handler.*"], "true").wants(&ev("handler.failed", "handler:h")));
         assert!(handler("s", &["seen"], "true").wants(&ev("seen", "you")));
+        // the pane's view events: by exact name, or by a glob that names their board
+        for view in ["reviews.shown", "reviews.hidden", "reviews.detail"] {
+            assert!(matches("reviews.*", view) && matches(view, view) && matches("reviews.d*", view) == (view == "reviews.detail"), "{view}");
+            assert!(!matches("*", view) && !matches("*.detail", view) && !matches("*.*", view) && !matches("rev*.detail", view) && !matches("ci.*", view), "{view}");
+        }
+        assert!(matches("*.open", "reviews.open") && !matches("reviews.*", "handler.failed") && !matches("seen.*", "seen"));
     }
 
     /// The contract, start to finish: the handler gets exactly the matching events since its

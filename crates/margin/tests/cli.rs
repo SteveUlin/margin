@@ -60,6 +60,28 @@ fn margin(decoy: &Path, argv: &[String], stdin: &str) -> (bool, String) {
     (status.success(), format!("{}{}", out.join().unwrap(), err.join().unwrap()))
 }
 
+/// Stops whatever daemon a test's store still has when the test ends, passing or not: a test
+/// that panics before its own cleanup must not leave a `margin daemon` behind.
+struct Daemons(PathBuf);
+
+impl Drop for Daemons {
+    fn drop(&mut self) {
+        for project in std::fs::read_dir(&self.0).into_iter().flatten().flatten() {
+            let pid = std::fs::read_to_string(project.path().join("daemon.pid")).ok().and_then(|s| s.trim().parse::<i32>().ok());
+            // a daemon holds daemon.lock for as long as it lives: only a live one is signalled
+            let held = std::fs::File::open(project.path().join("daemon.lock")).map(|f| f.try_lock().is_err()).unwrap_or(false);
+            if let (Some(pid), true) = (pid.filter(|p| *p > 1), held) {
+                unsafe { libc_kill(pid, 15) };
+                let t = Instant::now();
+                while unsafe { libc_kill(pid, 0) } == 0 && t.elapsed() < Duration::from_secs(3) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                unsafe { libc_kill(pid, 9) };
+            }
+        }
+    }
+}
+
 fn s(v: &[&str]) -> Vec<String> {
     v.iter().map(|x| x.to_string()).collect()
 }
@@ -82,6 +104,7 @@ const DOC: &str = r#"{"title":"walk","actions":[{"key":"p","name":"poke"}],"bloc
 fn every_command_honors_home_and_project_on_either_side() {
     let decoy = temp("decoy");
     let home = temp("home");
+    let _daemons = Daemons(home.clone());
     let hook_in = format!(r#"{{"cwd":"{}","session_id":"walk"}}"#, decoy.display());
     let claude_dir = decoy.join("claude").display().to_string();
     let walk: Vec<(&str, Vec<String>, &str, bool)> = vec![
@@ -191,6 +214,7 @@ fn every_command_honors_home_and_project_on_either_side() {
 fn a_closed_stdout_ends_the_command_quietly() {
     let decoy = temp("pipe-decoy");
     let home = temp("pipe-home");
+    let _daemons = Daemons(home.clone());
     let globals = s(&["--home", &home.display().to_string(), "--project", "p"]);
     // one artifact through the CLI, then enough copies of it that the listing is past a pipe's 64 KB
     let mut argv = globals.clone();
@@ -240,6 +264,7 @@ fn artifacts(home: &Path) -> Vec<String> {
 fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
     let decoy = temp("new-decoy");
     let home = temp("new-home");
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| at(&decoy, &home, argv, stdin);
     // nothing exists yet: no near name to suggest
     let (ok, out) = run(&["add", "plan", "-", "todo", "t1", "one"], "");
@@ -301,6 +326,7 @@ fn only_new_creates_and_every_write_refuses_a_missing_artifact() {
 fn new_without_a_document_never_waits_on_stdin() {
     let decoy = temp("newstdin-decoy");
     let home = temp("newstdin-home");
+    let _daemons = Daemons(home.clone());
     let new = |name: &str, stdin: Stdio| {
         let mut c = bare(&decoy, &home, &["new", name]);
         c.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -353,6 +379,7 @@ fn new_without_a_document_never_waits_on_stdin() {
 fn the_examples_run_end_to_end_through_new() {
     let decoy = temp("ex-decoy");
     let home = temp("ex-home");
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| at(&decoy, &home, argv, stdin);
     let (ok, list) = run(&["example"], "");
     assert!(ok && list.contains("margin example reviews | margin new reviews"), "{list}");
@@ -421,6 +448,7 @@ fn the_examples_run_end_to_end_through_new() {
 fn the_skills_worked_example_runs_end_to_end() {
     let decoy = temp("skill-decoy");
     let home = temp("skill-home");
+    let _daemons = Daemons(home.clone());
     let (ok, skill) = at(&decoy, &home, &["skill"], "");
     assert!(ok);
     let block = skill.split("```fish\n").nth(1).expect("the turn loop's block").split("```").next().unwrap().to_string();
@@ -505,6 +533,7 @@ fn json_lines(out: &str) -> Vec<serde_json::Value> {
 #[test]
 fn emit_appends_a_named_event_and_prints_its_seq() {
     let (decoy, home) = (temp("emit-decoy"), temp("emit-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
     assert!(run(&["new", "ci"], "").0);
     let (ok, out, _) = run(&["emit", "deploy.finished", r#"{"sha":"abc","ok":true}"#], "");
@@ -518,7 +547,7 @@ fn emit_appends_a_named_event_and_prints_its_seq() {
         (vec!["emit", "x", "-"], "{", "stdin is not one JSON value"),
         (vec!["emit", "two words"], "", "bad event name"),
         (vec!["emit", "x", "1", "--board", "nope"], "", "no board \"nope\""),
-        (vec!["emit", "job.failed"], "", "the runner's own"),
+        (vec!["emit", "handler.failed"], "", "the runner's own"),
         (vec!["emit"], "", "missing <name>"),
     ] {
         let (ok, out, err) = run(&argv, stdin);
@@ -545,6 +574,7 @@ fn emit_appends_a_named_event_and_prints_its_seq() {
 #[test]
 fn concurrent_emits_from_two_processes_get_consecutive_seqs() {
     let (decoy, home) = (temp("race-decoy"), temp("race-home"));
+    let _daemons = Daemons(home.clone());
     let mut seqs = Vec::new();
     for _ in 0..10 {
         let kids: Vec<_> = (0..2).map(|i| bare(&decoy, &home, &["emit", "race", &i.to_string()]).spawn().unwrap()).collect();
@@ -565,6 +595,7 @@ fn concurrent_emits_from_two_processes_get_consecutive_seqs() {
 #[test]
 fn events_reads_by_name_and_through_a_named_cursor() {
     let (decoy, home) = (temp("cursor-decoy"), temp("cursor-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str]| plain(&decoy, &home, argv, "");
     let kinds = |out: &str| json_lines(out).iter().map(|e| format!("{}:{}", e["seq"], e["kind"].as_str().unwrap())).collect::<Vec<_>>();
     for n in ["a.one", "b.one", "a.two"] {
@@ -620,6 +651,7 @@ fn events_reads_by_name_and_through_a_named_cursor() {
 fn events_follow_sees_an_event_emitted_after_it_started() {
     use std::io::{BufRead, BufReader};
     let (decoy, home) = (temp("follow-decoy"), temp("follow-home"));
+    let _daemons = Daemons(home.clone());
     assert!(plain(&decoy, &home, &["emit", "before"], "").0);
     let mut ch = bare(&decoy, &home, &["events", "--follow", "--cursor", "f", "--name", "late.*", "--json"]).spawn().unwrap();
     // it is following once its cursor exists (created at the end: seq 1)
@@ -680,6 +712,7 @@ extern "C" {
 #[test]
 fn act_and_select_exit_nonzero_when_they_refuse() {
     let (decoy, home) = (temp("act-decoy"), temp("act-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
     let doc = r#"{"title":"Reviews","blocks":[{"type":"table","id":"pr","columns":[{"key":"title"}],"children":[
       {"type":"tr","id":"pr-1","target":"https://example.com/1","cells":{"title":"One"}}]},{"type":"todo","id":"t1","text":"a step"}]}"#;
@@ -729,6 +762,7 @@ fn wait_for(what: &str, secs: u64, f: impl Fn() -> bool) {
 #[test]
 fn queries_are_json_and_not_found_is_exit_3() {
     let (decoy, home) = (temp("query-decoy"), temp("query-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
     let json = |out: &str| -> serde_json::Value { serde_json::from_str(out).unwrap_or_else(|e| panic!("{e}: {out}")) };
     assert_eq!(run(&["new", "plan"], DOC).0, 0);
@@ -779,6 +813,7 @@ fn queries_are_json_and_not_found_is_exit_3() {
 #[test]
 fn a_dataset_feeds_a_board_without_touching_its_revision() {
     let (decoy, home) = (temp("data-decoy"), temp("data-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
     let json = |out: &str| -> serde_json::Value { serde_json::from_str(out).unwrap_or_else(|e| panic!("{e}: {out}")) };
     // create and change are separate; a write to an unregistered name is exit 3 with the fix
@@ -865,6 +900,7 @@ fn a_dataset_feeds_a_board_without_touching_its_revision() {
 #[test]
 fn an_outside_owner_registers_writes_and_goes_stale() {
     let (decoy, home) = (temp("owner-decoy"), temp("owner-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
     assert_eq!(run(&["new", "runs"], r#"{"title":"Runs","actions":[{"key":"X","name":"cancel"}],"blocks":[{"type":"section","id":"run","title":"Running"},{"type":"text","id":"note","text":"mine"}]}"#).0, 0);
     let (code, out, _) = run(&["owner", "add", "queue", "--board", "runs", "--owns", "run"], "");
@@ -923,6 +959,7 @@ fn an_outside_owner_registers_writes_and_goes_stale() {
 #[test]
 fn handlers_register_change_and_dry_run() {
     let (decoy, home) = (temp("handler-decoy"), temp("handler-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
     assert_eq!(run(&["new", "board"], "").0, 0);
     let script = decoy.join("h.sh");
@@ -994,6 +1031,7 @@ fn handlers_register_change_and_dry_run() {
 #[test]
 fn daemon_install_writes_a_unit_and_status_says_how_it_comes_back() {
     let (decoy, home) = (temp("unit-decoy"), temp("unit-home"));
+    let _daemons = Daemons(home.clone());
     let units = decoy.join("units");
     let run = |argv: &[&str]| coded(&decoy, &home, argv, "");
     let (code, out, _) = run(&["daemon", "status", "--unit-dir", &units.display().to_string()]);
@@ -1032,6 +1070,7 @@ fn a_row_is_opened_by_the_registered_handler_through_the_daemon() {
         return;
     }
     let (decoy, home) = (temp("proof-decoy"), temp("proof-home"));
+    let _daemons = Daemons(home.clone());
     let opened = decoy.join("opened.txt");
     // every command carries MARGIN_DRY_OPEN: whichever of them starts the daemon hands it on,
     // and `margin handle open` then records the URL instead of starting a browser
@@ -1136,6 +1175,7 @@ fn a_row_is_opened_by_the_registered_handler_through_the_daemon() {
 #[test]
 fn a_session_end_cleans_up_and_the_next_session_finds_the_board() {
     let (decoy, home, rt) = (temp("end-decoy"), temp("end-home"), temp("end-runtime"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| {
         let mut ch = bare(&decoy, &home, argv).env("XDG_RUNTIME_DIR", &rt).spawn().unwrap();
         ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
@@ -1205,6 +1245,7 @@ fn the_runs_example_is_an_outside_tool_that_runs_submissions_one_at_a_time() {
         return;
     }
     let (decoy, home) = (temp("runs-decoy"), temp("runs-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| coded(&decoy, &home, argv, stdin);
     let ok = |argv: &[&str], stdin: &str| {
         let (code, out, err) = run(argv, stdin);
@@ -1335,6 +1376,7 @@ fn the_runs_example_is_an_outside_tool_that_runs_submissions_one_at_a_time() {
 #[test]
 fn no_feed_command_and_no_help_that_mentions_one() {
     let (decoy, home) = (temp("nofeed-decoy"), temp("nofeed-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str]| plain(&decoy, &home, argv, "");
     for argv in [vec!["feed", "ls"], vec!["feed", "add", "f", "--every", "10s", "--", "true"], vec!["feed", "--help"]] {
         let (ok, out, err) = run(&argv);
@@ -1401,6 +1443,7 @@ fn the_shipped_providers_run_as_handlers_for_a_refresh_event() {
         return;
     }
     let (decoy, home) = (temp("prov-decoy"), temp("prov-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
     let providers = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../providers").canonicalize().unwrap();
     let t = transcript(&decoy).display().to_string();
@@ -1443,6 +1486,7 @@ fn the_shipped_agents_provider_writes_as_an_outside_owner() {
         return;
     }
     let (decoy, home) = (temp("agents-decoy"), temp("agents-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
     transcript(&decoy);
     assert!(run(&["new", "agents"], "").0);
@@ -1475,6 +1519,7 @@ fn the_shipped_agents_provider_writes_as_an_outside_owner() {
 #[test]
 fn a_store_with_an_old_feeds_json_loads_quietly_and_doctor_migrates_it() {
     let (decoy, home) = (temp("oldfeeds-decoy"), temp("oldfeeds-home"));
+    let _daemons = Daemons(home.clone());
     let run = |argv: &[&str], stdin: &str| plain(&decoy, &home, argv, stdin);
     assert!(run(&["new", "showcase"], r#"{"title":"S","blocks":[{"type":"section","id":"jj","title":"jj","children":[{"type":"row","id":"jj-1","text":"a change"}]}]}"#).0);
     let dir = home.join("p");
@@ -1509,6 +1554,25 @@ fn a_store_with_an_old_feeds_json_loads_quietly_and_doctor_migrates_it() {
     // the health line goes with the command the doctor printed
     let (ok, out, err) = run(&["rm", "showcase", "jj-feed"], "");
     assert!(ok, "{out}{err}");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+/// The guard the tests above hold: a store whose daemon is still up when a test ends (a test
+/// that failed before its own cleanup) has it stopped, so a test run leaves no process.
+#[test]
+fn the_test_guard_stops_a_daemon_left_running() {
+    let (decoy, home) = (temp("guard-decoy"), temp("guard-home"));
+    let pid = {
+        let _daemons = Daemons(home.clone());
+        let (ok, out, err) = plain(&decoy, &home, &["handler", "add", "h", "--on", "x", "--", "true"], "");
+        assert!(ok && out.contains("daemon started"), "{out}{err}");
+        wait_for("the daemon's pid file", 10, || home.join("p/daemon.pid").exists());
+        std::fs::read_to_string(home.join("p/daemon.pid")).unwrap().trim().parse::<i32>().unwrap()
+    };
+    wait_for("the daemon to be gone once the guard dropped", 5, || unsafe { libc_kill(pid, 0) } != 0);
+    let (_, status, _) = plain(&decoy, &home, &["daemon", "status", "--unit-dir", &decoy.join("units").display().to_string()], "");
+    assert!(status.contains("daemon: not running"), "{status}");
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&decoy);
 }

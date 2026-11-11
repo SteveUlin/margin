@@ -233,10 +233,10 @@ mod tests {
             let g = groups(e, e.out);
             assert!(!g.is_empty(), "{}: the script prints nothing", e.name);
             st.create(Doc::empty("empty")).unwrap();
-            let (rev, errs) = st.feed_write("empty", &g, &w, &[]);
+            let (rev, errs) = st.handler_commit("empty", &g, &w, &[], None);
             assert!(rev.is_some() && errs.is_empty(), "{} into an empty board: {errs:?}", e.name);
             st.put(doc(e), None).unwrap();
-            let (rev, errs) = st.feed_write(e.name, &g, &w, &[]);
+            let (rev, errs) = st.handler_commit(e.name, &g, &w, &[], None);
             assert!(errs.is_empty(), "{}: {errs:?}", e.name);
             assert_eq!(rev, None, "{}.json and {}.fetch.out disagree: regenerate the board from the script's output", e.name, e.name);
             let _ = std::fs::remove_dir_all(&st.home);
