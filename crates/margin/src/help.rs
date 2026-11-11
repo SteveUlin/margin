@@ -47,7 +47,7 @@ impl Ctx {
 /// The running binary's absolute path. A nix build wraps the binary in a script that puts difft
 /// on PATH (`bin/margin` execs `bin/.margin-wrapped`), so the wrapper is the one to name.
 pub fn bin_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("margin"));
+    let exe = undeleted(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("margin")));
     if exe.file_name().and_then(|n| n.to_str()) == Some(".margin-wrapped") {
         let w = exe.with_file_name("margin");
         if w.is_file() {
@@ -55,6 +55,16 @@ pub fn bin_path() -> PathBuf {
         }
     }
     exe
+}
+
+/// A running binary that was replaced on disk (a rebuild, an upgrade) reads its own path as
+/// `/path/margin (deleted)`: the file to run is the one at that path now. A daemon that outlived
+/// a rebuild could not start `margin handle open` until this was undone (2026-11-10).
+fn undeleted(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(p) if Path::new(p).is_file() => PathBuf::from(p),
+        _ => exe,
+    }
 }
 
 /// Where the example feed scripts live for a binary: a checkout (`target/<profile>/margin` →
@@ -96,6 +106,16 @@ mod tests {
 
     fn ctx(user: &str) -> Ctx {
         Ctx::new(user, Path::new("/opt/margin/bin/margin"))
+    }
+
+    /// A binary replaced under a running process names the file that is there now.
+    #[test]
+    fn a_replaced_binary_resolves_to_the_file_at_its_path() {
+        let me = std::env::current_exe().unwrap();
+        assert_eq!(undeleted(PathBuf::from(format!("{} (deleted)", me.display()))), me);
+        assert_eq!(undeleted(me.clone()), me);
+        let gone = PathBuf::from("/nonexistent/margin (deleted)");
+        assert_eq!(undeleted(gone.clone()), gone, "nothing at that path: left as it is");
     }
 
     #[test]
