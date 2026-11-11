@@ -149,6 +149,8 @@ pub const SCHEMA: &[Kind] = &[
         fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)")] },
     Kind { name: "runs", about: "a run strip: the last n outcomes as small squares, oldest left, a cross for a failure", children: false, action: "",
         fields: &[("label", Ty::Text, "text at the left: what ran"), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed")] },
+    Kind { name: "plot", about: "a plot drawn in the pane: lines, an area, bars, columns, a histogram, sparklines or heat strips", children: false, action: "",
+        fields: &[("kind", Ty::Enum(&["line", "area", "bars", "columns", "hist", "spark", "heat"]), "which plot (default line)"), ("series", Ty::Any, "list of {label, values, color?}: values are numbers, null for a gap; color is a palette name"), ("labels", Ty::List, "bars and columns: one label per value of the first series"), ("height", Ty::Num, "rows for line, area, columns and hist (default 8)"), ("threshold", Ty::Num, "a reference line at this value"), ("x", Ty::List, "line and area: the labels at the left and right ends of the x axis"), ("legend", Ty::Bool, "line: name each series under the plot")] },
 ];
 
 /// The fields of the document itself: the envelope a whole-document `margin apply` takes

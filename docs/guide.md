@@ -430,7 +430,6 @@ through). The hook keeps the socket and token in `$XDG_RUNTIME_DIR/margin/` (060
 | `user_name` | the user | your name in what margin tells Claude ("sulin picked cli") |
 | `graph_glyphs` | box | box (box-drawing, any font) or flog (Flog symbols, U+F5D0–U+F60D; the font needs them) |
 | `wake` | auto | wake an idle Claude when you finish in the pane: auto (the rewake hook, else the inbox message), hook, inbox, off |
-| `ntfy_url`, `ntfy_after`, `ntfy_token` | off, 120, — | a phone push when Claude has waited on you that long, out of view |
 | `host` | auto | zellij, plain, auto (Zellij when `$ZELLIJ_SESSION_NAME` is set) |
 | `pane` | split | default shape for `open`; or float |
 | `motion` | on | off stops every animation |
@@ -452,7 +451,7 @@ Environment: `MARGIN_DIFFT` names difftastic outright; `MARGIN_HOST`, `MARGIN_MO
 ~/.local/state/margin/<project>/
   events.jsonl (+ events.1.jsonl, events.seq)  .lock  cursors/<name>  delivered/<session>
   feeds.json  feeds/<name>.log  daemon.lock
-  <artifact>/doc.json  state.json  history.jsonl
+  <artifact>/doc.json  state.json
             view/<pane>.json
   select.log   (at the top: every selection)
 ```

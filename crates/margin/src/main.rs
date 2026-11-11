@@ -2042,7 +2042,7 @@ mod tests {
         }
         assert!(!st.exists("scratch") && st.exists("keep") && st.claims("scratch").is_empty());
         let kept: Vec<_> = std::fs::read_dir(st.dir().join(".archive")).unwrap().map(|e| e.unwrap().path()).collect();
-        assert!(kept.len() == 1 && kept[0].join("doc.json").exists() && kept[0].join("history.jsonl").exists(), "archived whole: {kept:?}");
+        assert!(kept.len() == 1 && kept[0].join("doc.json").exists(), "archived whole: {kept:?}");
         // the same name again on the same day gets its own place in the archive
         mk("scratch", &f);
         go("add", &["scratch", "-", "todo", "t1", "again"], &f).unwrap();

@@ -1400,8 +1400,9 @@ mod tests {
         std::fs::remove_dir_all(&st.home).ok();
     }
 
+    /// Re-printing the same state is not a revision, and no revision leaves a copy behind.
     #[test]
-    fn feed_history_stays_small() {
+    fn an_unchanged_feed_write_is_not_a_revision() {
         let st = temp_store();
         st.create(crate::doc::Doc::empty("plan")).unwrap();
         let w = feed("jj", "jj").writer();
@@ -1409,16 +1410,10 @@ mod tests {
             let l = format!(r#"{{"type":"text","id":"jj","text":"run {i}"}}"#);
             st.feed_write("plan", &[parse_line(&l).unwrap()], &w, &[]);
         }
-        // re-printing the same state is not a revision
         let l = r#"{"type":"text","id":"jj","text":"run 4"}"#;
         assert_eq!(st.feed_write("plan", &[parse_line(l).unwrap()], &w, &[]).0, None);
-        let d = st.load("plan").unwrap();
-        assert_eq!(d.rev, 6, "the create, then five feed writes");
-        let hist = std::fs::read_to_string(st.art("plan").join("history.jsonl")).unwrap();
-        let lines: Vec<&str> = hist.lines().collect();
-        // the created (empty) document whole, then a marker per feed write the next one replaced
-        assert_eq!(lines.len(), 5);
-        assert!(lines[1..].iter().all(|l| l.contains("\"compact\":true")), "{hist}");
+        assert_eq!(st.load("plan").unwrap().rev, 6, "the create, then five feed writes");
+        assert!(!st.art("plan").join("history.jsonl").exists());
         std::fs::remove_dir_all(&st.home).ok();
     }
 

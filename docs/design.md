@@ -29,7 +29,7 @@ The obvious first version of this idea re-renders a markdown file whenever it ch
 | pane shapes | **pinned float** (glanceable) or **tiled split** (working surface) | the only two focus-safe shapes measured; plain floats steal focus on tab return |
 | actions from the screen | **selection tokens** (`mg:…`) through Zellij's `copy_command`; keys when the pane has focus; mouse optional | selection works locally and over ssh; OSC 8 clicks don't over ssh |
 | images | **kitty graphics at the cursor** (Zellij 0.45 re-emits it); halfblocks only as a marked last resort; no sixel | measured: placeholders and shm are refused by Zellij, Ghostty has no sixel |
-| storage | `~/.local/state/margin/<project>/`, one dir per artifact, with every revision kept | survives sessions, stays out of the repo, history is free |
+| storage | `~/.local/state/margin/<project>/`, one dir per artifact | survives sessions, stays out of the repo |
 | name | keep **margin**; the toolkit is **vellum** | "notes in the margin beside the chat" is the product exactly; vellum is the surface the notes are written on |
 
 ### We own / we use
@@ -201,7 +201,7 @@ margin ls
 **Stable ids** (2026-11-06). A todo, question, claim or diff written without an id gets a slug of its text (`doc::slug`, `-2` on a clash), never a positional `t2`: decisions are keyed by id, and a positional id carried sulin's tick onto whatever landed in that position on the next `put`. One without text must carry an id.
 
 **Versions.** `doc.json`, each event and an `apply` envelope or line carry `"v": 1`; a missing `v` reads as 1 and any other value is refused.
-Every write takes the project's lock (`flock` on `<project>/.lock`), writes `doc.json.tmp`, renames it into place, bumps `rev` and appends the old revision to `history.jsonl`. Every write prints the new `rev` and any error. Why rename-into-place: the renderer must never read a half-written file.
+Every write takes the project's lock (`flock` on `<project>/.lock`), writes `doc.json.tmp`, renames it into place, and bumps `rev`. (Old revisions were appended to `history.jsonl` until 2026-11; nothing read it, so it is no longer written.) Every write prints the new `rev` and any error. Why rename-into-place: the renderer must never read a half-written file.
 
 ### Storage
 
@@ -210,7 +210,7 @@ Every write takes the project's lock (`flock` on `<project>/.lock`), writes `doc
   events.jsonl                             # append-only, all artifacts
   .lock
   plan/
-    doc.json  state.json  history.jsonl
+    doc.json  state.json
     view/<pane-id>.json                    # per pane: folds, scroll anchor, focus, seen
   pr-412/ …
 ```
@@ -341,7 +341,7 @@ Each stdout line speaks the AI's own language: one op (`{"op":"set",…}`), an a
 - sulin's decisions on a feed component are rejected: feed output is read-only;
 - two feeds on one artifact can't claim overlapping prefixes.
 
-Feed revisions carry `by: feed:<name>` in `doc.json`; `history.jsonl` keeps every Claude revision whole and only a marker line for a feed write after its own previous write, so a feed writing once a second doesn't copy the document 86 400 times a day. A job's lifecycle (start, crash, restart, stop) is state, kept in its status file and its log (`margin job ls`, `margin job logs`), not in `events.jsonl`: the log holds facts someone may react to. (Logs written before 2026-11-10 still hold passive `feed` lines; they parse and are never delivered.)
+Feed revisions carry `by: feed:<name>` in `doc.json`. A job's lifecycle (start, crash, restart, stop) is state, kept in its status file and its log (`margin job ls`, `margin job logs`), not in `events.jsonl`: the log holds facts someone may react to. (Logs written before 2026-11-10 still hold passive `feed` lines; they parse and are never delivered.)
 
 **Lifecycle.** `margin feed add` writes `feeds.json` (per project store, under the project lock) and starts `margin daemon` if none runs. The daemon (one per project, held by `flock` on `daemon.lock`) re-reads the registry every 300 ms: it starts a worker thread per unpaused feed, stops removed or paused ones, restarts changed ones, and exits when no unpaused feed is left (checked under the project lock, so an `add` racing the exit is never lost). Workers run commands in their own process group with `PR_SET_PDEATHSIG`, so a stop kills the whole pipeline and a hard-killed daemon takes its children with it. A crashed stream (any exit counts) or a failed run restarts after 1, 2, 4 … 60 s; a run that stayed up 30 s resets the backoff. stderr goes to `feeds/<name>.log` (512 KB, one rotation). Each feed keeps a **health line** (a `feed` component, `<prefix>-feed`) above its root: live, `crashed · restart in 4s` with the error under it, paused, or removed, plus a live "wrote 3s" age. `units/margin-daemon@.service` runs the daemon under systemd instead (not installed).
 

@@ -58,12 +58,6 @@ pub struct Config {
     /// overrides it and PATH. The nix build wraps difft in; a dev build outside `nix develop`
     /// needs this, PATH, or one of the usual nix profile dirs.
     pub difft: String,
-    /// Opt-in phone push when Claude has been waiting on sulin this long with the pane out of
-    /// view: an ntfy topic URL (empty = off), the delay in seconds, and an optional bearer token.
-    /// No bell, ever: the tab mark (● on the pane's tab) is the in-terminal signal.
-    pub ntfy_url: String,
-    pub ntfy_after: f32,
-    pub ntfy_token: String,
     /// Wake an idle Claude when sulin finishes in the pane (quiet 5 s, no half-answered question
     /// set, out of review mode). "auto": the `Stop` hook `margin hook rewake` does it when its
     /// watcher is alive, else the pane writes one labelled message into the session's inbox
@@ -108,9 +102,6 @@ impl Default for Config {
             status_style: "lipgloss".into(),
             host: "auto".into(),
             difft: String::new(),
-            ntfy_url: String::new(),
-            ntfy_after: 120.0,
-            ntfy_token: String::new(),
             wake: "auto".into(),
             user_name: String::new(),
             graph_glyphs: "box".into(),

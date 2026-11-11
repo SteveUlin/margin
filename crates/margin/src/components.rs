@@ -372,6 +372,90 @@ fn fl(cx: &Ctx, id: &str) -> f32 {
     cx.flash.get(id).copied().unwrap_or(0.0)
 }
 
+/// A plot, drawn by vellum's plot module straight onto the pane's ground: each series in its own
+/// color (its `color`, else the theme's series colors in order), so two lines can be told apart.
+fn draw_plot(cx: &Ctx, b: &Block, w: u16, ind: u16) -> Drawn {
+    use vellum::plot::{Bar, BarChart, ColumnChart, Heatmap, Histogram, LinePlot, Marker, PlotStyle, Series, Sparkline, XAxis};
+    let p = cx.p;
+    let g0 = p.bg0;
+    let st = PlotStyle::new(p);
+    let kind = if b.s("kind").is_empty() { "line" } else { b.s("kind") };
+    // series: label, values (null is a gap), color
+    let raw: Vec<(String, Vec<f64>, Option<Rgb>)> = b
+        .f
+        .get("series")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|s| {
+                    let vals = s["values"].as_array().map(|v| v.iter().map(|x| x.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default();
+                    (s["label"].as_str().unwrap_or("").to_string(), vals, s["color"].as_str().and_then(|c| theme::color(p, c)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let color_of = |i: usize| raw[i].2.unwrap_or_else(|| st.series_color(i));
+    let pw = w.saturating_sub(ind + 1);
+    let rows = b.num("height").map(|h| h as u16).unwrap_or(8).clamp(2, 40);
+    let labels = b.strs("labels");
+    let h = match kind {
+        "spark" | "heat" => raw.len().max(1) as u16,
+        "bars" => raw.first().map(|s| s.1.len()).unwrap_or(1).max(1) as u16,
+        _ => rows,
+    };
+    let mut g = new_grid(w, h, g0);
+    let r = Rect::new(ind, 0, pw, h);
+    let clip = g.area();
+    match kind {
+        "spark" => {
+            // label, then the strip: one row a series
+            let lw = raw.iter().map(|s| width(&s.0)).max().unwrap_or(0) as u16;
+            for (i, s) in raw.iter().enumerate() {
+                put(&mut g, ind, i as u16, &s.0, Style::fg(p.grey2).on(g0));
+                let x = ind + lw + if lw > 0 { 1 } else { 0 };
+                Sparkline::new(&s.1).color(color_of(i)).draw(&mut g, x, i as u16, pw.saturating_sub(lw + 1), &st, g0, clip);
+            }
+        }
+        "heat" => {
+            let rows: Vec<(&str, &[f64])> = raw.iter().map(|s| (s.0.as_str(), s.1.as_slice())).collect();
+            Heatmap::new(&rows).draw(&mut g, r, &st, g0, clip);
+        }
+        "bars" | "columns" => {
+            let vals = raw.first().map(|s| s.1.clone()).unwrap_or_default();
+            let names: Vec<String> = (0..vals.len()).map(|i| labels.get(i).cloned().unwrap_or_default()).collect();
+            // a bar takes the series colors in turn, so categories can be told apart
+            let bars: Vec<Bar> = vals.iter().enumerate().map(|(i, v)| Bar::new(&names[i], *v).color(raw[0].2.unwrap_or_else(|| st.series_color(i)))).collect();
+            if kind == "bars" {
+                BarChart::new(&bars).draw(&mut g, r, &st, g0, clip);
+            } else {
+                ColumnChart::new(&bars).draw(&mut g, r, &st, g0, clip);
+            }
+        }
+        "hist" => {
+            let empty = Vec::new();
+            let samples = raw.first().map(|s| &s.1).unwrap_or(&empty);
+            Histogram::new(samples).marker(Marker::Median).color(color_of_or(&raw, &st, 0)).draw(&mut g, r, &st, g0, clip);
+        }
+        _ => {
+            let series: Vec<Series> = raw.iter().enumerate().map(|(i, s)| Series::new(&s.0, &s.1).color(color_of(i))).collect();
+            let ends = b.strs("x");
+            let mut lp = LinePlot::new(&series).fill(kind == "area").legend(b.flag("legend"));
+            if ends.len() == 2 {
+                lp = lp.x(XAxis::Ends(&ends[0], &ends[1]));
+            }
+            if let Some(t) = b.num("threshold") {
+                lp = lp.threshold(t);
+            }
+            lp.draw(&mut g, r, &st, g0, clip);
+        }
+    }
+    Drawn { grid: Some(g), ..Default::default() }
+}
+
+fn color_of_or(raw: &[(String, Vec<f64>, Option<Rgb>)], st: &vellum::plot::PlotStyle, i: usize) -> Rgb {
+    raw.get(i).and_then(|s| s.2).unwrap_or_else(|| st.series_color(i))
+}
+
 /// A list item that opens with its own number: `1. text`, `12) text`, or the same inside a bold
 /// lead-in (`**1. Lead**: rest`). Returns the number as written (`1.`) and the text without it.
 pub fn numbered(text: &str) -> Option<(String, String)> {
@@ -1036,6 +1120,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
         "table" => draw_table(cx, b, w, depth),
         "tr" => draw_tr(cx, b, w),
         "runs" => draw_runs(cx, b, w, ind),
+        "plot" => draw_plot(cx, b, w, ind),
         "feed" => draw_feed(cx, b, w, ind),
         "diff" => crate::diffblock::draw(cx, b, w, ind),
         k => {

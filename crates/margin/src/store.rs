@@ -11,7 +11,7 @@
 //!   delivered/<session>   the same thing for a Claude session: the last seq its hooks handed it
 //!   feeds.json            registered feeds (feed.rs)   feeds/<name>.log|.status.json   daemon.lock|.pid
 //!   <artifact>/doc.json   content (Claude)        state.json  decisions (sulin)
-//!              history.jsonl  every old revision  view/<pane>.json  folds, focus, scroll (the pane)
+//!              view/<pane>.json  folds, focus, scroll (the pane)
 //! ```
 //!
 //! Writes go to a temp file and `rename` into place, so the renderer never reads half a file.
@@ -494,22 +494,8 @@ impl Store {
     }
 
     fn save_doc_locked(&self, d: &mut Doc, old: Option<&Doc>, by: &str) -> Result<u64, String> {
-        if let Some(o) = old {
-            // Every revision Claude wrote is kept whole. A feed rewrites often, so a feed write
-            // after its own previous write keeps only a marker line: the history then holds every
-            // Claude revision in full plus the last state each feed left, not thousands of copies.
-            let line = if by.starts_with("feed:") && o.by == by {
-                serde_json::to_string(&serde_json::json!({"rev": o.rev, "by": o.by, "at": o.updated, "compact": true})).unwrap()
-            } else {
-                serde_json::to_string(o).unwrap()
-            };
-            let mut f = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.art(&d.id).join("history.jsonl"))
-                .map_err(|e| e.to_string())?;
-            writeln!(f, "{line}").map_err(|e| e.to_string())?;
-        }
+        // no copy of the old revision is kept: nothing ever read history.jsonl, and it grew
+        // without bound (a board made before 2026-11 may still have one; `margin doctor` lists it)
         d.rev = old.map(|o| o.rev).unwrap_or(0) + 1;
         d.updated = now_rfc3339();
         d.by = by.to_string();
@@ -1249,8 +1235,7 @@ pub mod tests {
         assert_eq!(s.patch("plan", &[set.clone()], Some(1)).unwrap(), 2);
         let e = s.patch("plan", &[set], Some(1)).unwrap_err();
         assert!(e.contains("stale base"), "{e}");
-        let hist = fs::read_to_string(s.art("plan").join("history.jsonl")).unwrap();
-        assert_eq!(hist.lines().count(), 1);
+        assert!(!s.art("plan").join("history.jsonl").exists(), "old revisions are not kept");
         // a failing op in a batch leaves the doc untouched
         let bad = [Op::Set { id: "t1".into(), field: "note".into(), value: json!("y") }, Op::Rm { id: "zz".into() }];
         assert!(s.patch("plan", &bad, None).is_err());
