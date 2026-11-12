@@ -419,6 +419,16 @@ pub struct Scene {
     detail_max: usize,
 }
 
+/// Is a pane hint's key (`d`, `zM/zR`, `]c/[c`) taken by an action of the focused block? Any
+/// of its alternatives that starts with an action's key no longer reaches the pane there.
+/// Keys written as words (`space`, `esc`) and ranges (`1-9`) are not characters an action takes.
+fn shadowed(key: &str, taken: &[char]) -> bool {
+    if taken.is_empty() || matches!(key, "space" | "esc" | "1-9" | "/") {
+        return false;
+    }
+    key.split('/').filter_map(|k| k.chars().next()).any(|c| taken.contains(&c))
+}
+
 impl Scene {
     pub fn new(cfg: &Config) -> Scene {
         let _ = cfg;
@@ -1692,11 +1702,15 @@ impl Scene {
                 }
                 keys.push(("?", "more"));
             }
-            // the focused block's own actions lead the row, each a button: `r retry`
+            // the focused block's own actions lead the row, each a button: `r retry`. A key of
+            // the pane's that one of them takes is the action's here: the pane's hint goes
             let clip = Rect::new(2, help_y, w.saturating_sub(3), 1);
             let fid = self.focus.clone().unwrap_or_default();
             let mut x = 2u16;
-            for a in inp.doc.actions_for(self.focus.as_deref()) {
+            let acts = inp.doc.actions_for(self.focus.as_deref());
+            let taken: Vec<char> = acts.iter().map(|a| a.key).collect();
+            keys.retain(|(k, _)| !shadowed(k, &taken));
+            for a in acts {
                 let x0 = x;
                 x = g.put_clipped(x, help_y, &a.key.to_string(), Style::fg(p.aqua).on(p.bg0).bold(), clip);
                 x = g.put_clipped(x + 1, help_y, &a.label, Style::fg(p.grey2).on(p.bg0), clip);

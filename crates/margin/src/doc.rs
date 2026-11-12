@@ -346,8 +346,8 @@ pub struct Action {
 }
 
 /// An `actions` value, checked: a list of `{key, name, label?}` where each key is one character
-/// the pane does not bind itself (`reserved`: app.rs derives it from its own key table, so the
-/// two cannot drift), no key or name is used twice in the list, and `name` is an id. `what`
+/// outside the few the pane keeps for good (`reserved`: app.rs `reserved_keys`; any other key
+/// the pane binds is the action's on its block), no key or name is used twice in the list, and `name` is an id. `what`
 /// names the block in the error.
 pub fn parse_actions(v: &Value, what: &str, reserved: &[char]) -> Result<Vec<Action>, String> {
     if v.is_null() {
@@ -368,9 +368,7 @@ pub fn parse_actions(v: &Value, what: &str, reserved: &[char]) -> Result<Vec<Act
             _ => return Err(format!("{what}: action {name:?} needs a key of one character, got {key:?}")),
         };
         if reserved.contains(&k) {
-            let mut r: Vec<String> = reserved.iter().map(|c| c.to_string()).collect();
-            r.sort();
-            return Err(format!("{what}: action {name:?} can't use the key {k:?}: the pane uses it (taken: {})", r.join(" ")));
+            return Err(format!("{what}: action {name:?} can't use the key {k:?}: the pane keeps {}; any other key is free", crate::app::RESERVED_TEXT));
         }
         if let Some(d) = out.iter().find(|x| x.key == k) {
             return Err(format!("{what}: actions {:?} and {name:?} share the key {k:?}", d.name));

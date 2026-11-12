@@ -171,8 +171,10 @@ margin view reviews services tracker          # the renderer itself, for a plain
   lists it. A click on either does the same. `margin act <board> <id> retry` is the key from a script.
 - The handler registered `--on <board>.retry` does the work (`margin help handlers`, "Make a row
   do something"). With none, the row says `nothing handles <board>.retry`.
-- `key` is one character the pane does not use itself (a write that takes one is refused and
-  lists them); `label` defaults to `name`. A row's own action wins over its table's, and the
+- `key` is one character. It may be a key the pane binds (`o`, `r`, `d`, `x`, `c` …): where
+  the action is declared it wins and the hint row shows its label; on other blocks the pane's
+  meaning holds. Only `j k g G q ? /` and the digits are refused at write. `label` defaults to
+  `name`. A row's own action wins over its table's, and the
   table's over the document's. Document-level actions go in the envelope: `"actions": [{"key":
   "u", "name": "refresh"}]` beside `title`.
 - `open` is never declared: every block with a `target` has it, on enter.

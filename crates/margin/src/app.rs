@@ -259,18 +259,20 @@ fn keys() -> vellum::keymap::Keymap<Act> {
     vellum::keymap::Keymap::new(&bindings())
 }
 
-/// The characters a board's own actions may not use as their key: every character one of the
-/// pane's bindings starts with (so `g`, `z`, `]` too: they begin a sequence), the digits (a
-/// count), and review mode's reaction keys. Derived from the binding table, so a key added
-/// there is refused in `actions` from then on (doc.rs `parse_actions` checks it at write time).
+/// The characters a board's own actions can never use as their key (doc.rs `parse_actions`
+/// refuses them at write time): moving the focus (`j`, `k`, `g` and `G`; `g` also begins `gg`
+/// and the tab keys `gt` / `gT`), `q`, `?`, `/`, and the digits (a count, a question's pick).
+/// Esc, Enter, Tab, Space and the arrows are not characters an action can name at all. Every
+/// other key the pane binds is the board's to take: where an action declares it, the action
+/// wins (`Live::try_action` runs before the binding table); elsewhere the pane's meaning holds.
 pub fn reserved_keys() -> Vec<char> {
-    let mut v: Vec<char> = bindings().iter().filter(|(k, _)| !k.starts_with('<')).filter_map(|(k, _)| k.chars().next()).collect();
+    let mut v = vec!['j', 'k', 'g', 'G', 'q', '?', '/'];
     v.extend('0'..='9');
-    v.extend(['+', '-', '=', '!']);
-    v.sort();
-    v.dedup();
     v
 }
+
+/// The reserved keys as an error names them.
+pub const RESERVED_TEXT: &str = "j k g G q ? / and the digits";
 
 fn bindings() -> Vec<(&'static str, Act)> {
     use Act::*;
@@ -591,6 +593,20 @@ impl Live {
         }
     }
 
+    /// A key press as an action of the focused block, checked before the pane's binding table:
+    /// an action that declares a key the pane binds too (`o`, `d`, `x` …) wins where it is
+    /// declared. Not while a key sequence is under way (`z` then `c` is the pane's `zc` even on a
+    /// block with an action on `c`); a count typed before the key is dropped.
+    fn try_action(&mut self, k: Key, ctrl: bool, now: f64) -> bool {
+        let Key::Char(c) = k else { return false };
+        if ctrl || !self.keys.pending().chars().all(|p| p.is_ascii_digit()) || !self.action_key(c, now) {
+            return false;
+        }
+        self.keys.reset();
+        self.scene.pending_keys = self.keys.pending();
+        true
+    }
+
     /// What each fired action's row says now (scene.sent), from the handler registry, the
     /// cursors, and (for a late event) the daemon's lock and the handlers' status files. The
     /// note stays until the row is updated:
@@ -793,12 +809,10 @@ impl Live {
             }
             return;
         }
-        // a key one of the focused block's actions declares (never one of the pane's own: those
-        // are refused when the board is written)
-        if let (Key::Char(c), false, true) = (k, ctrl, self.keys.pending().is_empty()) {
-            if self.action_key(c, now) {
-                return;
-            }
+        // a key one of the focused block's actions declares: before the pane's own bindings, so
+        // an action that takes a key the pane binds wins on its block
+        if self.try_action(k, ctrl, now) {
+            return;
         }
         // a count typed before this key: `3gt` is the third tab, `gt` the next one
         let counted = self.keys.pending().starts_with(|c: char| c.is_ascii_digit());
@@ -2707,25 +2721,24 @@ mod action_tests {
         std::fs::remove_dir_all(&st.home).ok();
     }
 
-    /// The keys an action may not take are the pane's own, read from its binding table; a
-    /// write that declares one is refused, as is a repeated key or name and a second `open`.
+    /// The keys an action can never take are the few that move the focus, quit, search, ask for
+    /// help and count; a write that declares one is refused and lists only those, as is a
+    /// repeated key or name and a second `open`. Any other key the pane binds is allowed.
     #[test]
     fn a_reserved_or_repeated_action_key_is_refused_at_write() {
         let reserved = reserved_keys();
-        for c in ['j', 'k', 'd', 'g', 'z', ']', '/', '?', 'q', 'o', 'x', 'r', 'a', '3', '+'] {
-            assert!(reserved.contains(&c), "{c} is the pane's");
+        for c in ['j', 'k', 'g', 'G', '/', '?', 'q', '0', '3', '9'] {
+            assert!(reserved.contains(&c), "{c} is the pane's for good");
         }
-        for (k, _) in bindings() {
-            if !k.starts_with('<') {
-                assert!(reserved.contains(&k.chars().next().unwrap()), "{k} is bound and not reserved");
-            }
+        for c in ['o', 'r', 'd', 'x', 'c', 'a', 'm', 'n', 'S', 'z', ']', 'h', 'l', 'i', 'J', 'u', 'R', 'e', '+'] {
+            assert!(!reserved.contains(&c), "{c} is a board's to take");
         }
-        assert!(!reserved.contains(&'u') && !reserved.contains(&'R') && !reserved.contains(&'e'));
         let st = crate::store::tests::temp_store();
         st.create(crate::doc::Doc::empty("b")).unwrap();
         let add = |actions: serde_json::Value| st.patch("b", &[Op::Replace { block: serde_json::from_value(json!({"type": "row", "id": "r1", "text": "t", "actions": actions})).unwrap(), parent: None }], None);
         let e = add(json!([{"key": "j", "name": "jump"}])).unwrap_err();
-        assert!(e.contains("r1: action \"jump\" can't use the key 'j': the pane uses it"), "{e}");
+        assert!(e.ends_with("r1: action \"jump\" can't use the key 'j': the pane keeps j k g G q ? / and the digits; any other key is free"), "{e}");
+        add(json!([{"key": "d", "name": "drop"}, {"key": "o", "name": "own"}, {"key": "x", "name": "cut"}])).unwrap();
         assert!(add(json!([{"key": "e", "name": "a"}, {"key": "e", "name": "b"}])).unwrap_err().contains("share the key 'e'"));
         assert!(add(json!([{"key": "e", "name": "a"}, {"key": "f", "name": "a"}])).unwrap_err().contains("two actions are named \"a\""));
         assert!(add(json!([{"key": "ee", "name": "a"}])).unwrap_err().contains("a key of one character"));
@@ -2733,7 +2746,7 @@ mod action_tests {
         assert!(add(json!([{"key": "e", "name": "open"}])).unwrap_err().contains("open is the action every block with a target has"));
         assert!(add(json!([{"key": "e", "name": "a", "lable": "x"}])).unwrap_err().contains("did you mean label?"));
         assert!(add(json!("e")).unwrap_err().contains("must be a list"));
-        assert_eq!(st.load("b").unwrap().rev, 1, "nothing was written");
+        assert_eq!(st.load("b").unwrap().rev, 2, "nothing more was written");
         add(json!([{"key": "e", "name": "edit"}, {"key": "R", "name": "rerun", "label": "run again"}])).unwrap();
         let acts = st.load("b").unwrap().actions_for(Some("r1"));
         assert_eq!(acts.iter().map(|a| (a.key, a.name.as_str(), a.label.as_str())).collect::<Vec<_>>(), [('e', "edit", "edit"), ('R', "rerun", "run again")]);
@@ -2810,6 +2823,41 @@ mod action_tests {
         assert!(warn && text.starts_with("→ sent · ci failed, retrying"));
         let (text, warn) = late_note(false, &[("ci".into(), s("live", "2026-11-11T10:00:00Z"))]);
         assert!(warn && text.contains("nothing has picked this up · margin daemon status"));
+    }
+
+    /// An action may take a key the pane binds: on the block that declares it the action fires
+    /// and the hint row shows the board's label, not the pane's; on another block the key is
+    /// the pane's as before. A sequence under way stays the pane's.
+    #[test]
+    fn an_action_on_a_pane_key_wins_on_its_block_only() {
+        let (st, mut pn) = board();
+        let w = crate::store::Writer::Named { by: "handler:ci".into(), owns: "job".into() };
+        let set = |field: &str, value: serde_json::Value| Op::Set { id: "job-2".into(), field: field.into(), value };
+        st.handler_commit("ci", &[vec![set("actions", json!([{"key": "d", "name": "drop", "label": "drop the job"}, {"key": "c", "name": "cancel"}])), set("detail", json!("more"))]], &w, &[], None);
+        pn.reload(1.0);
+        let lv = pn.lv();
+        let n = |st: &Store| st.events().into_iter().filter(|e| e.kind == "ci.drop").count();
+        lv.scene.focus = Some("job-2".into());
+        assert!(lv.try_action(Key::Char('d'), false, 1.0));
+        assert_eq!(n(&st), 1);
+        let text = frame(lv, 140).0;
+        let help = text.lines().find(|l| l.contains("j/k move")).expect("the hint row");
+        assert!(help.contains("d drop the job") && !help.contains("d detail"), "{help}");
+        // the row beside it declares no d: the pane opens the detail panel there
+        lv.scene.focus = Some("job-1".into());
+        assert!(!lv.try_action(Key::Char('d'), false, 1.0));
+        assert_eq!(n(&st), 1);
+        let text = frame(lv, 140).0;
+        assert!(text.lines().any(|l| l.contains("j/k move") && l.contains("d detail")), "{text}");
+        // z then c is the pane's zc, on the row with an action on c too; a count is dropped
+        lv.scene.focus = Some("job-2".into());
+        lv.keys.feed(vellum::keymap::Press { key: Key::Char('z'), ctrl: false }, 1.0);
+        assert!(!lv.try_action(Key::Char('c'), false, 1.0));
+        lv.keys.reset();
+        lv.keys.feed(vellum::keymap::Press { key: Key::Char('3'), ctrl: false }, 1.0);
+        assert!(lv.try_action(Key::Char('c'), false, 1.0) && lv.keys.pending().is_empty());
+        assert!(!lv.try_action(Key::Char('d'), true, 1.0), "ctrl-d scrolls");
+        std::fs::remove_dir_all(&st.home).ok();
     }
 
     /// The sent mark goes when the row's content changes: whoever handled it wrote the row.

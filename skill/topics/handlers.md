@@ -100,8 +100,9 @@ key. `margin help integrate` has the cron, systemd-timer and file-watch recipes 
     "columns": [{"key": "name", "title": "Job"}], "children": []}
    ```
 
-   The key is one character the pane does not use (a write that takes `j`, `d`, `r`, `x`, a digit
-   and so on is refused, with the list). The hint row then shows `e retry the job` on those rows.
+   The key is one character. A key the pane binds (`d`, `r`, `x` …) is allowed and is the
+   action's on those rows; a write that takes `j k g G q ? /` or a digit is refused. The hint
+   row then shows `e retry the job` on those rows.
 2. Write the handler: it reads events and acts on `value`.
 
    ```sh
