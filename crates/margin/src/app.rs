@@ -114,19 +114,43 @@ pub const DETAIL_SETTLE: f64 = 0.3;
 pub const ASKED_SECS: f64 = 10.0;
 
 /// An action fired on a row, until its note on the row goes: the event it appended (or why it
-/// was refused), when, and the row's content then (a row that changes has been dealt with).
+/// was refused), when, the row's content then (a row that changes has been dealt with), and
+/// when the pane first saw the event taken.
 struct Sent {
     seq: u64,
     kind: String,
     at: f64,
     hash: u64,
     refused: Option<String>,
+    taken_at: Option<f64>,
 }
 
 /// How long a row says `sent` before the pane asks who took the event.
 const SENT_GRACE: f64 = 1.5;
-/// How long a handler that exists may leave an event unread before the row says so.
+/// How long a handler that exists may leave an event unread before the row says what it waits on.
 const SENT_LATE: f64 = 5.0;
+/// How long the note stays once the event was taken and the row has not changed: a follow-up
+/// event may still update the row.
+const SENT_AFTER: f64 = 10.0;
+/// How long a row says `nothing handles <name>` when the row does not change.
+const SENT_NOBODY: f64 = 60.0;
+
+/// The note for an event its handlers have left unread past SENT_LATE: `late` is each handler
+/// whose cursor is behind the event, with its status file. The warning is for a daemon that is
+/// not running; a running one is working on the event or has it queued, and the note says which.
+fn late_note(daemon_up: bool, late: &[(String, Option<crate::handler::Status>)]) -> (String, bool) {
+    if !daemon_up {
+        return ("→ sent · nothing has picked this up · margin daemon status".to_string(), true);
+    }
+    let state = |want: &str| late.iter().find(|(_, s)| s.as_ref().is_some_and(|s| if want == "running" { !s.run_started.is_empty() } else { s.state == want }));
+    if let Some((n, _)) = state("running") {
+        return (format!("→ sent · {n} is running"), false);
+    }
+    if let Some((n, _)) = state("retrying") {
+        return (format!("→ sent · {n} failed, retrying · margin handler ls"), true);
+    }
+    (format!("→ sent · waiting on {}", late.first().map(|(n, _)| n.as_str()).unwrap_or("its handler")), false)
+}
 
 /// What a tab hands up to the pane.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -544,10 +568,10 @@ impl Live {
         let hash = self.doc.find(id).map(|b| b.hash()).unwrap_or(0);
         let r = self.st.act(&self.art, id, action, None, crate::who::HUMAN, via);
         let s = match r {
-            Ok(e) => Sent { seq: e.seq, kind: e.kind, at: epoch_now(), hash, refused: None },
+            Ok(e) => Sent { seq: e.seq, kind: e.kind, at: epoch_now(), hash, refused: None, taken_at: None },
             Err(e) => {
                 select::log_line(&format!("action {action} on {id}: {e}"));
-                Sent { seq: 0, kind: format!("{}.{action}", self.art), at: epoch_now(), hash, refused: Some(e) }
+                Sent { seq: 0, kind: format!("{}.{action}", self.art), at: epoch_now(), hash, refused: Some(e), taken_at: None }
             }
         };
         self.sent.insert(id.to_string(), s);
@@ -567,15 +591,22 @@ impl Live {
         }
     }
 
-    /// What each fired action's row says now (scene.sent), from the handler registry and the
-    /// cursors alone:
-    /// - `→ sent` at first;
-    /// - nothing once the row's content changed, or once the event was taken: every handler
-    ///   registered for its name has moved its cursor past it, or (no handler) some other named
-    ///   cursor has, which is an outside tool following the log;
-    /// - `nothing handles <name>` when no handler is registered for the name and nothing took it;
-    /// - `nothing has picked this up` when a handler is registered and has not read it after
-    ///   SENT_LATE seconds: the daemon is not running.
+    /// What each fired action's row says now (scene.sent), from the handler registry, the
+    /// cursors, and (for a late event) the daemon's lock and the handlers' status files. The
+    /// note stays until the row is updated:
+    /// - nothing once the row's content changed: whoever handled the event wrote the row;
+    /// - `→ sent` at first, and while a registered handler has had less than SENT_LATE seconds;
+    /// - past SENT_LATE with the event unread by a handler registered for it (`late_note`):
+    ///   `→ sent · <handler> is running`, `→ sent · waiting on <handler>`, a warning when the
+    ///   handler is retrying after a failure, and `nothing has picked this up` when the daemon
+    ///   is not running. None of these times out: the note goes when the row changes;
+    /// - once the event was taken (every handler registered for its name has moved its cursor
+    ///   past it, or, with no handler, some other named cursor has: an outside tool following
+    ///   the log) and the row is as it was: `→ sent` for SENT_AFTER seconds more, in case a
+    ///   follow-up event updates the row, then nothing (an action such as opening a browser
+    ///   changes no row);
+    /// - `nothing handles <name>` when no handler is registered for the name and nothing took
+    ///   it, until the row changes or SENT_NOBODY seconds pass.
     ///
     /// True while a note is on show (the pane then comes back to look again).
     fn sent_notes(&mut self, wall: f64) -> bool {
@@ -586,6 +617,8 @@ impl Live {
         let reg = crate::handler::Registry::load(&self.st.dir());
         let mut notes = std::collections::HashMap::new();
         let (st, doc) = (&self.st, &self.doc);
+        // asked once a look, and only when some event is late
+        let mut daemon_up: Option<bool> = None;
         self.sent.retain(|id, s| {
             let age = wall - s.at;
             if let Some(why) = &s.refused {
@@ -596,22 +629,39 @@ impl Live {
                 return false;
             }
             let hs: Vec<&crate::handler::Handler> = reg.for_kind(&s.kind).into_iter().filter(|h| !h.paused).collect();
-            let taken = if hs.is_empty() { st.outside_cursor_passed(s.seq) } else { hs.iter().all(|h| st.cursor(&h.cursor()).map(|c| c >= s.seq).unwrap_or(false)) };
+            let behind: Vec<&crate::handler::Handler> = hs.iter().copied().filter(|h| !st.cursor(&h.cursor()).map(|c| c >= s.seq).unwrap_or(false)).collect();
+            let taken = if hs.is_empty() { st.outside_cursor_passed(s.seq) } else { behind.is_empty() };
             if taken {
-                return false;
+                let since = *s.taken_at.get_or_insert(wall);
+                if wall - since >= SENT_AFTER {
+                    return false;
+                }
+                notes.insert(id.clone(), ("→ sent".to_string(), false));
+                return true;
             }
+            s.taken_at = None;
             let note = match (hs.is_empty(), age) {
                 (_, a) if a < SENT_GRACE => ("→ sent".to_string(), false),
-                (true, a) if a < 12.0 => (format!("nothing handles {} · margin doctor", s.kind), true),
+                (true, a) if a < SENT_NOBODY => (format!("nothing handles {} · margin doctor", s.kind), true),
+                (true, _) => return false,
                 (false, a) if a < SENT_LATE => ("→ sent".to_string(), false),
-                (false, a) if a < 60.0 => ("nothing has picked this up · margin daemon status".to_string(), true),
-                _ => return false,
+                (false, _) => {
+                    let up = *daemon_up.get_or_insert_with(|| crate::daemon::running(st).is_some());
+                    let late: Vec<_> = behind.iter().map(|h| (h.name.clone(), crate::handler::read_status(st, &h.name))).collect();
+                    late_note(up, &late)
+                }
             };
             notes.insert(id.clone(), note);
             true
         });
         self.scene.sent = notes;
         !self.sent.is_empty()
+    }
+
+    /// How soon to look at the notes again (seconds): often while one is young, since it is
+    /// about to change; seldom once every note is waiting on a handler or the row.
+    fn sent_pace(&self, wall: f64) -> f64 {
+        if self.sent.values().any(|s| wall - s.at < SENT_LATE + 1.0 || s.taken_at.is_some()) { 0.5 } else { 2.0 }
     }
 
     /// The view event `<board>.detail`: appended once the detail panel has stayed on a block for
@@ -1713,7 +1763,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         // an owner goes stale by the clock alone: looked at on every frame, with a wake-up
         // (below) for the moment the next one would
         lv.scene.stale = crate::owner::stale_on(&lv.st, &lv.art, wall);
-        let sent_wait = lv.sent_notes(wall);
+        let sent_wait = lv.sent_notes(wall).then(|| lv.sent_pace(wall));
         let next_stale = [crate::owner::next_stale(&lv.st, &lv.art, wall), lv.data.next_stale(wall)].into_iter().flatten().min_by(|a, b| a.total_cmp(b));
         // toasts: start each one's clock when the pane is first on screen, drop the ones run out
         if !lv.toasts.is_empty() {
@@ -1860,8 +1910,8 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
             wake.at(t + (at - wall).max(0.0) + 0.05);
         }
         // a row saying `sent` is looked at again until its note goes
-        if sent_wait {
-            wake.at(t + 0.5);
+        if let Some(pace) = sent_wait {
+            wake.at(t + pace);
         }
         // the board's consumer, for every tab's sessions: a pane none of whose boards a session
         // keeps has no activity and takes none of this path
@@ -2696,11 +2746,12 @@ mod action_tests {
         std::fs::remove_dir_all(&st.home).ok();
     }
 
-    /// The row says what became of the action, from the registry and the cursors: `sent`, then
-    /// `nothing handles <name>` when no handler is registered for it; with a handler, the note
-    /// goes when its cursor passes the event, and says so when it never does.
+    /// The row says what became of the action until the row is updated: `sent`, then
+    /// `nothing handles <name>` when no handler is registered for it; with a handler, `sent`
+    /// stays while the event is unread (a warning only when the daemon is not running), and for
+    /// SENT_AFTER more once its cursor passes the event.
     #[test]
-    fn the_row_says_sent_then_who_took_it_or_that_nobody_did() {
+    fn the_row_says_sent_until_it_is_updated_or_the_event_is_long_taken() {
         let (st, mut pn) = board();
         let lv = pn.lv();
         lv.scene.focus = Some("job-1".into());
@@ -2714,28 +2765,51 @@ mod action_tests {
         let text = frame(lv, 100).0;
         assert!(text.lines().any(|l| l.contains("build") && l.contains("nothing handles ci.retry")), "on its row:
 {text}");
-        assert!(!lv.sent_notes(t0 + 30.0) && lv.scene.sent.is_empty(), "the notice goes after a while");
-        // an outside tool following the log with its own cursor took it: no notice at all
+        assert!(lv.sent_notes(t0 + 30.0), "it stays while the row is as it was");
+        assert!(!lv.sent_notes(t0 + SENT_NOBODY + 1.0) && lv.scene.sent.is_empty(), "and goes after a minute");
+        // an outside tool following the log with its own cursor took it: sent a while longer
         assert!(lv.action_key('e', 1.0));
-        let seq = st.last_seq();
+        let (seq, t0) = (st.last_seq(), epoch_now());
         st.set_cursor("mytool", seq);
-        assert!(!lv.sent_notes(epoch_now() + SENT_GRACE + 0.5) && lv.scene.sent.is_empty());
+        assert!(lv.sent_notes(t0 + SENT_GRACE + 0.5));
+        assert_eq!(lv.scene.sent["job-1"], ("→ sent".to_string(), false));
+        assert!(!lv.sent_notes(t0 + SENT_GRACE + 0.5 + SENT_AFTER) && lv.scene.sent.is_empty());
         // a handler is registered: sent until its cursor passes the event
         handler(&st, "retry", "ci.retry");
         assert!(lv.action_key('e', 1.0));
         let (seq, t0) = (st.last_seq(), epoch_now());
         assert!(lv.sent_notes(t0 + 3.0));
         assert_eq!(lv.scene.sent["job-1"].0, "→ sent", "a handler exists: it is given time");
+        // no daemon runs in a test: that is what the warning is for, and it does not time out
         assert!(lv.sent_notes(t0 + SENT_LATE + 1.0));
-        assert_eq!(lv.scene.sent["job-1"], ("nothing has picked this up · margin daemon status".to_string(), true));
+        assert_eq!(lv.scene.sent["job-1"], ("→ sent · nothing has picked this up · margin daemon status".to_string(), true));
+        assert!(lv.sent_notes(t0 + 3600.0) && lv.scene.sent["job-1"].1, "no silent drop");
+        // taken with the row as it was: the note stays SENT_AFTER from when the pane saw it taken
         st.set_cursor("handler:retry", seq);
-        assert!(!lv.sent_notes(t0 + SENT_LATE + 2.0) && lv.scene.sent.is_empty(), "its handler finished with it");
+        assert!(lv.sent_notes(t0 + 3601.0));
+        assert_eq!(lv.scene.sent["job-1"], ("→ sent".to_string(), false));
+        assert!(lv.sent_notes(t0 + 3600.5 + SENT_AFTER));
+        assert!(!lv.sent_notes(t0 + 3601.0 + SENT_AFTER) && lv.scene.sent.is_empty(), "its handler finished with it and wrote nothing");
         // a paused handler handles nothing
         crate::handler::edit_registry(&st, |r| r.set_paused("retry", true)).unwrap();
         assert!(lv.action_key('e', 1.0));
         lv.sent_notes(epoch_now() + SENT_GRACE + 0.5);
         assert!(lv.scene.sent["job-1"].0.starts_with("nothing handles ci.retry"));
         std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A late event under a running daemon is no alarm: the note names the handler and what it
+    /// is doing. Only a daemon that is not running, or a handler retrying a failure, warns.
+    #[test]
+    fn a_late_event_says_what_it_waits_on() {
+        let s = |state: &str, run: &str| Some(crate::handler::Status { state: state.into(), run_started: run.into(), ..Default::default() });
+        assert_eq!(late_note(true, &[("ci".into(), s("live", "2026-11-11T10:00:00Z"))]), ("→ sent · ci is running".to_string(), false));
+        assert_eq!(late_note(true, &[("ci".into(), s("live", ""))]), ("→ sent · waiting on ci".to_string(), false));
+        assert_eq!(late_note(true, &[("ci".into(), None), ("slow".into(), s("live", "2026-11-11T10:00:00Z"))]).0, "→ sent · slow is running");
+        let (text, warn) = late_note(true, &[("ci".into(), s("retrying", ""))]);
+        assert!(warn && text.starts_with("→ sent · ci failed, retrying"));
+        let (text, warn) = late_note(false, &[("ci".into(), s("live", "2026-11-11T10:00:00Z"))]);
+        assert!(warn && text.contains("nothing has picked this up · margin daemon status"));
     }
 
     /// The sent mark goes when the row's content changes: whoever handled it wrote the row.

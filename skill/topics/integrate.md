@@ -184,7 +184,7 @@ margin events --follow --cursor mytool --name 'reviews.*' --json --no-commit --p
 - `--follow` ends with exit 0 on ctrl-c or a closed stdout. The log rotates at a few MB and keeps
   two older generations; `seq` goes on counting, so a cursor stays valid across a rotation.
 - An action {{user}} takes on a row (`<board>.<name>`) arrives here like any event; the row then
-  shows `→ sent` until its content changes or a cursor moves past the event.
+  shows `→ sent` until its content changes, or for about 10 s after a cursor moves past the event.
 
 Block until one question is answered (what `margin wait` did):
 

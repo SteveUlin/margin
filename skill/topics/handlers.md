@@ -127,9 +127,12 @@ key. `margin help integrate` has the cron, systemd-timer and file-watch recipes 
   `margin handle open` is the ready-made handler: it opens a URL with the configured opener, and
   applies an `mg:` target. Until a handler for `<board>.open` is registered the row says
   `nothing handles <board>.open`; `margin doctor` lists such boards with the line to run.
-- **What the row says** after the key: `→ sent`; nothing once its content changes or every
-  handler for the event has moved past it; `nothing handles <name>` when none is registered;
-  `nothing has picked this up` when one is registered and the daemon is not running.
+- **What the row says** after the key: `→ sent`, until the row is updated. It goes at once when
+  the row's content changes; about 10 s after every handler for the event has moved past it
+  with the row unchanged (an action that updates no row). While a handler has not read the
+  event the note stays and says why: `<handler> is running`, `waiting on <handler>`, a warning
+  when the handler is retrying a failure, and `nothing has picked this up` when the daemon is
+  not running. `nothing handles <name>` when none is registered (for a minute).
 - An action works on rows a handler or an outside owner keeps: ownership stops other
   writers from changing a row, not {{user}} from acting on it.
 - A Claude session is told about an action only on the board linked to that session, and never
