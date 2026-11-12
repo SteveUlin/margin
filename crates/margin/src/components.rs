@@ -866,10 +866,14 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
         "code" => {
             // monospace lines on a raised ground, a gutter rule, no wrap: a long line ends in …
             let lines: Vec<&str> = b.s("text").lines().collect();
-            let mut g = new_grid(w, lines.len().max(1) as u16, g0);
+            // two code blocks in a row get a blank row between them, or they read as one block
+            let siblings: &[Block] = cx.doc.parent_of(&b.id).map(|par| par.children.as_slice()).unwrap_or(cx.doc.blocks.as_slice());
+            let after_code = siblings.iter().position(|c| c.id == b.id).filter(|&i| i > 0).map(|i| siblings[i - 1].kind == "code").unwrap_or(false);
+            let top = after_code as u16;
+            let mut g = new_grid(w, lines.len().max(1) as u16 + top, g0);
             let room = w.saturating_sub(ind + 4) as usize;
             for (i, l) in lines.iter().enumerate() {
-                let y = i as u16;
+                let y = i as u16 + top;
                 g.tint(Rect::new(ind, y, w.saturating_sub(ind + 1), 1), p.bg1);
                 put(&mut g, ind, y, "▏", Style::fg(p.bg4).on(p.bg1));
                 put(&mut g, ind + 2, y, &truncate(&l.replace('\t', "    "), room), Style::fg(p.aqua).on(p.bg1));
@@ -878,7 +882,7 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             if !lang.is_empty() && !lines.is_empty() {
                 let lw = width(lang) as u16;
                 if w > ind + lw + 12 && width(lines[0]) as u16 + lw + 4 < room as u16 {
-                    put(&mut g, w.saturating_sub(lw + 2), 0, lang, Style::fg(p.grey0).on(p.bg1));
+                    put(&mut g, w.saturating_sub(lw + 2), top, lang, Style::fg(p.grey0).on(p.bg1));
                 }
             }
             Drawn { grid: Some(g), ..Default::default() }
