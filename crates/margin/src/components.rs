@@ -2247,6 +2247,34 @@ fn cell_pieces(cx: &Ctx, th: &Theme, kind: ColKind, v: Option<&serde_json::Value
     }
 }
 
+
+/// Does a column hold only numbers and quantities? Every cell that is there must be a JSON
+/// number, or text that reads as one: an optional sign or currency mark, digits (with `,` `.`
+/// `:`), then an optional short unit (`%`, `ms`, ` GB`, `h`). At least one cell must be there.
+fn quantities<'a>(cells: impl Iterator<Item = Option<&'a serde_json::Value>>) -> bool {
+    let mut any = false;
+    for c in cells {
+        let s = match c {
+            None | Some(serde_json::Value::Null) => continue,
+            Some(serde_json::Value::Number(_)) => {
+                any = true;
+                continue;
+            }
+            Some(serde_json::Value::String(s)) if s.trim().is_empty() => continue,
+            Some(serde_json::Value::String(s)) => s.trim(),
+            Some(_) => return false,
+        };
+        let body = s.trim_start_matches(['+', '-', '−', '$', '€', '£', '~', '<', '>', '#']);
+        let digits = body.chars().take_while(|c| c.is_ascii_digit() || matches!(c, ',' | '.' | ':')).count();
+        let unit = body[digits..].trim_start();
+        if !body.starts_with(|c: char| c.is_ascii_digit()) || unit.chars().count() > 3 || unit.chars().any(|c| c.is_ascii_digit() || c.is_whitespace()) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
 /// Lay a table out for a grid `w` wide: read its columns, measure every row's cells once, and
 /// let vellum place the columns.
 fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
@@ -2271,6 +2299,8 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
             Some("right") => Align::Right,
             Some("center") => Align::Center,
             _ if matches!(kind, ColKind::Num | ColKind::Age | ColKind::Runs) => Align::Right,
+            // a plain column whose every cell is a number or a quantity (12, 3.5%, 40ms, 1.2 GB)
+            _ if kind == ColKind::Text && quantities(t.children.iter().map(|r| r.f.get("cells").and_then(|cs| cs.get(&key)))) => Align::Right,
             _ => Align::Left,
         };
         let natural = t.children.iter().map(|r| cell_natural(kind, r.f.get("cells").and_then(|cs| cs.get(&key)), th)).max().unwrap_or(0);

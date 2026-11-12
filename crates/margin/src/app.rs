@@ -1158,6 +1158,12 @@ impl Live {
         if let Some(t) = button.or_else(|| token_at(grid, x, y)).as_deref().and_then(select::parse_token) {
             // a click that opens a block's target is the open action: the same event as enter
             if t.verb == "open" && t.artifact.as_deref().map(|a| a == self.art).unwrap_or(true) && self.doc.find(&t.id).is_some() {
+                // a table row is selected by its first click (its keys and detail then apply to
+                // it); a click on the selected row opens it
+                if self.doc.find(&t.id).map(|b| b.kind == "tr").unwrap_or(false) && self.scene.focus.as_deref() != Some(t.id.as_str()) {
+                    self.scene.focus = Some(t.id.clone());
+                    return;
+                }
                 self.fire(&t.id, "open", "mouse", now);
                 return;
             }
