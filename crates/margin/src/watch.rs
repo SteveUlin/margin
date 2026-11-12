@@ -295,6 +295,11 @@ impl PidFd {
     pub fn open(pid: u32) -> PidFd {
         PidFd(sys::pidfd(pid))
     }
+    /// The descriptor to poll with others (readable once the process has ended); -1 when the
+    /// kernel has none, and the caller checks `alive` on its other wakes instead.
+    pub fn fd(&self) -> i32 {
+        self.0
+    }
     /// Wait until the process has ended (maybe: the caller asks `try_wait`), one of `interrupts`
     /// is readable, or `max` has passed. Without a pid fd (an old kernel) it is a 20 ms nap.
     pub fn wait(&self, interrupts: &[i32], max: Duration) {
@@ -319,6 +324,11 @@ impl Drop for PidFd {
 /// caller does not spin through the last fraction of a millisecond.
 fn millis(d: Duration) -> i32 {
     d.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
+}
+
+/// Is process `pid` there? (`kill(pid, 0)`: a process of another user counts as there.)
+pub fn alive(pid: u32) -> bool {
+    pid > 0 && pid <= i32::MAX as u32 && (unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
 // --- the watch ---
@@ -571,6 +581,15 @@ mod tests {
     }
 
     /// A pid fd ends the wait for a child when the child ends.
+    #[test]
+    fn alive_tells_a_running_process_from_one_that_ended() {
+        let mut ch = std::process::Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+        assert!(alive(ch.id()) && alive(std::process::id()));
+        ch.kill().unwrap();
+        ch.wait().unwrap();
+        assert!(!alive(ch.id()) && !alive(0));
+    }
+
     #[test]
     fn a_pid_fd_wakes_when_the_child_ends() {
         let mut ch = std::process::Command::new("sh").args(["-c", "sleep 0.05"]).spawn().unwrap();

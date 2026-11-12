@@ -167,6 +167,10 @@ pub fn open(st: &Store, art: &str, o: &OpenOpts, cfg: &Config) -> Result<(String
     }
     let home = st.home.to_string_lossy().into_owned();
     args.extend(["--", &exe, "view", art, "--project", &st.project, "--home", &home]);
+    let while_pid = o.while_pid.map(|p| p.to_string());
+    if let Some(p) = &while_pid {
+        args.extend(["--while-pid", p]);
+    }
     let out = action_as(&sess, stack_on, &args)?;
     let handle = out.trim().to_string();
     if handle.is_empty() {

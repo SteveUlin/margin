@@ -193,11 +193,11 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "link", help: "margin claude link [<board>] [--session S]\n  the board this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin claude unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "unlink", help: "margin claude unlink [--session S]\n  drop this session's link\n", flags: &["--session"], max_pos: Some(0) },
     Cmd { name: "unread", help: "margin claude unread [--session S] [--json]\n  sulin's decisions in the pane that a Claude session has not been handed yet, one line each\n  (--json: one event per line, as margin events --json prints them). The hooks hand them over\n  at the next prompt or tool call and move the session's cursor; this reads without moving it\n  --session S  that session's (default: the one this runs in)\n", flags: &["--session", "--json"], max_pos: Some(0) },
-    Cmd { name: "open", help: "margin open <board> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the board in a pane beside the tab this is run from (Zellij: a split or a pinned float\n  there; focus stays where it was)\n  --tabs B,C: with those boards as tabs beside it (added to the pane if it is already open);\n  PROJECT:B is a board of another project (margin help tab)\n  --stacked: onto the tab's margin pane\n  a board already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
+    Cmd { name: "open", help: "margin open <board> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n            [--while-pid PID]\n  show the board in a pane beside the tab this is run from (Zellij: a split or a pinned float\n  there; focus stays where it was)\n  --tabs B,C: with those boards as tabs beside it (added to the pane if it is already open);\n  PROJECT:B is a board of another project (margin help tab)\n  --stacked: onto the tab's margin pane\n  a board already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n  --while-pid PID: the pane it opens closes itself when that process ends (it is passed to the\n  pane's margin view; a pane already open is left as it is)\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs", "--while-pid"], max_pos: Some(1) },
     Cmd { name: "tab", help: "margin tab <board> [--pane P] [--session S]\n  the tabs of the pane whose own board is <board>\nmargin tab <board> add|rm|show <tab-board> [--from PROJECT] [--pane P] [--session S]\n  add a board as a tab, remove one, or bring one on screen. The pane follows without a\n  restart: the set lives in its view file. --pane names the pane (zj-12, tty) when it can't be\n  found by its title. In the pane: click a tab, gt / gT, or 3gt for the third\n  --from PROJECT: <tab-board> is a board of another project in the same store (a name as\n  --project takes it); PROJECT:<tab-board> says the same. The list shows such a tab as\n  PROJECT:board, and rm / show also take its bare board name while only one tab has it.\n  The pane reads and watches that board where it is: keys and clicks on it write its\n  project's state and event log, so that project's handlers and daemon act on them. A board\n  or project that is not there shows as a tab saying so, and fills in when it appears\n    margin tab tracker add reviews --from home-me-work-api\n", flags: &["--pane", "--session", "--from"], max_pos: Some(3) },
     Cmd { name: "close", help: "margin close <board> [--session S]\n  close the panes showing it\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "panes", help: "margin panes <board> [--session S]\n  where it's showing (pane ids, or pids under the plain host)\n", flags: &["--session"], max_pos: Some(1) },
-    Cmd { name: "view", help: "margin view <board> [<board>...]\n  the live renderer (what a margin pane runs). More boards show as tabs on the title line\n  (PROJECT:board: a board of another project)\n  (click, gt / gT, 3gt); with one board the pane shows the tabs its view file remembers\n", flags: &[], max_pos: None },
+    Cmd { name: "view", help: "margin view <board> [<board>...] [--while-pid PID]\n  the live renderer (what a margin pane runs). More boards show as tabs on the title line\n  (PROJECT:board: a board of another project)\n  (click, gt / gT, 3gt); with one board the pane shows the tabs its view file remembers\n  --while-pid PID: the pane exits as q does (its view saved) when that process ends; with a PID\n  that is not running it prints one line and exits\n", flags: &["--while-pid"], max_pos: None },
     Cmd { name: "render", help: RENDER_HELP, flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus", "--section"], max_pos: None },
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n  With the config key select_command set (or $MARGIN_SELECT_COMMAND), text that is not an mg:\n  token goes to that shell command on stdin (sh -c) instead: margin then opens no link and\n  copies nothing. The command's output is discarded; a failure is written to select.log in\n  the store. A selection dragged in the pane goes the same way\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
@@ -420,6 +420,15 @@ fn author(a: &Args) -> Result<String, String> {
         Some(n) => Err(format!("bad --by {n:?}: you, or a name (letters, digits, - and _)")),
         None if a.has("--by") => Err("--by needs a value: you, or a name".into()),
         None => Ok(if claude::here() { claude::AUTHOR } else { crate::who::HUMAN }.into()),
+    }
+}
+
+/// `--while-pid PID` of `view` and `open`: the process the pane lives as long as.
+fn while_pid(a: &Args) -> Result<Option<u32>, String> {
+    match a.get("--while-pid") {
+        None if a.has("--while-pid") => Err("--while-pid needs a process id".into()),
+        None => Ok(None),
+        Some(p) => p.parse::<u32>().ok().filter(|p| *p > 0).map(Some).ok_or_else(|| format!("--while-pid {p}: not a process id")),
     }
 }
 
@@ -1239,6 +1248,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 tab_id: a.get("--tab-id").and_then(|t| t.parse().ok()),
                 session: a.get("--session").map(String::from),
                 stacked: a.has("--stacked"),
+                while_pid: while_pid(a)?,
             };
             let h = host::pick(&cfg, a.get("--session"));
             // (a tab may be another project's board: project:board)
@@ -1351,7 +1361,12 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let art = a.pos(0, "board")?.to_string();
             let more: Vec<String> = a.pos[1..].iter().map(|x| tabs::normalize(&st.project, x)).collect();
-            if app::run(st, art.clone(), more, cfg, h)? {
+            let until = while_pid(a)?;
+            if let Some(pid) = until.filter(|p| !watch::alive(*p)) {
+                println!("margin view: process {pid} (--while-pid) is not running; not starting");
+                return Ok(());
+            }
+            if app::run(st, art.clone(), more, cfg, h, until)? {
                 // the terminal is restored (app::run's Terminal dropped); become the new build.
                 // Only the pane's own artifact is named again: the tab set is in the view file by
                 // now, and naming the tabs it started with would undo a `margin tab` since

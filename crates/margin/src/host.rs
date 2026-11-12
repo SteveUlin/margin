@@ -23,6 +23,8 @@ pub struct OpenOpts {
     pub session: Option<String>,
     /// Stack onto the tab's existing margin pane (Zellij `--stacked`) instead of a new split.
     pub stacked: bool,
+    /// `--while-pid`: the pane's view command is given it, and exits when that process ends.
+    pub while_pid: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -140,7 +142,7 @@ impl Host for PlainHost {
     fn name(&self) -> &'static str {
         "plain"
     }
-    fn open(&self, st: &Store, art: &str, _o: &OpenOpts, _cfg: &Config) -> Result<Opened, String> {
+    fn open(&self, st: &Store, art: &str, o: &OpenOpts, _cfg: &Config) -> Result<Opened, String> {
         if !st.exists(art) {
             return Err(st.missing(art));
         }
@@ -152,6 +154,9 @@ impl Host for PlainHost {
         cmd += &format!(" --project {}", st.project);
         if std::env::var("MARGIN_HOME").is_ok() {
             cmd += &format!(" --home {}", st.home.display());
+        }
+        if let Some(pid) = o.while_pid {
+            cmd += &format!(" --while-pid {pid}");
         }
         Ok(Opened::Run(cmd))
     }

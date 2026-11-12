@@ -1678,7 +1678,13 @@ fn take_down(imgs: &ImgSync, lv: &Live, fitted: &std::collections::HashMap<(u32,
 
 /// `art` is the pane's own artifact; `more` the other artifacts to show as tabs beside it (none:
 /// the tabs its view file remembers).
-pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn Host>) -> Result<bool, String> {
+pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn Host>, while_pid: Option<u32>) -> Result<bool, String> {
+    // --while-pid: the pane lives as long as that process. Its pid fd wakes the loop when it
+    // ends; without one (an old kernel) the loop's other wakes ask whether it is still there
+    let until = while_pid.map(|p| (p, crate::watch::PidFd::open(p)));
+    let until_fd: Vec<i32> = until.iter().map(|(_, f)| f.fd()).filter(|fd| *fd >= 0).collect();
+    // the pid fd read as ready: the process ended (it may stay a zombie, which `alive` counts)
+    let mut until_ended = false;
     let exe = std::env::current_exe().ok();
     let exe_t0 = exe.as_deref().and_then(exe_mtime);
     let mut rebuilt: Option<(std::time::SystemTime, f64)> = None;
@@ -1983,7 +1989,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
             }
             wake.at(t + 0.5);
         }
-        if pn.tabs.iter().any(|l| l.quit) || term::terminated() {
+        if pn.tabs.iter().any(|l| l.quit) || term::terminated() || until_ended || until.as_ref().is_some_and(|(p, _)| !crate::watch::alive(*p)) {
             break;
         }
         // reload once the new binary has stopped changing for a second (the linker writes it in
@@ -2018,10 +2024,12 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         // back to sleep until the gap is up, so a burst of appends draws a bounded number of frames
         let deadline = (timeout >= 0).then(|| now() + timeout as f64 / 1000.0);
         let (bytes, resized) = loop {
-            let (bytes, resized, ready) = term.poll(&[ino.fd], timeout).map_err(|e| e.to_string())?;
+            let fds: Vec<i32> = std::iter::once(ino.fd).chain(until_fd.iter().copied()).collect();
+            let (bytes, resized, ready) = term.poll(&fds, timeout).map_err(|e| e.to_string())?;
             let t = now();
             let mut only_data = false;
-            if !ready.is_empty() {
+            until_ended |= ready.contains(&1);
+            if ready.contains(&0) {
                 let fired = ino.drain();
                 if fired.other {
                     pn.reload(t);
