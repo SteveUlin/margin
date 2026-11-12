@@ -578,6 +578,15 @@ pub enum Span {
     Code,
     /// A person's badge (`@[name]`): the text already holds glyph and name, this is its color.
     Who(Rgb),
+    /// `*text*` or `_text_`.
+    Italic,
+    /// `***text***`, or bold inside italic and the reverse.
+    BoldItalic,
+    /// `~~text~~`.
+    Strike,
+    /// The label of `[label](url)`, or a bare URL: underlined. The URL is not drawn here; the
+    /// block's `target` (or a `link` row) is what opens it.
+    Link,
 }
 
 /// The body of an inline sparkline `~[…]`: two to sixty numbers split by commas or spaces (`-` or
@@ -648,58 +657,300 @@ fn who_name(n: &str) -> bool {
     !n.is_empty() && n.trim() == n && n.chars().count() <= 48 && !n.contains(['[', '\n', '`', '*', '@'])
 }
 
-/// Inline markup for text and bullets: `**bold**`, `` `code` `` and `@[name]`, a person's badge
-/// (the glyph and color every mention of that name gets; the theme decides them). An unclosed or
-/// empty marker stays literal, so ordinary asterisks and backticks survive, and so does an `@[`
-/// glued to the word before it (`user@[::1]` is an address, not a mention).
-pub fn markup(s: &str) -> Vec<(String, Span)> {
-    let mut out = Vec::new();
-    let mut plain = String::new();
-    let mut rest = s;
-    while let Some(ch) = rest.chars().next() {
-        if rest.starts_with("@[") && !plain.chars().next_back().map(|c| c.is_alphanumeric()).unwrap_or(false) {
-            if let Some(name) = rest[2..].find(']').map(|e| &rest[2..2 + e]).filter(|n| who_name(n)) {
-                if !plain.is_empty() {
-                    out.push((std::mem::take(&mut plain), Span::Plain));
+/// One piece of parsed inline markup: its text, how it draws, and a link's URL.
+type Tok = (String, Span, Option<String>);
+
+/// A character that is neither a letter, a digit nor a space.
+fn punct(c: Option<char>) -> bool {
+    c.map(|c| !c.is_alphanumeric() && !c.is_whitespace()).unwrap_or(false)
+}
+
+fn space(c: Option<char>) -> bool {
+    c.map(|c| c.is_whitespace()).unwrap_or(true)
+}
+
+fn alnum(c: Option<char>) -> bool {
+    c.map(|c| c.is_alphanumeric()).unwrap_or(false)
+}
+
+/// May a delimiter run of `len` between `prev` and `next` open a span? CommonMark's left-flanking
+/// rule for a single `*` or `_`, and stricter than it inside a word: `snake_case`, `2*3*4` and
+/// `a * b` never open. `**`, `***` and `~~` only need a non-space after them, as `**` always did.
+fn opens(len: usize, prev: Option<char>, next: Option<char>) -> bool {
+    if space(next) {
+        return false;
+    }
+    len > 1 || ((!punct(next) || space(prev) || punct(prev)) && !alnum(prev))
+}
+
+/// The mirror of `opens` for the closing run.
+fn closes(len: usize, prev: Option<char>, next: Option<char>) -> bool {
+    if space(prev) {
+        return false;
+    }
+    len > 1 || ((!punct(prev) || space(next) || punct(next)) && !alnum(next))
+}
+
+/// Where the run of `len` `d`s that closes a span starts in `body` (the text after the opening
+/// run). Code spans are skipped, so a `**` inside backticks closes nothing; a single `*` never
+/// closes on a `**`; a longer run gives its last `len` characters (`*a **b***`).
+fn closer(body: &str, d: char, len: usize) -> Option<usize> {
+    let mut i = 0;
+    while i < body.len() {
+        let c = body[i..].chars().next()?;
+        if c == '\\' {
+            i += 1 + body[i + 1..].chars().next().map(|n| n.len_utf8()).unwrap_or(0);
+            continue;
+        }
+        if c == '`' {
+            let n = body[i..].chars().take_while(|&x| x == '`').count();
+            i += match body[i + n..].find(&"`".repeat(n)) {
+                Some(e) => n + e + n,
+                None => n,
+            };
+            continue;
+        }
+        if c != d {
+            i += c.len_utf8();
+            continue;
+        }
+        let run = body[i..].chars().take_while(|&x| x == d).count();
+        let fits = run >= len && !(len == 1 && run == 2) && (d != '_' || run == 1) && i > 0;
+        if fits && closes(len, body[..i].chars().next_back(), body[i + run..].chars().next()) {
+            return Some(i + run - len);
+        }
+        i += run;
+    }
+    None
+}
+
+/// `[label](url)` at the start of `s`: the label (it may be empty: an image without alt text),
+/// the URL and the bytes it took. The label may
+/// hold brackets in pairs and the URL parentheses in pairs; a `"title"` after the URL is dropped.
+pub(crate) fn link_at(s: &str) -> Option<(&str, &str, usize)> {
+    let mut depth = 0;
+    let mut end = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
                 }
+            }
+            '\n' => return None,
+            _ => {}
+        }
+    }
+    let end = end?;
+    let after = s[end + 1..].strip_prefix('(')?;
+    let mut depth = 1;
+    let mut close = None;
+    for (i, c) in after.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            '\n' => return None,
+            _ => {}
+        }
+    }
+    let close = close?;
+    let inner = after[..close].trim();
+    // the URL ends at the first space; what follows may only be a quoted title
+    let (url, title) = inner.split_once(char::is_whitespace).unwrap_or((inner, ""));
+    let title = title.trim();
+    if !(title.is_empty() || (title.len() >= 2 && title.starts_with(['"', '\'']) && title.ends_with(['"', '\'']))) {
+        return None;
+    }
+    let url = url.strip_prefix('<').and_then(|u| u.strip_suffix('>')).unwrap_or(url);
+    let label = &s[1..end];
+    (!url.is_empty()).then_some((label, url, end + 2 + close + 1))
+}
+
+/// A bare `http://` or `https://` URL at the start of `s`: it runs to the next space, less the
+/// punctuation that ends a sentence and a `)` that closes a parenthesis opened before it.
+fn url_at(s: &str) -> Option<&str> {
+    let scheme = ["https://", "http://"].into_iter().find(|p| s.starts_with(p))?;
+    let end = s.find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`')).unwrap_or(s.len());
+    let mut url = &s[..end];
+    loop {
+        let cut = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '*', '_', '~', ']']);
+        let cut = if cut.ends_with(')') && cut.matches(')').count() > cut.matches('(').count() { &cut[..cut.len() - 1] } else { cut };
+        if cut.len() == url.len() {
+            break;
+        }
+        url = cut;
+    }
+    (url.len() > scheme.len()).then_some(url)
+}
+
+/// Parse `s` into pieces, appending to `out`.
+fn inline_toks(s: &str, out: &mut Vec<Tok>) {
+    fn flush(plain: &mut String, out: &mut Vec<Tok>) {
+        if !plain.is_empty() {
+            out.push((std::mem::take(plain), Span::Plain, None));
+        }
+    }
+    let mut plain = String::new();
+    let mut i = 0;
+    while let Some(ch) = s[i..].chars().next() {
+        let rest = &s[i..];
+        let prev = s[..i].chars().next_back();
+        // a backslash before a marker keeps the marker as text
+        if ch == '\\' {
+            if let Some(n) = rest[1..].chars().next().filter(|n| matches!(n, '*' | '_' | '~' | '`' | '[')) {
+                plain.push(n);
+                i += 1 + n.len_utf8();
+                continue;
+            }
+        }
+        if rest.starts_with("@[") && !alnum(prev) {
+            if let Some(name) = rest[2..].find(']').map(|e| &rest[2..2 + e]).filter(|n| who_name(n)) {
+                flush(&mut plain, out);
                 let m = theme::current().badge(name);
                 // no-break spaces: a badge wraps as one word, glyph and name together, and the
                 // one after the glyph keeps every badge's symbol the same size (SYMBOL_SPACE)
-                out.push((format!("{}{}{}", m.glyph, widgets::SYMBOL_SPACE, name.replace(' ', "\u{a0}")), Span::Who(m.color)));
-                rest = &rest[2 + name.len() + 1..];
+                out.push((format!("{}{}{}", m.glyph, widgets::SYMBOL_SPACE, name.replace(' ', "\u{a0}")), Span::Who(m.color), None));
+                i += 2 + name.len() + 1;
                 continue;
             }
         }
         // `~[3 5 2 9]` (or `~[3,5,2,9|orange]`): a sparkline in the line of text, one cell a value
         if rest.starts_with("~[") {
             if let Some((cells, color, len)) = rest[2..].find(']').and_then(|e| inline_spark(&rest[2..2 + e]).map(|(c, col)| (c, col, 2 + e + 1))) {
-                if !plain.is_empty() {
-                    out.push((std::mem::take(&mut plain), Span::Plain));
-                }
-                out.push((cells, Span::Who(color)));
-                rest = &rest[len..];
+                flush(&mut plain, out);
+                out.push((cells, Span::Who(color), None));
+                i += len;
                 continue;
             }
         }
-        let (open, kind) = if rest.starts_with("**") { ("**", Span::Bold) } else if ch == '`' { ("`", Span::Code) } else { ("", Span::Plain) };
-        if !open.is_empty() {
-            let body = &rest[open.len()..];
-            if let Some(end) = body.find(open).filter(|&e| e > 0) {
-                if !plain.is_empty() {
-                    out.push((std::mem::take(&mut plain), Span::Plain));
-                }
-                out.push((body[..end].to_string(), kind));
-                rest = &body[end + open.len()..];
+        if ch == '`' {
+            let n = rest.chars().take_while(|&c| c == '`').count();
+            let body = &rest[n..];
+            if let Some(end) = body.find(&"`".repeat(n)).filter(|&e| e > 0) {
+                flush(&mut plain, out);
+                let code = &body[..end];
+                // a double-backtick span pads a backtick at its edge with one space
+                let code = if n > 1 { code.strip_prefix(' ').and_then(|c| c.strip_suffix(' ')).filter(|c| !c.trim().is_empty()).unwrap_or(code) } else { code };
+                out.push((code.to_string(), Span::Code, None));
+                i += n + end + n;
                 continue;
             }
+            plain.push_str(&rest[..n]);
+            i += n;
+            continue;
+        }
+        if ch == '[' && !alnum(prev) && prev != Some('!') {
+            if let Some((label, url, len)) = link_at(rest).filter(|(l, _, _)| !l.trim().is_empty()) {
+                flush(&mut plain, out);
+                let mut inner = Vec::new();
+                inline_toks(label, &mut inner);
+                out.push((inner.into_iter().map(|t| t.0).collect(), Span::Link, Some(url.to_string())));
+                i += len;
+                continue;
+            }
+        }
+        if ch == '<' {
+            if let Some(url) = rest[1..].find('>').map(|e| &rest[1..1 + e]).filter(|u| url_at(u).map(|x| x.len()) == Some(u.len())) {
+                flush(&mut plain, out);
+                out.push((url.to_string(), Span::Link, Some(url.to_string())));
+                i += url.len() + 2;
+                continue;
+            }
+        }
+        if ch == 'h' && !alnum(prev) {
+            if let Some(url) = url_at(rest) {
+                flush(&mut plain, out);
+                out.push((url.to_string(), Span::Link, Some(url.to_string())));
+                i += url.len();
+                continue;
+            }
+        }
+        if matches!(ch, '*' | '_' | '~') {
+            let run = rest.chars().take_while(|&c| c == ch).count();
+            let kind = match (ch, run) {
+                ('*', 1) | ('_', 1) => Some(Span::Italic),
+                ('*', 2) => Some(Span::Bold),
+                ('*', 3) => Some(Span::BoldItalic),
+                ('~', 2) => Some(Span::Strike),
+                _ => None,
+            };
+            let body = &rest[run..];
+            let end = kind.filter(|_| opens(run, prev, body.chars().next())).and_then(|_| closer(body, ch, run));
+            if let (Some(kind), Some(end)) = (kind, end) {
+                flush(&mut plain, out);
+                let mut inner = Vec::new();
+                inline_toks(&body[..end], &mut inner);
+                // what is inside takes the outer style; code, badges and links keep their own
+                out.extend(inner.into_iter().map(|(t, sp, url)| {
+                    let sp = match (kind, sp) {
+                        (_, Span::Code | Span::Who(_) | Span::Link | Span::Strike) => sp,
+                        (Span::Strike, _) => Span::Strike,
+                        (Span::Bold, Span::Italic | Span::BoldItalic) | (Span::Italic, Span::Bold | Span::BoldItalic) => Span::BoldItalic,
+                        _ => kind,
+                    };
+                    (t, sp, url)
+                }));
+                i += run + end + run;
+                continue;
+            }
+            // a run that opens nothing is text, all of it: its second `*` is not tried again
+            plain.push_str(&rest[..run]);
+            i += run;
+            continue;
         }
         plain.push(ch);
-        rest = &rest[ch.len_utf8()..];
+        i += ch.len_utf8();
     }
-    if !plain.is_empty() {
-        out.push((plain, Span::Plain));
+    flush(&mut plain, out);
+}
+
+/// Inline markup, wherever a block takes it: `**bold**`, `*italic*` or `_italic_`, `~~struck~~`,
+/// `` `code` ``, `[label](url)` and a bare `https://…` URL (a link span), `@[name]`, a person's
+/// badge (the glyph and color every mention of that name gets; the theme decides them), and
+/// `~[1 2 3]`, a sparkline. An unclosed or empty marker stays literal, and so does one that does
+/// not hug its text (`2 * 3`, `snake_case`, `a ** b`), so ordinary asterisks, underscores and
+/// backticks survive; so does an `@[` glued to the word before it (`user@[::1]` is an address,
+/// not a mention). `\*` keeps a marker as text.
+pub fn markup(s: &str) -> Vec<(String, Span)> {
+    let mut toks = Vec::new();
+    inline_toks(s, &mut toks);
+    let mut out: Vec<(String, Span)> = Vec::new();
+    for (t, sp, _) in toks {
+        match out.last_mut() {
+            Some((lt, lsp)) if *lsp == sp && !matches!(sp, Span::Who(_) | Span::Link | Span::Code) => lt.push_str(&t),
+            _ => out.push((t, sp)),
+        }
     }
     out
+}
+
+/// The links in a text, in order: (label, URL). `margin doc` reads them to give a paragraph its
+/// `target`, or one `link` row each.
+pub fn links(s: &str) -> Vec<(String, String)> {
+    let mut toks = Vec::new();
+    inline_toks(s, &mut toks);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (t, _, url) in toks {
+        if let Some(u) = url.filter(|u| !out.iter().any(|(_, o)| o == u)) {
+            out.push((t, u));
+        }
+    }
+    out
+}
+
+/// A text without its markers: what a line that draws no markup (a section's title, a table's
+/// column title) shows.
+pub fn unmarked(s: &str) -> String {
+    markup(s).into_iter().map(|(t, _)| t).collect()
 }
 
 /// Draw one wrapped line of rich text; code takes aqua. `emph`: bold takes the theme's emphasis
@@ -708,22 +959,38 @@ pub fn markup(s: &str) -> Vec<(String, Span)> {
 /// in the line's own color, so the one emphasis color never overrides a meaning.
 #[allow(clippy::too_many_arguments)]
 fn rich(g: &mut Grid, cx: &Ctx, x: u16, y: u16, line: &[(String, Span)], base: Rgb, italic: bool, emph: bool) -> u16 {
+    rich_linked(g, cx, x, y, line, base, italic, emph, 0)
+}
+
+/// `rich`, with the line's link spans carrying the hyperlink `href` (a `Grid::link` number; 0:
+/// none), so a terminal that knows OSC 8 opens the block's one URL from its label.
+#[allow(clippy::too_many_arguments)]
+fn rich_linked(g: &mut Grid, cx: &Ctx, x: u16, y: u16, line: &[(String, Span)], base: Rgb, italic: bool, emph: bool, href: u16) -> u16 {
     let p = cx.p;
     let e = emph.then(|| theme::current().emphasis);
     let mut x = x;
     for (s, sp) in line {
-        x = put(g, x, y, s, span_style(p, *sp, base, italic, e).on(p.bg0));
+        let mut st = span_style(p, *sp, base, italic, e).on(p.bg0);
+        if *sp == Span::Link {
+            st.link = href;
+        }
+        x = put(g, x, y, s, st);
     }
     x
 }
 
-/// A span's style, without a ground. Bold is `emph` when given, else the base color.
+/// A span's style, without a ground. Bold is `emph` when given, else the base color. A link is
+/// underlined as a `link` row's label is.
 fn span_style(p: &Palette, sp: Span, base: Rgb, italic: bool, emph: Option<Rgb>) -> Style {
     match sp {
         Span::Plain => Style::fg(base).italic_if(italic),
         Span::Bold => Style::fg(emph.unwrap_or(base)).bold(),
         Span::Code => Style::fg(p.aqua),
         Span::Who(c) => Style::fg(c),
+        Span::Italic => Style::fg(base).italic(),
+        Span::BoldItalic => Style::fg(emph.unwrap_or(base)).bold().italic(),
+        Span::Strike => Style::fg(base).italic_if(italic).strike(),
+        Span::Link => Style::fg(base).italic_if(italic).underline(vellum::style::Underline::Single, Some(p.bg4)),
     }
 }
 
@@ -748,6 +1015,93 @@ fn truncate_runs(runs: Vec<(String, Span)>, max: usize) -> Vec<(String, Span)> {
     }
     out.push(("…".into(), Span::Plain));
     out
+}
+
+/// A block's parent and the sibling drawn just above it, when the doc holds it.
+fn family<'a>(cx: &'a Ctx, b: &Block) -> (Option<&'a Block>, Option<&'a Block>) {
+    let par = cx.doc.parent_of(&b.id);
+    let siblings: &[Block] = par.map(|p| p.children.as_slice()).unwrap_or(cx.doc.blocks.as_slice());
+    let prev = siblings.iter().position(|c| c.id == b.id).filter(|&i| i > 0).map(|i| &siblings[i - 1]);
+    (par, prev)
+}
+
+/// The blank rows above a block inside a `prose` section (what `margin doc` writes), so a note
+/// reads like a document: one between unlike blocks and between paragraphs, none between the
+/// items of one list (a numbered list after a plain one is another list), between a paragraph and the `link` rows that open its links, or under the
+/// section's header. None outside a prose section: there each component keeps its own rule.
+fn prose_gap(par: Option<&Block>, prev: Option<&Block>, b: &Block) -> Option<u16> {
+    par.filter(|p| p.kind == "section" && p.flag("prose"))?;
+    let Some(prev) = prev else { return Some(0) };
+    // one list: bullets of one flavor (plain, numbered, or a checklist)
+    let flavor = |x: &Block| (numbered(x.s("text")).is_some(), x.opt("task").is_some());
+    let tight = match (prev.kind.as_str(), b.kind.as_str()) {
+        ("bullet", "bullet") => flavor(prev) == flavor(b),
+        ("link", "link") | ("text" | "bullet", "link") => true,
+        _ => false,
+    };
+    Some(!tight as u16)
+}
+
+/// A block's quote depth (`quote`), at most four bars.
+fn quote_depth(b: &Block) -> u16 {
+    b.num("quote").unwrap_or(0.0).clamp(0.0, 4.0) as u16
+}
+
+/// Cut `s` into pieces of at most `max` cells, at any character: how a code line wraps.
+fn hard_wrap(s: &str, max: usize) -> Vec<String> {
+    let max = max.max(1);
+    let (mut out, mut cur, mut cw) = (Vec::new(), String::new(), 0);
+    for c in s.chars() {
+        let w = width(c.encode_utf8(&mut [0u8; 4]));
+        if cw + w > max && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            cw = 0;
+        }
+        cur.push(c);
+        cw += w;
+    }
+    out.push(cur);
+    out
+}
+
+/// What a paragraph or bullet with a `target` adds while it has the focus: the URL itself, dim,
+/// wrapped under the text from column `x` (and the `mg:open` token when the mouse is off), so
+/// the address behind a label can always be read. Returns the rows it needs; `draw_target`
+/// draws them.
+fn target_rows(cx: &Ctx, b: &Block, x: u16, w: u16) -> Vec<String> {
+    match b.opt("target").filter(|_| in_full(cx, b)) {
+        Some(t) => {
+            let tw = if cx.mouse { 0 } else { width(&short("open", &b.id, None)) + 2 };
+            wrap(t, (w.saturating_sub(x + 1) as usize).saturating_sub(tw).max(8))
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Draw `target_rows` from row `y`, and return the block's buttons: with the mouse on, every row
+/// from `top` down opens the target.
+#[allow(clippy::too_many_arguments)]
+fn draw_target(g: &mut Grid, cx: &Ctx, b: &Block, x: u16, top: u16, y: u16, rows: &[String], w: u16) -> Vec<(u16, u16, u16, String)> {
+    if b.opt("target").is_none() {
+        return Vec::new();
+    }
+    let p = cx.p;
+    for (i, l) in rows.iter().enumerate() {
+        put(g, x, y + i as u16, l, Style::fg(p.grey1).on(p.bg0));
+    }
+    let t = short("open", &b.id, None);
+    if cx.mouse {
+        return (top..g.area().h).map(|r| (x, r, w.saturating_sub(x + 1), t.clone())).collect();
+    }
+    if !rows.is_empty() {
+        tok(g, cx, w.saturating_sub(width(&t) as u16 + 1), y, &t, p.bg0, fl(cx, &b.id));
+    }
+    Vec::new()
+}
+
+/// The hyperlink number for a block's `target` when it is a web address (0: none).
+fn href(g: &mut Grid, b: &Block) -> u16 {
+    b.opt("target").filter(|t| t.starts_with("http")).map(|t| g.link(t)).unwrap_or(0)
 }
 
 /// Draw one block. `w` is the grid width (content + 2), `depth` its nesting, `first` whether it's
@@ -846,12 +1200,27 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
                 _ => p.fg,
             };
             let base = tone(p, b.s("tone"), base);
-            let lines = wrap_runs(&markup(b.s("text")), w.saturating_sub(ind + 1) as usize);
-            let mut g = new_grid(w, lines.len() as u16, g0);
-            for (i, l) in lines.iter().enumerate() {
-                rich(&mut g, cx, ind, i as u16, l, base, style == "note", b.s("tone").is_empty() && style != "warn");
+            // a quote: one bar a level at the left, the text past them
+            let q = quote_depth(b);
+            let (par, prev) = family(cx, b);
+            let gap = prose_gap(par, prev, b).unwrap_or(0);
+            let x = ind + 2 * q;
+            let lines = wrap_runs(&markup(b.s("text")), w.saturating_sub(x + 1) as usize);
+            let url = target_rows(cx, b, x, w);
+            let mut g = new_grid(w, gap + (lines.len() + url.len()) as u16, g0);
+            let link = href(&mut g, b);
+            // the bars run through the blank row between two paragraphs of one quote
+            let above = prev.filter(|pv| pv.kind == "text").map(quote_depth).unwrap_or(0).min(q);
+            for y in 0..g.area().h {
+                for k in 0..(if y < gap { above } else { q }) {
+                    put(&mut g, ind + 2 * k, y, "▎", Style::fg(p.grey0).on(g0));
+                }
             }
-            Drawn { grid: Some(g), ..Default::default() }
+            for (i, l) in lines.iter().enumerate() {
+                rich_linked(&mut g, cx, x, gap + i as u16, l, base, style == "note", b.s("tone").is_empty() && style != "warn", link);
+            }
+            let buttons = draw_target(&mut g, cx, b, x, gap, gap + lines.len() as u16, &url, w);
+            Drawn { grid: Some(g), buttons, lead: gap, ..Default::default() }
         }
         "tail" => {
             // a block type margin no longer has (`margin tail`, removed 2026-11): a board made
@@ -865,18 +1234,28 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
         }
         "code" => {
             // monospace lines on a raised ground, a gutter rule, no wrap: a long line ends in …
+            // until the block has the focus, where it wraps at the edge (a dotted gutter marks
+            // the rows that continue a line), so what was cut can be read
             let lines: Vec<&str> = b.s("text").lines().collect();
             // two code blocks in a row get a blank row between them, or they read as one block
-            let siblings: &[Block] = cx.doc.parent_of(&b.id).map(|par| par.children.as_slice()).unwrap_or(cx.doc.blocks.as_slice());
-            let after_code = siblings.iter().position(|c| c.id == b.id).filter(|&i| i > 0).map(|i| siblings[i - 1].kind == "code").unwrap_or(false);
-            let top = after_code as u16;
-            let mut g = new_grid(w, lines.len().max(1) as u16 + top, g0);
+            let (par, prev) = family(cx, b);
+            let top = prose_gap(par, prev, b).unwrap_or(prev.map(|c| c.kind == "code").unwrap_or(false) as u16);
             let room = w.saturating_sub(ind + 4) as usize;
-            for (i, l) in lines.iter().enumerate() {
+            let full = in_full(cx, b);
+            let rows: Vec<(String, bool)> = lines
+                .iter()
+                .flat_map(|l| {
+                    let l = l.replace('\t', "    ");
+                    let cut = if full { hard_wrap(&l, room) } else { vec![truncate(&l, room).into_owned()] };
+                    cut.into_iter().enumerate().map(|(i, s)| (s, i == 0)).collect::<Vec<_>>()
+                })
+                .collect();
+            let mut g = new_grid(w, rows.len().max(1) as u16 + top, g0);
+            for (i, (l, starts)) in rows.iter().enumerate() {
                 let y = i as u16 + top;
                 g.tint(Rect::new(ind, y, w.saturating_sub(ind + 1), 1), p.bg1);
-                put(&mut g, ind, y, "▏", Style::fg(p.bg4).on(p.bg1));
-                put(&mut g, ind + 2, y, &truncate(&l.replace('\t', "    "), room), Style::fg(p.aqua).on(p.bg1));
+                put(&mut g, ind, y, if *starts { "▏" } else { "┊" }, Style::fg(p.bg4).on(p.bg1));
+                put(&mut g, ind + 2, y, l, Style::fg(p.aqua).on(p.bg1));
             }
             let lang = b.s("language");
             if !lang.is_empty() && !lines.is_empty() {
@@ -885,31 +1264,41 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
                     put(&mut g, w.saturating_sub(lw + 2), top, lang, Style::fg(p.grey0).on(p.bg1));
                 }
             }
-            Drawn { grid: Some(g), ..Default::default() }
+            Drawn { grid: Some(g), lead: top, ..Default::default() }
         }
         "bullet" => {
             // `_level` (bullets above this one) and `_gap` come from the scene's flatten
             let level = b.num("_level").unwrap_or(0.0) as u16;
-            let gap = b.flag("_gap") as u16;
-            let x = ind + 2 * level;
+            let (par, prev) = family(cx, b);
+            let gap = prose_gap(par, prev, b).unwrap_or(b.flag("_gap") as u16);
+            // a sub-bullet is a child, so its depth already puts it two cells in: under its
+            // parent's text, as a section's content sits under its title
+            let x = ind;
             // a counted item ("1. first", "2) second") wears its number where the bullet would
             // be: a bullet and a number together say the same thing twice
             let counted = numbered(b.s("text"));
-            let (glyph, text) = match &counted {
-                Some((n, rest)) => (n.as_str(), rest.as_str()),
-                None => (["•", "◦", "▪"][level as usize % 3], b.s("text")),
+            // a note's checklist item wears its box where the bullet would be
+            let task = b.opt("task");
+            let (glyph, text) = match (&counted, task) {
+                (_, Some(t)) => (if t == "done" { "☑" } else { "☐" }, b.s("text")),
+                (Some((n, rest)), _) => (n.as_str(), rest.as_str()),
+                _ => (["•", "◦", "▪"][level as usize % 3], b.s("text")),
             };
             let tx = x + width(glyph) as u16 + 1;
             let (gc, tc) = if level == 0 { (p.green, p.fg) } else { (p.grey1, p.grey2) };
+            let gc = if task == Some("open") { p.grey1 } else { gc };
             let gc = tone(p, b.s("tone"), gc);
             let tc = if b.s("tone").is_empty() { tc } else { gc };
             let lines = wrap_runs(&markup(text), w.saturating_sub(tx + 1) as usize);
-            let mut g = new_grid(w, lines.len() as u16 + gap, g0);
+            let url = target_rows(cx, b, tx, w);
+            let mut g = new_grid(w, (lines.len() + url.len()) as u16 + gap, g0);
+            let link = href(&mut g, b);
             put(&mut g, x, gap, glyph, Style::fg(gc).on(g0).bold());
             for (i, l) in lines.iter().enumerate() {
-                rich(&mut g, cx, tx, gap + i as u16, l, tc, false, b.s("tone").is_empty());
+                rich_linked(&mut g, cx, tx, gap + i as u16, l, tc, false, b.s("tone").is_empty(), link);
             }
-            Drawn { grid: Some(g), ..Default::default() }
+            let buttons = draw_target(&mut g, cx, b, tx, gap, gap + lines.len() as u16, &url, w);
+            Drawn { grid: Some(g), buttons, lead: gap, ..Default::default() }
         }
         "todo" => {
             // a step's text wraps, in a dependency chain too: there the rows under the first carry
@@ -1265,22 +1654,30 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             let label = if b.s("text").is_empty() { target } else { b.s("text") };
             // focused: a label too long for the line wraps
             let lines = fit_lines(label, room, in_full(cx, b));
-            if lines.len() > 1 {
-                let mut tall = new_grid(w, lines.len() as u16, g0);
+            // focused: the address behind a label, dim, under it
+            let url = if in_full(cx, b) && label != target { wrap(target, room.max(8)) } else { Vec::new() };
+            let (par, prev) = family(cx, b);
+            let top = prose_gap(par, prev, b).unwrap_or(0);
+            let rows = (lines.len() + url.len()) as u16;
+            if rows + top > 1 {
+                let mut tall = new_grid(w, rows + top, g0);
                 tall.links = std::mem::take(&mut g.links);
                 g = tall;
             }
-            put(&mut g, ind, 0, icon::LINK, Style::fg(p.aqua).on(g0));
+            put(&mut g, ind, top, icon::LINK, Style::fg(p.aqua).on(g0));
             for (i, l) in lines.iter().enumerate() {
-                put(&mut g, ind + TX, i as u16, l, st.with_fg(p.fg.mix(p.purple, fl(cx, &b.id))));
+                put(&mut g, ind + TX, top + i as u16, l, st.with_fg(p.fg.mix(p.purple, fl(cx, &b.id))));
+            }
+            for (i, l) in url.iter().enumerate() {
+                put(&mut g, ind + TX, top + (lines.len() + i) as u16, l, Style::fg(p.grey1).on(g0));
             }
             let mut buttons = Vec::new();
             if cx.mouse {
-                buttons.extend((0..lines.len() as u16).map(|r| (ind, r, w.saturating_sub(ind + 1), t.clone())));
+                buttons.extend((top..top + rows).map(|r| (ind, r, w.saturating_sub(ind + 1), t.clone())));
             } else {
-                tok(&mut g, cx, w.saturating_sub(width(&t) as u16 + 1), 0, &t, g0, fl(cx, &b.id));
+                tok(&mut g, cx, w.saturating_sub(width(&t) as u16 + 1), top, &t, g0, fl(cx, &b.id));
             }
-            Drawn { grid: Some(g), buttons, ..Default::default() }
+            Drawn { grid: Some(g), buttons, lead: top, ..Default::default() }
         }
         "feed" => draw_feed(cx, b, w, ind),
         "image" => draw_image(cx, b, w, ind),
@@ -1288,7 +1685,8 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
         "rule" => {
             // a labeled rule is a heading: it keeps a blank row above itself, like a section
             let label = b.s("text");
-            let top = (depth == 0 && !first && !label.is_empty()) as u16;
+            let (par, prev) = family(cx, b);
+            let top = prose_gap(par, prev, b).unwrap_or((depth == 0 && !first && !label.is_empty()) as u16);
             let mut g = new_grid(w, 1 + top, g0);
             let a = g.area();
             widgets::rule(&mut g, ind, top, w.saturating_sub(ind + 1), label, &theme::current(), g0, a);
@@ -1976,7 +2374,16 @@ fn draw_table(cx: &Ctx, b: &Block, w: u16, depth: usize) -> Drawn {
         cut.blit(&g, 0, rows, 0, 0, ca);
         g = cut;
     }
-    Drawn { grid: Some(g), ..Default::default() }
+    // in a note, a table stands a row clear of the paragraph above it
+    let (par, prev) = family(cx, b);
+    let top = prose_gap(par, prev, b).unwrap_or(0);
+    if top > 0 {
+        let mut tall = new_grid(w, rows + top, g0);
+        let ta = tall.area();
+        tall.blit(&g, 0, rows, 0, top as i32, ta);
+        g = tall;
+    }
+    Drawn { grid: Some(g), lead: top, ..Default::default() }
 }
 
 /// One table row: each cell in its column's slot, cut with `…` (a table is the one place text
@@ -2728,3 +3135,101 @@ mod dash_tests {
         assert_eq!(g.get(1 + TX + 2, 0).unwrap().style.fg, Some(grace.color));
     }
 }
+
+/// Notes written by `margin doc`: the inline markup, and a document's blocks drawn together.
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+    use serde_json::json;
+    use vellum::color::EVERFOREST;
+
+    /// Draw `doc` as the scene stacks it (each bullet told its level), `focus` drawn in full.
+    fn frame(doc: &Doc, w: u16, focus: Option<&str>) -> (String, HashMap<String, Grid>) {
+        let state = State::default();
+        let (flash, progress, images, pulse) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+        let cx = Ctx {
+            doc, state: &state, p: &EVERFOREST, now: 0.0, wall: 0.0, m: Motion { on: false, slow: 1.0 }, delivered: 0, flash: &flash,
+            progress: &progress, kitty: false, cell: (10, 20), images: &images, focused: focus, pulse: &pulse, pulse_period: 2.4,
+            pulse_breaths: 0.0, mouse: true, hover: None, flog: false, linked: true, consumer: "Otto",
+        };
+        let (mut text, mut grids) = (String::new(), HashMap::new());
+        fn go(cx: &Ctx, bs: &[Block], depth: usize, level: usize, w: u16, text: &mut String, grids: &mut HashMap<String, Grid>) {
+            for b in bs {
+                let mut bb = b.clone();
+                bb.f.insert("_level".into(), level.into());
+                let g = draw(cx, &bb, w, depth, depth == 0).grid.unwrap();
+                for l in g.to_text().lines() {
+                    text.push_str(l.trim_end());
+                    text.push('\n');
+                }
+                grids.insert(b.id.clone(), g);
+                go(cx, &b.children, depth + 1, if b.kind == "bullet" { level + 1 } else { 0 }, w, text, grids);
+            }
+        }
+        go(&cx, &doc.blocks, 0, 0, w, &mut text, &mut grids);
+        (text, grids)
+    }
+
+    fn note(md: &str) -> Doc {
+        let d: Doc = serde_json::from_value(json!({"id": "n", "rev": 1, "blocks": [crate::mdoc::to_section("body", Some("T"), md)]})).unwrap();
+        d.blocks.iter().for_each(|b| crate::doc::check_block(b).unwrap());
+        d
+    }
+
+    /// Item 6: italic, strike and link spans, alone and inside bold, drawn with the terminal's
+    /// attributes; code keeps what it holds.
+    #[test]
+    fn italic_strike_and_link_spans() {
+        let m = |s: &str| markup(s).into_iter().map(|(t, sp)| (t, sp)).collect::<Vec<_>>();
+        let own = |v: &[(&str, Span)]| v.iter().map(|(t, sp)| (t.to_string(), *sp)).collect::<Vec<_>>();
+        assert_eq!(m("*a* _b_ ~~c~~ ***d***"), own(&[("a", Span::Italic), (" ", Span::Plain), ("b", Span::Italic), (" ", Span::Plain), ("c", Span::Strike), (" ", Span::Plain), ("d", Span::BoldItalic)]));
+        assert_eq!(m("**bold *both* `code`** and `a ** b * c`"), own(&[("bold ", Span::Bold), ("both", Span::BoldItalic), (" ", Span::Bold), ("code", Span::Code), (" and ", Span::Plain), ("a ** b * c", Span::Code)]));
+        assert_eq!(m("[the `guide`](docs/g.md) at https://example.com/x."), own(&[("the guide", Span::Link), (" at ", Span::Plain), ("https://example.com/x", Span::Link), (".", Span::Plain)]));
+        assert_eq!(links("[a](u1) <https://b.example> [a again](u1)"), [("a".to_string(), "u1".to_string()), ("https://b.example".to_string(), "https://b.example".to_string())]);
+        let d = dash_tests::doc(1, json!([{"type": "text", "id": "t", "text": "*i* ~~s~~ [l](https://example.com)", "target": "https://example.com"}]));
+        let (text, grids) = frame(&d, 40, None);
+        assert_eq!(text, " i s l\n");
+        let st = |x: u16| grids["t"].get(x, 0).unwrap().style;
+        assert!(st(1).italic && st(3).strike && st(5).ul == vellum::style::Underline::Single && st(5).link != 0, "{:?}", (st(1), st(3), st(5)));
+    }
+
+    /// Item 6, the other way: a marker that does not hug its text is text, as before.
+    #[test]
+    fn markers_that_do_not_hug_text_stay_literal() {
+        for s in ["a lone * here", "a lone _ here", "snake_case_words and _private", "2 * 3 * 4", "2*3*4", "a ** b ** c", "*.rs and *.md", "f(*args, **kwargs)", "__init__", "~approx~ and a ~ b", "5 * (a) * 6", "**", "****", "*", "an unclosed *star", "an unclosed **bold", "x_1 and y_2", r"\*not italic\*", "user@[::1]", "a[i](x)"] {
+            let got = markup(s);
+            assert!(got.iter().all(|(_, sp)| *sp == Span::Plain), "{s:?} → {got:?}");
+            assert_eq!(unmarked(s), s.replace('\\', ""), "{s:?}");
+        }
+        assert_eq!(markup("**bold** and **Note:**text"), vec![("bold".into(), Span::Bold), (" and ".into(), Span::Plain), ("Note:".into(), Span::Bold), ("text".into(), Span::Plain)]);
+    }
+
+    /// The sample note, end to end: every block of items 1 to 9 in one frame.
+    #[test]
+    fn the_sample_note_renders_as_a_document() {
+        let md = "# Title\n\nA paragraph with **bold**, `code` and a [link](https://example.com).\n\n> a quote\n\n- one\n  - nested\n- two\n\n1. first\n2. second\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n---\n\n### Sub\n\ntext after\n\n- [ ] task open\n- [x] task done\n\n*italic* and ~~struck~~\n";
+        let (text, _) = frame(&note(md), 44, None);
+        let want = " ▾ T [9]\n   A paragraph with bold, code and a link.\n\n   ▎ a quote\n\n   • one\n     ◦ nested\n   • two\n\n   1. first\n   2. second\n\n   a b\n   ───\n   1 2\n\n   ────────────────────────────────────────\n\n   ▾ Sub [4]\n     text after\n\n     ☐ task open\n     ☑ task done\n\n     italic and struck\n";
+        assert_eq!(plain_text(&text), want, "\n{}", plain_text(&text));
+    }
+
+    /// Items 3 and 10: what a row hides or cuts, the focus shows. A paragraph with a target
+    /// shows its URL under the text; a link row shows the address behind its label;
+    /// a code line too long for the pane wraps at the edge.
+    #[test]
+    fn the_focus_shows_a_target_and_wraps_code() {
+        let d = note("See the [guide](https://example.com/a/long/path/guide.html) first.\n\n```\nlet answer = compute(the, whole, thing);\nok\n```\n\nBoth [a](https://a.example) and [b](https://b.example).\n");
+        let ids: Vec<String> = d.blocks[0].children.iter().map(|b| b.id.clone()).collect();
+        let lines = |focus: usize| frame(&d, 30, Some(&ids[focus])).0.lines().map(String::from).collect::<Vec<_>>();
+        let rest = lines(4);
+        assert_eq!(&rest[1..6], ["   See the guide first.", "", "   ▏ let answer = compute(t…", "   ▏ ok", ""], "{rest:#?}");
+        assert_eq!(&lines(0)[1..5], ["   See the guide first.", "   https://example.com/a/long", "   /path/guide.html", ""]);
+        assert_eq!(&lines(1)[3..6], ["   ▏ let answer = compute(th", "   ┊ e, whole, thing);", "   ▏ ok"]);
+        let on_link = lines(3);
+        assert!(on_link.iter().any(|l| l.trim() == "https://a.example") && !on_link.iter().any(|l| l.trim() == "https://b.example"), "{on_link:#?}");
+        // the paragraph opens its one link; each of the other paragraph's two has a row
+        assert_eq!(d.find(&ids[0]).unwrap().s("target"), "https://example.com/a/long/path/guide.html");
+        assert_eq!((d.find(&ids[2]).unwrap().opt("target"), d.find(&ids[3]).unwrap().kind.as_str()), (None, "link"));
+    }
+}
+

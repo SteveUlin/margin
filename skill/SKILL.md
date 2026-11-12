@@ -41,10 +41,10 @@ plan "…"`) pinned above the content.
   pane draws the number in place of the bullet. Otherwise write short `bullet`s with a `**bold**`
   lead-in, one idea each, sub-bullets for detail.
 - **Long-form goes beside the chat**, in its own board as a tab of the pane: `margin new <notes>`
-  once, `margin doc <notes> <id> < notes.md` (markdown, in bullets), `margin tab <board> add
-  <notes>`; chat gets the conclusion in two or three lines plus "it's in the pane". Revise it
-  under the same id; `margin tab <board> rm <notes>` when the topic closes. **Why:** in chat a
-  long piece scrolls away while they answer it.
+  once, `margin doc <notes> <id> < notes.md` (markdown, in bullets; `margin doc --help` lists
+  what it reads), `margin tab <board> add <notes>`; chat gets the conclusion in two or three
+  lines plus "it's in the pane". Revise it under the same id; `margin tab <board> rm <notes>`
+  when the topic closes. **Why:** in chat a long piece scrolls away while they answer it.
 - **Name a row by an id {{user}} can see, plus a few words of its text**: "t3 (seed the RNG)",
   never a bare hash. Todos, questions and claims show short ids (8 characters or fewer, no
   dash), so give those ids like `t3`, `Q1`, `A1`; quote any other row's text.

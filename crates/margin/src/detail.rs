@@ -80,7 +80,7 @@ pub fn place(w: u16, h: u16, top: u16, bottom: u16) -> Option<Rect> {
 
 /// Fields that say how a block draws, not what it is, and the ones the panel shows elsewhere.
 const SKIP: &[&str] = &[
-    "actions", "text", "title", "detail", "proposal", "rows", "spark", "tone", "tag_tone", "aside_tone", "text_tone", "bold", "folded", "style", "glyph", "max_rows", "cols", "columns",
+    "actions", "text", "title", "detail", "proposal", "rows", "spark", "tone", "tag_tone", "aside_tone", "text_tone", "bold", "folded", "style", "glyph", "max_rows", "cols", "columns", "prose", "quote",
 ];
 
 fn scalar(v: &Value) -> Option<String> {
@@ -150,8 +150,8 @@ fn name(b: &Block) -> String {
 
 fn run_of(s: Span) -> Run {
     match s {
-        Span::Plain => Run::Text,
-        Span::Bold => Run::Bold,
+        Span::Plain | Span::Italic | Span::Strike | Span::Link => Run::Text,
+        Span::Bold | Span::BoldItalic => Run::Bold,
         Span::Code => Run::Code,
         Span::Who(c) => Run::Who(c),
     }

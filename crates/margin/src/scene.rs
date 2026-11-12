@@ -661,7 +661,8 @@ impl Scene {
                     id: b.id.clone(),
                     kind: Kind::Block { depth, folded, level, gap: bullet && level == 0 && i > 0 && !b.children.is_empty() },
                     // (a table's own item is its header: its rows, `tr`, take the focus)
-                    focusable: !matches!(b.kind.as_str(), "text" | "progress" | "timer" | "bullet" | "code" | "rule" | "table" | "runs"),
+                    // (a paragraph or bullet with a `target` opens it; a code block wraps its cut lines under the focus)
+                    focusable: !matches!(b.kind.as_str(), "text" | "progress" | "timer" | "bullet" | "rule" | "table" | "runs") || (matches!(b.kind.as_str(), "text" | "bullet") && b.opt("target").is_some()),
                 });
                 go(&b.children, depth + 1, if bullet { level + 1 } else { 0 }, view, state, logical, vis, now, m, out);
             }
