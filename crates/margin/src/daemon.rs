@@ -1,43 +1,64 @@
 //! `margin daemon`: the dispatcher for one project store. It hands appended events to the
 //! registered handlers (handler.rs: one worker thread each, fed from the event log through the
-//! handler's cursor), and does nothing else: it has no timer and watches no file. A schedule
-//! lives outside margin and reaches a handler as an event (`margin emit` from cron or a systemd
+//! handler's cursor), and does nothing else: it has no timer and watches no file but its own
+//! store's. A schedule lives outside margin and reaches a handler as an event (`margin emit` from cron or a systemd
 //! timer).
 //!
 //! One per project, held by `flock` on `<project>/daemon.lock` (a second one exits at once). It
-//! re-reads handlers.json every 300 ms and reconciles: a new handler gets a worker thread, a
-//! removed or paused one is stopped, a changed one restarts. With no unpaused handler left it
-//! exits after a short grace, so nothing runs when nothing is registered (`--stay`, which the
-//! installed unit passes, keeps it up). The CLI starts it on demand (`ensure`), or the systemd
-//! user unit that `margin daemon install` writes runs it.
+//! reconciles against handlers.json whenever that file changes (a file watch: watch.rs), not on
+//! a timer: a new handler gets a worker thread, a removed or paused one is stopped, a changed
+//! one restarts. Between changes it sleeps in `poll(2)`, as each worker does on the event log, so
+//! an idle daemon makes no system call. With no unpaused handler left it exits after a short
+//! grace, so nothing runs when nothing is registered (`--stay`, which the installed unit passes,
+//! keeps it up). The CLI starts it on demand (`ensure`), or the systemd user unit that `margin
+//! daemon install` writes runs it.
 //!
 //! Hooks never talk to the daemon: they only read files, so a busy or wedged handler can't slow
 //! a turn.
 
 use crate::handler::Ctl;
 use crate::store::{write_atomic, Store};
+use crate::watch::{Waker, Watch, Woken};
 use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 static EXITING: AtomicBool = AtomicBool::new(false);
+/// The exit pipe: its write end for the signal handler, its read end for whoever waits.
+static EXIT_WR: AtomicI32 = AtomicI32::new(-1);
+static EXIT_RD: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn on_term(_: libc::c_int) {
     EXITING.store(true, Ordering::Relaxed);
+    // a thread blocked in poll() is not the one the signal interrupts: the pipe wakes them all
+    crate::watch::raise(EXIT_WR.load(Ordering::Relaxed));
 }
 
 pub fn exiting() -> bool {
     EXITING.load(Ordering::Relaxed)
 }
 
+/// A descriptor that is readable from the moment a trapped signal arrives, and stays so: every
+/// blocking wait in the process takes it as an interrupt (`Watch::interrupt`), so a SIGTERM
+/// ends them all without any of them waking on a timer to ask. -1 before `trap_signals`.
+pub fn exit_fd() -> i32 {
+    EXIT_RD.load(Ordering::Relaxed)
+}
+
 /// SIGTERM, SIGINT and SIGHUP raise the `exiting` flag instead of killing the process: the
 /// daemon stops its workers first, and `margin events --follow` / `job logs --follow` end with
 /// exit 0.
 pub fn trap_signals() {
+    if exit_fd() < 0 {
+        // never closed: it lives as long as the process
+        let w = std::mem::ManuallyDrop::new(crate::watch::Waker::new());
+        EXIT_RD.store(w.fd(), Ordering::Relaxed);
+        EXIT_WR.store(w.write_fd(), Ordering::Relaxed);
+    }
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
@@ -123,6 +144,23 @@ pub fn since(st: &Store) -> Option<f64> {
     std::fs::metadata(st.dir().join("daemon.pid")).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
 }
 
+/// With no unpaused handler left (and no `--stay`), the daemon exits after this many seconds.
+const IDLE_GRACE: f64 = 1.5;
+
+/// Held by a worker thread: tells the main loop when the thread ends without having been told
+/// to (a panic), so the handler gets a new worker. A second's pause first, so a worker that
+/// dies at once is not restarted in a tight loop.
+struct Ended(Arc<Waker>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        self.0.wake();
+    }
+}
+
 struct RunningHandler {
     h: crate::handler::Handler,
     ctl: Arc<Ctl>,
@@ -141,9 +179,17 @@ pub fn run(st: Store, stay: bool) -> Result<(), String> {
     trap_signals();
     eprintln!("{} margin daemon {} up for {}", crate::util::now_rfc3339(), std::process::id(), st.project);
     let mut handlers: HashMap<String, RunningHandler> = HashMap::new();
+    // What ends the main loop's sleep: the registry changing, a signal, a worker thread ending
+    // on its own, and (as the wait's deadline) the idle exit. Armed before the first read of the
+    // registry, so a change between that read and the wait is not missed.
+    let ended = Arc::new(Waker::new());
+    let mut watch = Watch::new().dir(&st.dir(), &["handlers.json"]).interrupt(exit_fd()).interrupt(ended.fd());
+    if let Some(why) = watch.fallback() {
+        eprintln!("{} margin daemon: {why}; checking the registry every {} ms instead", crate::util::now_rfc3339(), crate::watch::FALLBACK_TICK.as_millis());
+    }
     // A handlers.json that won't parse (a hand edit's trailing comma) is not "every handler was
     // removed": the last registry that parsed stays in force until the file reads again, and
-    // the error is logged once, not once per 300 ms.
+    // the error is logged once, not once per look.
     let (mut hreg, mut herr) = (crate::handler::Registry::default(), String::new());
     let mut idle_since: Option<f64> = None;
     while !exiting() {
@@ -189,17 +235,23 @@ pub fn run(st: Store, stay: bool) -> Result<(), String> {
                 continue;
             }
             let ctl = Arc::new(Ctl::default());
-            let (st2, h2, c2) = (Store::new(st.home.clone(), st.project.clone()), h.clone(), ctl.clone());
+            let (st2, h2, c2, e2) = (Store::new(st.home.clone(), st.project.clone()), h.clone(), ctl.clone(), Ended(ended.clone()));
             let join = std::thread::Builder::new()
                 .name(format!("handler-{}", h.name))
-                .spawn(move || crate::handler::Worker::new(st2, h2, c2, false).run())
+                .spawn(move || {
+                    let _e = e2;
+                    crate::handler::Worker::new(st2, h2, c2, false).run()
+                })
                 .map_err(|e| e.to_string())?;
             handlers.insert(h.name.clone(), RunningHandler { h: h.clone(), ctl, join });
         }
+        // how long to sleep: until something changes, or until the idle exit is due
+        let mut sleep = None;
         if handlers.is_empty() && !stay {
             let now = crate::util::epoch_now();
             // a short grace absorbs `handler rm x` followed at once by `handler add x`
-            if now - *idle_since.get_or_insert(now) > 1.5 {
+            let idle = now - *idle_since.get_or_insert(now);
+            if idle > IDLE_GRACE {
                 // Exit under the project lock: `handler add` registers under the same lock and
                 // then checks for a daemon, so either we see its handler here or it sees no
                 // daemon and starts a new one. Without this, an add landing as we exit would
@@ -213,11 +265,21 @@ pub fn run(st: Store, stay: bool) -> Result<(), String> {
                     return Ok(());
                 }
                 idle_since = None;
+                // a handler was added as the grace ran out (the next pass starts it), or the
+                // registry does not parse (the next look is a grace away, or when it changes)
+                sleep = Some(Duration::ZERO);
+                if !herr.is_empty() {
+                    sleep = Some(Duration::from_secs_f64(IDLE_GRACE));
+                }
+            } else {
+                sleep = Some(Duration::from_secs_f64(IDLE_GRACE - idle + 0.01));
             }
         } else {
             idle_since = None;
         }
-        std::thread::sleep(Duration::from_millis(300));
+        if watch.wait(sleep) == Woken::Interrupted {
+            ended.drain();
+        }
     }
     // signalled: stop dispatching, stop every running command (its whole process group: TERM,
     // a grace period, KILL), record each as stopped, not failed

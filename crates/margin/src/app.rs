@@ -8,103 +8,13 @@ use crate::scene::{Input, Placement, Scene};
 use crate::select;
 use crate::store::{Store, View};
 use crate::util::{epoch_now, now_rfc3339};
+use crate::watch::{Fired, Inotify};
 use serde_json::json;
-use std::ffi::CString;
 use std::time::Instant;
 use vellum::grid::{diff, synchronized, Grid};
 use vellum::image::{kitty_delete, kitty_place, kitty_probe};
 use vellum::input::{Event, Key, MouseKind, Parser};
 use vellum::term::{self, Modes, Terminal};
-
-struct Inotify {
-    fd: i32,
-    /// The watch on the pane's own view directory: a write there is this pane saving its view, or
-    /// `margin tab` changing the tab set, and neither is a reason to reload the documents.
-    view_wd: i32,
-    /// The project directory's watch. Its `.lock` is opened by every command that takes the
-    /// project lock, whatever it then writes: the write itself is the news, not the lock (an
-    /// append to a dataset ten times a second would otherwise reload every tab each time).
-    proj_wd: i32,
-    /// The watches whose changes mean "reload".
-    other: Vec<i32>,
-    /// The watches on datasets: the project's `data/` directory (any name), and the directory of
-    /// each registered external file (that file's name only).
-    data: Vec<(i32, Option<String>)>,
-}
-
-/// What fired since the last look.
-#[derive(Default, Debug, PartialEq)]
-struct Fired {
-    views: bool,
-    /// A dataset's file changed: no document did.
-    data: bool,
-    other: bool,
-}
-
-impl Inotify {
-    /// `paths`: directories to reload on. `proj`: the project directory (one of them).
-    /// `data_dir` and `files`: where the datasets are (data.rs).
-    fn new(paths: &[std::path::PathBuf], view_dir: &std::path::Path, proj: &std::path::Path, data_dir: &std::path::Path, files: &[std::path::PathBuf]) -> Inotify {
-        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-        let add = |p: &std::path::Path, make: bool| -> i32 {
-            if make {
-                let _ = std::fs::create_dir_all(p);
-            }
-            match CString::new(p.to_string_lossy().as_bytes()) {
-                Ok(c) => unsafe { libc::inotify_add_watch(fd, c.as_ptr(), libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_MODIFY | libc::IN_CREATE) },
-                Err(_) => -1,
-            }
-        };
-        let other: Vec<i32> = paths.iter().map(|p| add(p, true)).collect();
-        let view_wd = add(view_dir, true);
-        // the same directory watched twice is one watch: the same descriptor comes back
-        let proj_wd = add(proj, true);
-        let mut data = vec![(add(data_dir, true), None)];
-        for f in files {
-            // an external file's directory, never created here; a file replaced by rename is
-            // still seen, which a watch on the file itself would lose
-            if let (Some(dir), Some(name)) = (f.parent(), f.file_name()) {
-                data.push((add(dir, false), Some(name.to_string_lossy().into_owned())));
-            }
-        }
-        Inotify { fd, view_wd, proj_wd, other, data }
-    }
-    /// Read what fired.
-    fn drain(&self) -> Fired {
-        let mut out = Fired::default();
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
-            if n <= 0 {
-                break;
-            }
-            // struct inotify_event { int wd; u32 mask; u32 cookie; u32 len; char name[len]; }
-            let (mut at, n) = (0usize, n as usize);
-            while at + 16 <= n {
-                let wd = i32::from_ne_bytes(buf[at..at + 4].try_into().unwrap());
-                let len = u32::from_ne_bytes(buf[at + 12..at + 16].try_into().unwrap()) as usize;
-                let raw = &buf[(at + 16).min(n)..(at + 16 + len).min(n)];
-                let name = String::from_utf8_lossy(raw.split(|b| *b == 0).next().unwrap_or(&[])).into_owned();
-                let is_data = self.data.iter().any(|(d, only)| *d == wd && only.as_deref().map(|o| o == name).unwrap_or(true));
-                if wd == self.view_wd {
-                    out.views = true;
-                } else if is_data {
-                    out.data = true;
-                } else if self.other.contains(&wd) && !(wd == self.proj_wd && name == ".lock") {
-                    out.other = true;
-                }
-                at += 16 + len;
-            }
-        }
-        out
-    }
-}
-
-impl Drop for Inotify {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.fd) };
-    }
-}
 
 struct Live {
     st: Store,

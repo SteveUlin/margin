@@ -32,6 +32,7 @@ mod tabs;
 mod theme;
 mod toast;
 mod util;
+mod watch;
 mod who;
 mod zj;
 
@@ -1548,12 +1549,27 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// Wait up to `ms` for nothing in particular: the sleep of a `--follow` loop. False when it is
-/// time to stop: a signal arrived (ctrl-c), or stdout is a pipe whose reader has gone.
+/// Wait up to `ms` for nothing in particular: the sleep of a log's `--follow` loop, and with 0
+/// the question "should a follow stop". False when it is time to stop: a signal arrived (ctrl-c), or stdout is a pipe whose reader has gone.
 fn follow_wait(ms: i32) -> bool {
     let mut p = libc::pollfd { fd: 1, events: 0, revents: 0 };
     let n = unsafe { libc::poll(&mut p, 1, ms) };
     !(daemon::exiting() || (n > 0 && p.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0))
+}
+
+/// The wait of `events --follow`: block until the log holds an event past `from`. False when it
+/// is time to stop instead (ctrl-c, a reader that has gone). No timer: `w` wakes on the append
+/// itself, on the signal's exit pipe and on stdout hanging up, and each wake asks all three again.
+fn follow_next(st: &Store, from: u64, w: &mut watch::Watch) -> bool {
+    loop {
+        if !follow_wait(0) {
+            return false;
+        }
+        if st.last_seq() > from {
+            return true;
+        }
+        w.wait(None);
+    }
 }
 
 /// `margin events`: read the log, from a seq or a named cursor, once or following.
@@ -1603,9 +1619,15 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
             // other writers' events buried them (2026-11-10)
             && (a.has("--all") || a.has("--kind") || a.has("--name") || (who::is_human(&e.by) && !store::is_passive(&e.kind)))
     };
-    if follow {
+    // armed before the first read of the log, so nothing appended after that read is missed
+    let mut watch = follow.then(|| {
         daemon::trap_signals();
-    }
+        let w = st.watch_events().interrupt(daemon::exit_fd()).hangup(1);
+        if let Some(why) = w.fallback() {
+            eprintln!("margin: {why}; checking the event log every {} ms instead", watch::FALLBACK_TICK.as_millis());
+        }
+        w
+    });
     let out = std::io::stdout();
     loop {
         let evs = if unread {
@@ -1633,13 +1655,9 @@ fn events_cmd(st: &Store, a: &Args) -> Result<(), String> {
         if let (Some(c), Some(_)) = (commit, evs.last()) {
             st.set_cursor(c, from);
         }
-        if !follow {
+        let Some(w) = watch.as_mut() else { return Ok(()) };
+        if !follow_next(st, from, w) {
             return Ok(());
-        }
-        while st.last_seq() <= from {
-            if !follow_wait(200) {
-                return Ok(());
-            }
         }
     }
 }
@@ -2423,6 +2441,38 @@ mod tests {
 
     fn args(v: &[&str]) -> Args {
         Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    /// `events --follow` sleeps on the log's watch, not on a clock: an event is seen as it is
+    /// appended (the 200 ms poll this replaced saw it 100 ms late on average), and one appended
+    /// before the wait starts is not missed.
+    #[test]
+    fn a_follow_sees_an_event_as_it_lands() {
+        let st = store::tests::temp_store();
+        let emit = |st: &Store| st.emit("ping", "", "", serde_json::Value::Null, "you", "emit").unwrap().seq;
+        let mut w = st.watch_events();
+        // appended after the watch was armed and before the wait: seen at once
+        let a = emit(&st);
+        assert!(follow_next(&st, a - 1, &mut w));
+        let st2 = Store::new(st.home.clone(), st.project.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            for from in a..a + 3 {
+                assert!(follow_next(&st2, from, &mut w));
+                tx.send(std::time::Instant::now()).unwrap();
+            }
+        });
+        for _ in 0..3 {
+            // long enough for the follower to be asleep again
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            emit(&st);
+            let emitted = std::time::Instant::now();
+            let seen = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the follower never woke");
+            let late = seen.saturating_duration_since(emitted);
+            assert!(late < std::time::Duration::from_millis(150), "seen {late:?} after the emit returned");
+        }
+        t.join().unwrap();
+        std::fs::remove_dir_all(&st.home).ok();
     }
 
     /// Side-effecting commands refuse what they don't take instead of acting on it.

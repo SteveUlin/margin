@@ -13,6 +13,13 @@
 //! pane, the config's `wake` is "off" or "inbox", or its own deadline passed (a little under the
 //! hook's `timeout`, so Claude Code never has to kill it).
 //!
+//! It waits without a timer (watch.rs): blocked until one of the files its answer depends on
+//! changes (the event log, the session's activity and cursor, the review marks, its own mark, the
+//! boards a pending decision is on), or until the next moment the clock alone changes the answer:
+//! the end of the quiet period, the give-up time, its deadline. Only while a batch is past its
+//! quiet period and held back (review mode, a half-answered set) does it look again every
+//! `HELD_TICK`: what releases it then may be a pane dying, which writes no file.
+//!
 //! While it lives it holds `$XDG_RUNTIME_DIR/margin/<session>.rewake` (wake.rs); the pane reads
 //! that mark and leaves the wake-up to it.
 
@@ -24,7 +31,8 @@ use std::time::SystemTime;
 
 /// Its own deadline, under the hook timeout `init` writes (3600 s).
 pub const DEADLINE: f64 = 3480.0;
-const POLL_MS: u64 = 500;
+/// How often a batch that is held back (review mode, an open question set) is looked at again.
+const HELD_TICK: f64 = 2.0;
 
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
@@ -103,6 +111,36 @@ impl Watch {
         Some(Outcome::Wake(text))
     }
 
+    /// When to look again if no watched file changes first: the next moment the clock alone can
+    /// change what `step` says. Call after a `step` that returned None.
+    pub fn next_look(&self, now: f64) -> f64 {
+        let mut t = self.deadline;
+        if let Some(last) = self.net.iter().filter_map(|e| crate::util::parse_rfc3339(&e.at)).reduce(f64::max) {
+            if now >= last + wake::QUIET {
+                // quiet, and still not done: held by review mode or an open set
+                t = t.min(now + HELD_TICK);
+            }
+            for at in [last + wake::QUIET, last + wake::GIVE_UP] {
+                if at > now {
+                    t = t.min(at);
+                }
+            }
+        }
+        t
+    }
+
+    /// The files `step` reads, as a watch to sleep on. Built before the first `step`.
+    /// `runtime`: where wake.rs keeps `<session>.rewake`, which a later watcher replaces.
+    fn files(&self, runtime: &std::path::Path) -> crate::watch::Watch {
+        let dir = self.st.dir();
+        let mut w = crate::watch::Watch::new().dir(&dir, &["events.jsonl"]).dir(&self.st.activity_dir(), &[]).dir(&dir.join("delivered"), &[]).dir(&dir.join("review"), &[]);
+        // made by `watch_begin`, with its own permissions: watched, never created here
+        if runtime.is_dir() {
+            w.add_dir(runtime, &[]);
+        }
+        w
+    }
+
     pub fn end(&self) {
         wake::watch_end(&self.session, self.pid);
     }
@@ -129,6 +167,8 @@ pub fn run(home: Option<&str>, project: Option<&str>, timeout: f64) -> i32 {
     let cfg = crate::config::Config::load();
     let Ok(mut w) = Watch::start(st, &session, &cfg.wake, crate::util::epoch_now(), timeout) else { return 0 };
     wake::save_inbox(&session);
+    let mut files = w.files(&std::env::var("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir()).join("margin"));
+    let mut boards: Vec<String> = vec![];
     loop {
         match w.step(crate::util::epoch_now()) {
             Some(Outcome::Wake(text)) => {
@@ -140,7 +180,18 @@ pub fn run(home: Option<&str>, project: Option<&str>, timeout: f64) -> i32 {
                 w.end();
                 return 0;
             }
-            None => std::thread::sleep(std::time::Duration::from_millis(POLL_MS)),
+            None => {
+                // a pending decision's board: an answer applied or a question added there
+                // changes whether its set is still open
+                for a in w.net.iter().map(|e| &e.artifact).filter(|a| !a.is_empty()) {
+                    if !boards.contains(a) {
+                        files.add_dir(&w.st.art(a), &["doc.json", "state.json"]);
+                        boards.push(a.clone());
+                    }
+                }
+                let now = crate::util::epoch_now();
+                files.wait(Some(std::time::Duration::try_from_secs_f64(w.next_look(now) - now).unwrap_or_default()));
+            }
         }
     }
 }
@@ -183,6 +234,31 @@ mod tests {
         assert_eq!(wake::woke("S"), e.seq, "and the pane's inbox message for it is spoken for");
         w.end();
         assert!(!wake::watcher_live("S", now));
+        cleanup(&st, &run);
+    }
+
+    /// What the process sleeps until when no file changes: its deadline while nothing waits,
+    /// then the end of the quiet period, then (held back) a short look-again up to the give-up.
+    #[test]
+    fn the_next_look_is_the_next_moment_the_clock_matters() {
+        let (st, run) = setup();
+        let mut w = watch(&st);
+        let mut files = w.files(&run);
+        let now = epoch_now();
+        assert_eq!(w.step(now), None);
+        assert_eq!(w.next_look(now), w.deadline, "nothing pending: no clock but the deadline");
+        assert_eq!(files.wait(Some(std::time::Duration::from_millis(30))), crate::watch::Woken::Timeout);
+        let e = st.decide("plan", "Q1", "pick", json!("mcp"), "select", None).unwrap();
+        assert_eq!(files.wait(Some(std::time::Duration::from_secs(5))), crate::watch::Woken::Changed, "his pick wakes the watcher");
+        let at = crate::util::parse_rfc3339(&e.at).unwrap();
+        assert_eq!(w.step(at + 1.0), None);
+        assert_eq!(w.next_look(at + 1.0), at + wake::QUIET, "the end of his undo window");
+        // quiet, but a pane is in review mode: held, looked at again soon, never past the give-up
+        wake::review_mark(&st, "tty", "plan", true);
+        assert_eq!(w.step(at + wake::QUIET), None);
+        assert_eq!(w.next_look(at + wake::QUIET), at + wake::QUIET + HELD_TICK);
+        assert_eq!(w.next_look(at + wake::GIVE_UP - 0.5), at + wake::GIVE_UP);
+        assert!(matches!(w.step(at + wake::GIVE_UP), Some(Outcome::Wake(_))));
         cleanup(&st, &run);
     }
 

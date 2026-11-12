@@ -765,6 +765,13 @@ impl Store {
     pub fn events_path(&self) -> PathBuf {
         self.dir().join("events.jsonl")
     }
+    /// A blocking wait for the log to change (watch.rs): an append, or a rotation. Build it
+    /// before the first read of the log; whatever is appended after that read is then already
+    /// queued, and the next `wait` returns at once. It watches the project directory for the
+    /// live file's name, so it outlives the file being rotated away and created again.
+    pub fn watch_events(&self) -> crate::watch::Watch {
+        crate::watch::Watch::new().dir(&self.dir(), &["events.jsonl"])
+    }
     /// Generation `n` of the log: 0 is the live file, 1 the newest rotated one.
     fn events_gen(&self, n: usize) -> PathBuf {
         if n == 0 {

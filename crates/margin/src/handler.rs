@@ -1,7 +1,7 @@
 //! Handlers: registered commands the daemon runs when an event they asked for is appended.
 //!
 //! A handler is a name, a command and one or more event-name globs (`--on`). It has no timer and
-//! watches no file: scheduling lives outside margin, and reaches a handler as an event
+//! watches no file of its author's: scheduling lives outside margin, and reaches a handler as an event
 //! (`margin emit reviews.refresh` from cron). The pane never runs anything either: a key on a
 //! row appends an event, and whichever handler asked for that name does the work.
 //!
@@ -21,11 +21,16 @@
 //!
 //! This file also holds what one run needs around it: the per-handler log, the stop flag the
 //! daemon raises, and the retry backoff.
+//!
+//! A worker never wakes to ask whether there is work. It blocks (watch.rs) until the event log
+//! changes, its retry is due, or it is told to stop; while its command runs it blocks on the
+//! child's pid fd, the stop flag and the run's timeout.
 
 use crate::doc::{parse_line, Op};
 use crate::owner::fmt_secs;
 use crate::store::{write_atomic, Event, Store, Writer};
 use crate::util::{epoch_now, now_rfc3339, valid_id};
+use crate::watch::{PidFd, Waker};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -34,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn d_timeout() -> f64 {
     60.0
@@ -386,6 +391,8 @@ pub struct Ctl {
     pub stop: AtomicBool,
     /// Why it was stopped: "removed", "paused", "stopped" (daemon exit), "restart" (job changed).
     pub reason: Mutex<String>,
+    /// Raised with `stop`, and never lowered: what a blocked worker is woken by.
+    pub wake: Waker,
 }
 
 impl Ctl {
@@ -395,6 +402,11 @@ impl Ctl {
     pub fn stop(&self, why: &str) {
         *self.reason.lock().unwrap() = why.into();
         self.stop.store(true, Ordering::Relaxed);
+        self.wake.wake();
+    }
+    /// What ends a worker's wait from outside: this handler's stop, and the daemon's exit.
+    fn interrupts(&self) -> [i32; 2] {
+        [self.wake.fd(), crate::daemon::exit_fd()]
     }
 }
 
@@ -436,12 +448,14 @@ pub struct Worker {
     /// `margin handler run`: print what happens, and leave the daemon's status file alone.
     pub verbose: bool,
     last_stderr: Arc<Mutex<String>>,
+    /// Closed when the running command's stderr has been read to its end.
+    stderr_done: Option<mpsc::Receiver<()>>,
 }
 
 impl Worker {
     pub fn new(st: Store, h: Handler, ctl: Arc<Ctl>, foreground: bool) -> Worker {
         let log = Log::new(log_path(&st, &h.name), foreground);
-        Worker { st, h, ctl, log, status: Status::default(), verbose: foreground, last_stderr: Default::default() }
+        Worker { st, h, ctl, log, status: Status::default(), verbose: foreground, last_stderr: Default::default(), stderr_done: None }
     }
 
     fn save_status(&self) {
@@ -457,13 +471,6 @@ impl Worker {
         self.status.state = state.into();
         self.status.until = until.map(crate::util::rfc3339);
         self.save_status();
-    }
-
-    fn sleep(&self, secs: f64) {
-        let end = epoch_now() + secs;
-        while !self.ctl.stopped() && epoch_now() < end {
-            std::thread::sleep(Duration::from_millis(50));
-        }
     }
 
     /// Start the command: argv exec with no shell, in the directory it was registered from. Its
@@ -492,6 +499,7 @@ impl Worker {
                 // its own process group, so a stop kills whatever it started; and it dies with
                 // the daemon even if the daemon is killed hard
                 libc::setpgid(0, 0);
+                #[cfg(target_os = "linux")]
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
                 // the daemon ignores SIGPIPE; a script expects the default
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -504,7 +512,10 @@ impl Worker {
         let err = ch.stderr.take().unwrap();
         let log = self.log.clone();
         let last = self.last_stderr.clone();
+        let (done, rx) = mpsc::channel::<()>();
+        self.stderr_done = Some(rx);
         std::thread::spawn(move || {
+            let _done = done;
             let mut b = std::io::BufReader::new(err);
             let mut buf = Vec::new();
             use std::io::BufRead;
@@ -520,14 +531,19 @@ impl Worker {
     }
 
     /// TERM to the whole process group, a grace period, then KILL.
-    fn kill(ch: &mut Child) {
+    fn kill(ch: &mut Child, pidfd: &PidFd) {
         let pg = ch.id() as i32;
         unsafe { libc::kill(-pg, libc::SIGTERM) };
-        for _ in 0..20 {
+        let end = Instant::now() + Duration::from_secs(1);
+        loop {
             if matches!(ch.try_wait(), Ok(Some(_))) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            pidfd.wait(&[], left);
         }
         unsafe { libc::kill(-pg, libc::SIGKILL) };
         let _ = ch.wait();
@@ -558,21 +574,25 @@ impl Worker {
             let _ = out.read_to_end(&mut b);
             let _ = tx.send(String::from_utf8_lossy(&b).into_owned());
         });
-        let start = epoch_now();
+        // the wait for it: until the child ends, a stop is raised, or the run's time is up
+        let pidfd = PidFd::open(ch.id());
+        let start = Instant::now();
         let ended = loop {
             if let Ok(Some(s)) = ch.try_wait() {
                 break Ok(s);
             }
             if self.ctl.stopped() {
-                Self::kill(&mut ch);
+                Self::kill(&mut ch, &pidfd);
                 break Err(None);
             }
-            if epoch_now() - start > self.h.timeout {
-                Self::kill(&mut ch);
+            let left = self.h.timeout - start.elapsed().as_secs_f64();
+            if left <= 0.0 {
+                Self::kill(&mut ch, &pidfd);
                 break Err(Some(format!("timed out after {}", fmt_secs(self.h.timeout))));
             }
-            std::thread::sleep(Duration::from_millis(20));
+            pidfd.wait(&self.ctl.interrupts(), Duration::try_from_secs_f64(left).unwrap_or(Duration::MAX));
         };
+        drop(pidfd);
         self.status.run_started.clear();
         self.status.pid = 0;
         let status = match ended {
@@ -588,6 +608,12 @@ impl Worker {
             Err(Some(e)) => return Err(e),
         };
         let text = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+        // The exit is seen the moment it happens, which can be before the reader thread has
+        // logged the command's last words: wait for the end of its stderr (bounded: something
+        // the command left running may hold the pipe open), so a failure carries its reason.
+        if let Some(done) = self.stderr_done.take() {
+            let _ = done.recv_timeout(Duration::from_secs(1));
+        }
         use std::os::unix::process::ExitStatusExt;
         if !status.success() {
             let how = match (status.code(), status.signal()) {
@@ -695,21 +721,28 @@ impl Worker {
         self.set_state("live", None);
         let mut bo = Backoff { fails: self.status.attempts };
         let mut retry_at = 0.0f64;
+        // Armed before the first look at the log: an event appended between a look and the wait
+        // after it is already queued on the watch, and that wait returns at once.
+        let [stop, exit] = self.ctl.interrupts();
+        let mut watch = self.st.watch_events().interrupt(stop).interrupt(exit);
+        if let Some(why) = watch.fallback() {
+            self.log.line(&format!("{why}; checking the event log every {} ms instead", crate::watch::FALLBACK_TICK.as_millis()));
+        }
         // what the log held when this worker last looked, and the matches not yet handled
         let mut scanned = self.st.cursor_or_create(&self.h.cursor());
         let mut queue: Vec<Event> = Vec::new();
-        let mut first = true;
         while !self.ctl.stopped() {
-            if !first {
-                self.sleep(0.15);
-            }
-            first = false;
             let last = self.st.last_seq();
             if last > scanned {
                 queue.extend(self.st.events_since(scanned).into_iter().filter(|e| self.h.wants(e)));
                 scanned = last;
             }
-            if queue.is_empty() || epoch_now() < retry_at || self.ctl.stopped() {
+            let now = epoch_now();
+            if queue.is_empty() || now < retry_at {
+                // nothing to run yet: sleep until the log changes, the retry is due (when one
+                // is), or a stop. No clock wakes an idle worker.
+                let due = (!queue.is_empty()).then(|| Duration::try_from_secs_f64(retry_at - now).unwrap_or(Duration::ZERO));
+                watch.wait(due);
                 continue;
             }
             // `margin handler run` may have handled some from the foreground
@@ -894,6 +927,41 @@ mod tests {
         // others may not write its ids; it may not write outside them
         let e = st.patch("board", &[Op::Set { id: "h-1".into(), field: "text".into(), value: json!("mine") }], None).unwrap_err();
         assert!(e.contains("belongs to handler `h`"), "{e}");
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A worker sleeps on the log's watch, with no clock to save it: every event must wake it,
+    /// the one appended while it was busy with the last (between its look at the log and its
+    /// next wait) included. Each emit here lands the moment the previous run committed, which
+    /// is that window.
+    #[test]
+    fn an_event_emitted_as_the_worker_goes_to_sleep_is_still_handled() {
+        let st = temp_store();
+        let h = handler("h", &["go"], "cat > /dev/null");
+        // one already waiting when the worker starts: before its watch exists
+        st.cursor_or_create("handler:h");
+        let first = emit(&st, "go", json!(0));
+        let ctl = Arc::new(Ctl::default());
+        let mut w = Worker::new(Store::new(st.home.clone(), st.project.clone()), h.clone(), ctl.clone(), false);
+        let t = std::thread::spawn(move || w.run());
+        let handled = |seq: u64| {
+            let t0 = Instant::now();
+            while st.cursor("handler:h") != Some(seq) && t0.elapsed() < Duration::from_secs(10) {
+                std::thread::yield_now();
+            }
+            st.cursor("handler:h") == Some(seq)
+        };
+        assert!(handled(first), "the event from before the worker started");
+        for n in 1..=6 {
+            let seq = emit(&st, "go", json!(n));
+            assert!(handled(seq), "event {n} was never handled: the worker slept through it");
+        }
+        // idle now, and blocked: a stop still ends it at once
+        let t0 = Instant::now();
+        ctl.stop("stopped");
+        t.join().unwrap();
+        assert!(t0.elapsed() < Duration::from_millis(500), "a stop wakes a sleeping worker: {:?}", t0.elapsed());
+        assert_eq!(read_status(&st, "h").unwrap().runs, 7);
         std::fs::remove_dir_all(&st.home).ok();
     }
 
