@@ -91,6 +91,9 @@ struct Live {
     /// The block `<board>.detail` was last appended for (None: the panel is closed, or the tab
     /// went off screen; the next block it shows is asked about again).
     detail_sent: Option<String>,
+    /// The table row the last click selected, and when: a second click within `DOUBLE_CLICK`
+    /// seconds opens it.
+    row_click: Option<(String, f64)>,
     /// More was asked for and a handler is registered to answer: what the panel says meanwhile.
     asked: Option<Asked>,
 }
@@ -124,6 +127,9 @@ struct Sent {
     refused: Option<String>,
     taken_at: Option<f64>,
 }
+
+/// Two clicks on a table row this close together (seconds) are a double click.
+const DOUBLE_CLICK: f64 = 0.45;
 
 /// How long a row says `sent` before the pane asks who took the event.
 const SENT_GRACE: f64 = 1.5;
@@ -386,6 +392,7 @@ impl Live {
             sent: Default::default(),
             detail_at: None,
             detail_sent: None,
+            row_click: None,
             asked: None,
         }
     }
@@ -1158,11 +1165,15 @@ impl Live {
         if let Some(t) = button.or_else(|| token_at(grid, x, y)).as_deref().and_then(select::parse_token) {
             // a click that opens a block's target is the open action: the same event as enter
             if t.verb == "open" && t.artifact.as_deref().map(|a| a == self.art).unwrap_or(true) && self.doc.find(&t.id).is_some() {
-                // a table row is selected by its first click (its keys and detail then apply to
-                // it); a click on the selected row opens it
-                if self.doc.find(&t.id).map(|b| b.kind == "tr").unwrap_or(false) && self.scene.focus.as_deref() != Some(t.id.as_str()) {
+                // a click selects a table row (its keys and detail then apply to it); only a
+                // double click opens it. The detail panel's open line is a button: one click
+                if self.doc.find(&t.id).map(|b| b.kind == "tr").unwrap_or(false) && !self.scene.in_detail(x, y) {
+                    let double = self.row_click.take().map(|(id, at)| id == t.id && now - at <= DOUBLE_CLICK).unwrap_or(false);
                     self.scene.focus = Some(t.id.clone());
-                    return;
+                    if !double {
+                        self.row_click = Some((t.id.clone(), now));
+                        return;
+                    }
                 }
                 self.fire(&t.id, "open", "mouse", now);
                 return;
@@ -2978,7 +2989,15 @@ mod action_tests {
         assert!(st.events().iter().any(|e| e.kind == "ci.refresh" && e.id == "job-1" && e.via == "mouse"));
         // a click on the line that opens the target is the open action, not an opener
         let (x, y) = lv.scene.hits.iter().find(|h| h.3 == "mg:open/job-1").map(|h| (h.0, h.1)).unwrap();
+        let on_row = !lv.scene.in_detail(x, y);
         lv.click(&g, x, y, 7.0);
+        if on_row {
+            // the row itself: one click selects, a slow second click selects again, a double opens
+            assert!(!st.events().iter().any(|e| e.kind == "ci.open"), "one click only selects");
+            lv.click(&g, x, y, 9.0);
+            assert!(!st.events().iter().any(|e| e.kind == "ci.open"), "two slow clicks are not a double click");
+            lv.click(&g, x, y, 9.2);
+        }
         assert!(st.events().iter().any(|e| e.kind == "ci.open" && e.id == "job-1" && e.via == "mouse"));
         std::fs::remove_dir_all(&st.home).ok();
     }
