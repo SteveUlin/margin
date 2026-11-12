@@ -228,7 +228,7 @@ its own id.
   `optional: true`: drop this column first when the pane is narrow. `summary: true` (a `runs`
   column only): each strip ends with its failure count.
 - Row fields: `cells` (an object keyed by column key; a missing key is a blank cell), `target` (a
-  URL or `mg:` token: enter or a click appends `<board>.open` for the `open` handler), `detail`
+  URL or `mg:` token: enter or a double click appends `<board>.open` for the `open` handler), `detail`
   (shown in the detail panel), `after` (the rows it sits on, for a `graph` column), `actions`
   (keys on this row; on the table: on every row).
 
@@ -317,6 +317,10 @@ while folded), `folded: true` (starts folded), `tone`. Children are any blocks.
 
 **text**, **bullet**: prose that wraps. `text` takes `style`: `note` `dim` `warn`. A `bullet`
 holds sub-bullets as children. Both take `tone`.
+
+**code**: monospace lines kept as written: `text`, and `language` to color it (`cpp` `python`
+`json` `jsonnet` `starlark` `rust` `sh` `toml` `yaml` `diff`, an extension, or a file name such
+as `BUILD`; anything else draws plain). A line too long is cut and wraps while focused.
 
 **todo**: a step: `text`, `note`, `status` (`todo` `doing` `done` `blocked` `skipped` `next`),
 `owner` (`you`: a step that is {{user}}'s). Its id shows beside it when it is 8 characters or

@@ -1236,26 +1236,62 @@ fn draw_kind(cx: &Ctx, b: &Block, w: u16, depth: usize, first: bool) -> Drawn {
             // monospace lines on a raised ground, a gutter rule, no wrap: a long line ends in …
             // until the block has the focus, where it wraps at the edge (a dotted gutter marks
             // the rows that continue a line), so what was cut can be read
-            let lines: Vec<&str> = b.s("text").lines().collect();
+            let src = b.s("text").replace('\t', "    ");
+            let lines: Vec<&str> = src.lines().collect();
+            // the language's colors, when the label names one (highlight.rs); parsed once per text
+            let hl = crate::highlight::lines(b.s("language"), &src);
             // two code blocks in a row get a blank row between them, or they read as one block
             let (par, prev) = family(cx, b);
             let top = prose_gap(par, prev, b).unwrap_or(prev.map(|c| c.kind == "code").unwrap_or(false) as u16);
             let room = w.saturating_sub(ind + 4) as usize;
             let full = in_full(cx, b);
-            let rows: Vec<(String, bool)> = lines
+            // each drawn row: its text, the line it is from, and how many of the line's
+            // characters stand before it (a wrapped line's later rows)
+            let rows: Vec<(String, usize, usize)> = lines
                 .iter()
-                .flat_map(|l| {
-                    let l = l.replace('\t', "    ");
-                    let cut = if full { hard_wrap(&l, room) } else { vec![truncate(&l, room).into_owned()] };
-                    cut.into_iter().enumerate().map(|(i, s)| (s, i == 0)).collect::<Vec<_>>()
+                .enumerate()
+                .flat_map(|(n, l)| {
+                    let cut = if full { hard_wrap(l, room) } else { vec![truncate(l, room).into_owned()] };
+                    let mut at = 0;
+                    cut.into_iter()
+                        .map(|s| {
+                            let from = at;
+                            at += s.chars().count();
+                            (s, n, from)
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect();
             let mut g = new_grid(w, rows.len().max(1) as u16 + top, g0);
-            for (i, (l, starts)) in rows.iter().enumerate() {
+            for (i, (l, n, from)) in rows.iter().enumerate() {
                 let y = i as u16 + top;
                 g.tint(Rect::new(ind, y, w.saturating_sub(ind + 1), 1), p.bg1);
-                put(&mut g, ind, y, if *starts { "▏" } else { "┊" }, Style::fg(p.bg4).on(p.bg1));
-                put(&mut g, ind + 2, y, l, Style::fg(p.aqua).on(p.bg1));
+                put(&mut g, ind, y, if *from == 0 { "▏" } else { "┊" }, Style::fg(p.bg4).on(p.bg1));
+                match hl.as_ref().and_then(|h| h.get(*n)) {
+                    None => {
+                        put(&mut g, ind + 2, y, l, Style::fg(p.aqua).on(p.bg1));
+                    }
+                    Some(line) => {
+                        // a row is a run of the line's characters (and the … of a cut, which
+                        // stands where a character was and takes the dim of punctuation)
+                        let roles = crate::highlight::per_char(line);
+                        let whole: Vec<char> = lines[*n].chars().collect();
+                        let (mut x, mut run, mut run_role) = (ind + 2, String::new(), crate::highlight::Role::Plain);
+                        for (k, c) in l.chars().enumerate() {
+                            let r = match whole.get(from + k) {
+                                Some(&o) if o == c => roles.get(from + k).copied().unwrap_or(crate::highlight::Role::Plain),
+                                _ => crate::highlight::Role::Punct,
+                            };
+                            if r != run_role && !run.is_empty() {
+                                x = put(&mut g, x, y, &run, Style::fg(crate::highlight::color(p, run_role)).on(p.bg1));
+                                run.clear();
+                            }
+                            run_role = r;
+                            run.push(c);
+                        }
+                        put(&mut g, x, y, &run, Style::fg(crate::highlight::color(p, run_role)).on(p.bg1));
+                    }
+                }
             }
             let lang = b.s("language");
             if !lang.is_empty() && !lines.is_empty() {
@@ -3297,6 +3333,29 @@ mod note_tests {
 
     /// Item 6: italic, strike and link spans, alone and inside bold, drawn with the terminal's
     /// attributes; code keeps what it holds.
+    #[test]
+    fn a_code_block_is_colored_by_its_language_cut_or_wrapped() {
+        let p = &EVERFOREST;
+        let code = "// the cap\nstatic const int kCap = 5; const char* kName = \"a string long enough to be cut at the edge\";";
+        let d = dash_tests::doc(1, json!([{"type": "code", "id": "c", "language": "cpp", "text": code}, {"type": "code", "id": "plain", "language": "output", "text": "static 5"}]));
+        let fg = |g: &Grid, x: u16, y: u16| g.get(x, y).unwrap().style.fg;
+        let (text, grids) = frame(&d, 40, None);
+        let g = &grids["c"];
+        // x 3 is the first character: the comment is dim, a keyword and a number have their colors
+        assert_eq!((fg(g, 3, 0), fg(g, 3, 1), fg(g, 20, 1), fg(g, 27, 1)), (Some(p.grey0), Some(p.orange), Some(p.fg), Some(p.purple)), "{text}");
+        // the long line is cut with …, and the cut line still ends inside the pane
+        let cut = text.lines().nth(1).unwrap();
+        assert!(cut.ends_with('…') && cut.chars().count() <= 40, "{text}");
+        // focused, it wraps: the string keeps its color on the rows it continues on
+        let (full, grids) = frame(&d, 40, Some("c"));
+        let rows: Vec<&str> = full.lines().take_while(|l| !l.contains("static 5")).collect();
+        assert!(rows.len() >= 4 && rows.concat().replace(['▏', '┊', ' '], "").contains("cutattheedge\";"), "{full}");
+        let last = grids["c"].area().h - 1;
+        assert_eq!(fg(&grids["c"], 3, last), Some(p.aqua), "{full}");
+        // a label that names no language draws as before: one color
+        assert_eq!((fg(&grids["plain"], 3, 1), fg(&grids["plain"], 10, 1)), (Some(p.aqua), Some(p.aqua)));
+    }
+
     #[test]
     fn a_graph_column_carries_its_lanes_down_a_wrapped_row() {
         // the focused row wraps its text: the lanes that leave it downward carry on beside it

@@ -14,3 +14,7 @@ vellum = { path = "../vellum" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# code-block highlighting (highlight.rs): Sublime grammars on the pure-Rust regex engine, no C
+# library; two-face adds bat's grammars (TOML and many more) to syntect's bundled ones
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "yaml-load"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }

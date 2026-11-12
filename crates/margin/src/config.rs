@@ -75,6 +75,8 @@ pub struct Config {
     /// The dependency graph's glyphs: "box" (box-drawing, any font) or "flog" (Flog symbols,
     /// rbong/flog-symbols, U+F5D0–U+F60D: rounder, but the font must have them).
     pub graph_glyphs: String,
+    /// Color the code of a `code` block by its language (highlight.rs). false: every block plain.
+    pub highlight: bool,
     /// How a toast shows its time running out: number (8s), dots, pie, edge (the bottom border
     /// drains) or fade (none, it fades at the end).
     pub toast_countdown: String,
@@ -111,6 +113,7 @@ impl Default for Config {
             wake: "auto".into(),
             user_name: String::new(),
             graph_glyphs: "box".into(),
+            highlight: true,
             toast_countdown: "bar".into(),
             toast_border: "double".into(),
             dashboard: Default::default(),
@@ -160,6 +163,7 @@ impl Config {
         if let Ok(x) = std::env::var("MARGIN_SELECT_COMMAND") {
             c.select_command = x;
         }
+        crate::highlight::set_enabled(c.highlight);
         c
     }
 

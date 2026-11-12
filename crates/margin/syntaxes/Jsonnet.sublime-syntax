@@ -1,0 +1,83 @@
+%YAML 1.2
+---
+# Jsonnet (.jsonnet, .libsonnet) for margin's code blocks. Written for this repository (MIT, like
+# the rest of it) from the language reference at jsonnet.org: neither syntect's bundled grammars
+# nor bat's include one. It marks what the pane colors: comments, strings and text blocks,
+# keywords, constants, numbers, the names of fields and functions, punctuation.
+name: Jsonnet
+file_extensions:
+  - jsonnet
+  - libsonnet
+scope: source.jsonnet
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.jsonnet
+    - match: '#.*$'
+      scope: comment.line.number-sign.jsonnet
+    - match: '/\*'
+      scope: comment.block.jsonnet
+      push: block_comment
+    - match: '\|\|\|'
+      scope: string.unquoted.block.jsonnet
+      push: text_block
+    - match: '@"'
+      scope: string.quoted.double.jsonnet
+      push: verbatim_double
+    - match: "@'"
+      scope: string.quoted.single.jsonnet
+      push: verbatim_single
+    - match: '"'
+      scope: string.quoted.double.jsonnet
+      push: double
+    - match: "'"
+      scope: string.quoted.single.jsonnet
+      push: single
+    - match: '\b(assert|else|error|for|function|if|import|importstr|importbin|in|local|tailstrict|then)\b'
+      scope: keyword.control.jsonnet
+    - match: '\b(self|super)\b|\$'
+      scope: variable.language.jsonnet
+    - match: '\b(true|false|null)\b'
+      scope: constant.language.jsonnet
+    - match: '\b\d+(\.\d+)?([eE][+-]?\d+)?\b'
+      scope: constant.numeric.jsonnet
+    - match: '\bstd\.[A-Za-z_][A-Za-z0-9_]*'
+      scope: support.function.jsonnet
+    - match: '[A-Za-z_][A-Za-z0-9_]*(?=\s*(\([^)]*\))?\s*\+?:{1,3}(?!:))'
+      scope: entity.name.tag.jsonnet
+    - match: '[A-Za-z_][A-Za-z0-9_]*'
+      scope: variable.other.jsonnet
+    - match: '[{}\[\](),;.]|:{1,3}'
+      scope: punctuation.separator.jsonnet
+    - match: '[-+*/%<>=!&|^~]+'
+      scope: keyword.operator.jsonnet
+  block_comment:
+    - meta_scope: comment.block.jsonnet
+    - match: '\*/'
+      pop: true
+  text_block:
+    - meta_scope: string.unquoted.block.jsonnet
+    - match: '^\s*\|\|\|'
+      pop: true
+  double:
+    - meta_scope: string.quoted.double.jsonnet
+    - match: '\\.'
+      scope: constant.character.escape.jsonnet
+    - match: '"'
+      pop: true
+  single:
+    - meta_scope: string.quoted.single.jsonnet
+    - match: '\\.'
+      scope: constant.character.escape.jsonnet
+    - match: "'"
+      pop: true
+  verbatim_double:
+    - meta_scope: string.quoted.double.jsonnet
+    - match: '""'
+    - match: '"'
+      pop: true
+  verbatim_single:
+    - meta_scope: string.quoted.single.jsonnet
+    - match: "''"
+    - match: "'"
+      pop: true

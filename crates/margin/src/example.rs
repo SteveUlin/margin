@@ -147,8 +147,8 @@ impl Example {
 #      runs it and applies what it prints, with no AI involved
 #        margin handler add {n}-refresh --on {n}.refresh --board {n} --owns {owns} -- ./{n}.fetch.sh {n}.data.json
 #        margin emit {n}.refresh                      # try it: `margin handler ls` shows the run
-#   5. make a row's link open: enter (or a click) on a row with a target appends `{n}.open`, and the pane
-#      runs nothing itself. This ready-made handler opens it; register it once per project
+#   5. make a row's link open: on a row with a target, enter (or a double click on a table row, one
+#      click on a link or status row) appends `{n}.open`, and the pane runs nothing itself. This ready-made handler opens it; register it once per project
 #        margin handler add open --on '*.open' -- margin handle open
 #   6. keep it current: margin has no timer. Whatever runs on a schedule emits the event (from any
 #      directory: --project names the board's project; `margin ls` run beside the board prints nothing

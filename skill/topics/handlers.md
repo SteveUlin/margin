@@ -67,7 +67,7 @@ margin handler ls                                                  # state, even
 | the event | appended by | its name |
 |---|---|---|
 | a key on a row | the pane, when {{user}} presses a key a block's `actions` declare | `<board>.<action name>` |
-| enter or a click on a row with a `target` | the pane | `<board>.open` |
+| enter, or a double click on a table row (one click on a link or status row), with a `target` | the pane | `<board>.open` |
 | the same, from a script | `margin act <board> <id> <action>` | the same names |
 | anything else | `margin emit <name> [json]`, from cron, CI, another handler | what you choose |
 | a decision in a plan pane | the pane | `pick`, `tick`, `strike`, `verdict` (with `"artifact"` and `"id"`) |

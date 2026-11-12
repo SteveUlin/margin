@@ -44,7 +44,7 @@ jq -c '
     children: [
       sort_by(.created_at) | reverse | .[] | {
         type: "tr", id: "pr-\(.number)",
-        target: .url,                       # enter or a click opens it
+        target: .url,                       # enter or a double click opens it
         detail: (.body // ""),              # the detail panel (d) shows it
         after: [.base // empty | "pr-\(.)"],  # stacked on another pull request: the id of that row (one not listed is ignored)
         cells: {
