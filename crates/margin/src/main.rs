@@ -68,6 +68,7 @@ boards: creating and changing are different commands, for a board and inside one
   margin purpose <board> [\"text\"]                        the pane's one line of orientation (none: clear)
   margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W]
   margin doc <board> <id> [--title T] < notes.md         long-form markdown as a section
+  margin diff <board> <id> --old A --new B | --rev R [--to R2] <file>   one file's change as a structural diff to approve or reject
   margin toast <board> <text> [--at ID] [--level ok|info|warn|error]   a message that goes away
   margin show <board> [<id>] [--json]    margin ls [--json]    margin gc    margin doctor [--fix]
 
@@ -106,7 +107,6 @@ reference:
   margin help [<command>|<topic>]
 
 parked (not part of the documented set; may be removed):
-  margin diff <board> <id> --old A --new B | --rev R [--to R2] <file>   a structural diff to approve or reject
   margin image <board> <id> <png> [--alt A] [--rows N]                  a PNG in the pane
   margin demo live [--speed X]                                          plays a turn into the demo board
 
@@ -181,7 +181,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "purpose", help: "margin purpose <board> [\"text\"] [--json]\n  change: what the pane of a board that exists is for, in one line: the first line of its pinned head, shown whether or not the\n  content scrolls (zh folds the head). It stands where a Goal section used to. No text clears it;\n  a whole-document put keeps it unless it carries its own \"purpose\"\n    margin purpose plan 'Get CI green: the flaky test passes 200 runs'\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ask", help: "margin ask <board> <id> <question> <opt>... [--suggest S] [--parent P] [--why W] [--base-rev N]\n  create: a question card; sulin picks with a click, 1-9, or mg:pick/<id>=<opt>. There is no default:\n  --suggest marks your recommendation on the card and nothing is highlighted until they pick.\n  An id that exists is refused (change it with margin set); the board must exist (margin new)\n", flags: &["--default", "--suggest", "--parent", "--why", "--applies", "--base-rev"], max_pos: None },
     Cmd { name: "propose", help: "margin claude propose <board> <id> <verb> [value] [--why W] [--base-rev N]\n  offer a change to one of the person's decisions: tick done|todo|skipped|next, pick <opt>, strike,\n  approve, reject. It shows on the component; their accept applies it as their decision\n", flags: &["--why", "--base-rev"], max_pos: Some(4) },
-    Cmd { name: "diff", help: "margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  a structural diff block (difftastic); replaces <id> in place if it exists\n  difft: $MARGIN_DIFFT, else difft on PATH (the nix build wraps it in)\n  not part of the documented set; may be removed\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
+    Cmd { name: "diff", help: "margin diff <board> <id> --old A --new B [--parent P] [--path LABEL]\nmargin diff <board> <id> --rev R [--to R2] <file> [--parent P]      jj revisions\n  one file's change as a structural diff block the user approves, rejects or asks about;\n  replaces <id> in place if it exists. --path is the label in the header (default: the new\n  file's path). Narrow panes show one column with - and +, panes of 100 cells or more the two\n  files side by side; the focused block wraps its long lines and shows every row.\n    margin diff plan d1 --old before/retry.cc --new src/retry.cc --path src/retry.cc\n    margin diff plan d1 --rev @- src/retry.cc\n  margin runs difftastic for it and does not include it: $MARGIN_DIFFT, else difft on PATH,\n  else the config key difft, else the path a nix build compiled in. margin help diffs\n", flags: &["--old", "--new", "--parent", "--path", "--rev", "--to", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "image", help: "margin image <board> <id> <png> [--alt A] [--parent P] [--rows N] [--base-rev N]\n  a PNG in the pane (kitty graphics, else half-blocks); the document stores the file's path\n  not part of the documented set; may be removed\n", flags: &["--alt", "--parent", "--rows", "--base-rev"], max_pos: Some(3) },
     Cmd { name: "show", help: "margin show <board> [--json]\n  what the person sees: content merged with their decisions\n  --json  {\"v\":1, \"doc\": the whole document, \"state\": {\"decisions\": {id: {kind, value, by, at}}}}\nmargin show <board> <id> [--json]\n  one block as JSON: {\"v\":1, \"artifact\", \"rev\", \"block\": {type, id, fields, children}, \"decision\": the\n  person's decision on it, or null}\n  exit codes, here and everywhere: 0 done, 1 refused or failed, 3 not found (no such board,\n  component, handler or owner)\n", flags: &["--json"], max_pos: Some(2) },
     Cmd { name: "ls", help: "margin ls [--json]\n  this project's boards (archives ones untouched for archive_days)\n", flags: &["--json"], max_pos: Some(0) },
@@ -2920,13 +2920,13 @@ mod tests {
     #[test]
     fn parked_commands_are_marked_in_their_help() {
         let mark = "not part of the documented set; may be removed";
-        for name in ["diff", "image", "demo"] {
+        for name in ["image", "demo"] {
             let c = CMDS.iter().find(|c| c.name == name).unwrap();
             assert!(c.help.contains(mark), "margin {name} --help");
         }
         let lines: Vec<&str> = HELP.lines().collect();
         let at = lines.iter().position(|l| *l == format!("parked ({mark}):")).expect("a parked heading");
-        for (i, cmd) in ["margin diff ", "margin image ", "margin demo live "].iter().enumerate() {
+        for (i, cmd) in ["margin image ", "margin demo live "].iter().enumerate() {
             assert!(lines[at + 1 + i].trim_start().starts_with(cmd), "{}", lines[at + 1 + i]);
             assert_eq!(lines.iter().filter(|l| l.contains(cmd.trim_end())).count(), 1, "{cmd} is listed once, under parked");
         }

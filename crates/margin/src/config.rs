@@ -60,8 +60,8 @@ pub struct Config {
     /// `$ZELLIJ_SESSION_NAME` is set, else plain).
     pub host: String,
     /// difftastic for `margin diff` when no `difft` is on PATH: an absolute path. `MARGIN_DIFFT`
-    /// overrides it and PATH. The nix build wraps difft in; a dev build outside `nix develop`
-    /// needs this, PATH, or one of the usual nix profile dirs.
+    /// overrides it and PATH. The nix build compiles difft's path in; a dev build outside
+    /// `nix develop` needs this, PATH, or one of the usual nix profile dirs.
     pub difft: String,
     /// Wake an idle session of the board's consumer when sulin finishes in the pane (quiet 5 s, no half-answered question
     /// set, out of review mode). "auto": the adapter's waiting `Stop` hook does it when its

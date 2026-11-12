@@ -134,9 +134,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
   done by a handler, never by the pane (`margin help handlers`); numbers that change often go in
   a dataset (`margin data`). **Why:** a board you refresh costs a turn each time.
 
-## On demand: `margin help <topic>`
-
-Read a topic before first using its feature; `margin <cmd> --help` gives flags.
+## On demand: `margin help <topic>` before first using a feature; `margin <cmd> --help` for flags
 
 - `dashboards`: standing boards: tables, run strips, tabs, badges, plots fed by `margin data`; step by step.
 - `handlers`: commands margin runs for an event (a key, a refresh): the contract, the line grammar.
@@ -144,6 +142,7 @@ Read a topic before first using its feature; `margin <cmd> --help` gives flags.
 - `contract`: what an outside tool may rely on: the JSON shapes, the environment, the exit codes.
 - `lifecycle`: what survives a session end, a closed pane, a reboot; `margin doctor`, `daemon status`.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
+- `diffs`: `margin diff`, a file's change as a structural diff they approve or reject.
 - `graphs`: `owner` ({{user}}'s steps), `rests_on` (steps tied to claims), lanes.
 - `diagrams`: the house style for a diagram typed by hand: boxes, edges, arrowheads, 64 cells.
 - `proposals`: `margin claude propose`, offering a change to one of their decisions.

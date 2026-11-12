@@ -18,6 +18,7 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("contract", include_str!("../../../skill/topics/contract.md")),
     ("lifecycle", include_str!("../../../skill/topics/lifecycle.md")),
     ("toasts", include_str!("../../../skill/topics/toasts.md")),
+    ("diffs", include_str!("../../../skill/topics/diffs.md")),
     ("graphs", include_str!("../../../skill/topics/graphs.md")),
     ("diagrams", include_str!("../../../skill/topics/diagrams.md")),
     ("proposals", include_str!("../../../skill/topics/proposals.md")),
@@ -333,15 +334,15 @@ mod tests {
         assert!(SKILL.contains("- `diagrams`:"));
     }
 
-    /// The parked components (diff, image, dependency lanes, `demo live`) are not taught: the
+    /// The parked components (image, dependency lanes, `demo live`) are not taught: the
     /// skill and the topics leave them out, but for the one line on lanes the graphs topic keeps.
     /// (A table's graph column is not parked: dashboards documents it.)
     /// Their schema entries stay, each marked.
     #[test]
     fn parked_components_are_not_taught() {
-        assert!(topic("diffs").is_none() && topic("images").is_none());
+        assert!(topic("diffs").is_some() && topic("images").is_none(), "the diff block is documented again; images stay parked");
         for (name, text) in std::iter::once(&("skill", SKILL)).chain(TOPICS) {
-            for gone in ["margin diff", "margin image", "demo live", "a diff", "a PNG"] {
+            for gone in ["margin image", "demo live", "a PNG"] {
                 assert!(!text.contains(gone), "{name} still teaches {gone:?}");
             }
             let lanes = text.lines().filter(|l| l.contains("\"after\": [") || l.contains("`after`")).count();
@@ -354,9 +355,8 @@ mod tests {
             assert_eq!(lanes, taught, "{name}: lanes between todos are documented in one line of the graphs topic only");
         }
         let mark = "not part of the documented set; may be removed";
-        for kind in ["diff", "image"] {
-            assert!(crate::doc::kind(kind).unwrap().about.ends_with(mark), "{kind}");
-        }
+        assert!(crate::doc::kind("image").unwrap().about.ends_with(mark));
+        assert!(!crate::doc::kind("diff").unwrap().about.contains(mark));
         assert!(crate::doc::kind("todo").unwrap().fields.iter().any(|f| f.0 == "after" && f.2.ends_with(mark)));
     }
 

@@ -42,8 +42,11 @@
           MARGIN_FONT_DIR = "${pkgs.nerd-fonts.jetbrains-mono}/share/fonts/truetype/NerdFonts/JetBrainsMono";
         };
 
-        # packages.default: the margin binary. `margin diff` shells out to difftastic,
-        # so the wrapper puts difft on its PATH; everything else is in the binary.
+        # packages.default: the margin binary. `margin diff` shells out to difftastic.
+        # Its store path and the demo assets' are compiled in (MARGIN_*_BUILTIN, read
+        # with option_env! in diffblock.rs and demo.rs), because `margin pin` copies the
+        # bare binary out from behind the wrapper and the wrapper's PATH and
+        # MARGIN_ASSETS do not follow it. The wrapper stays for jq and jj.
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "margin";
           version = "0.1.0";
@@ -53,6 +56,8 @@
           };
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ pkgs.makeWrapper ];
+          MARGIN_DIFFT_BUILTIN = "${pkgs.difftastic}/bin/difft";
+          MARGIN_ASSETS_BUILTIN = "${placeholder "out"}/share/margin/assets/demo";
           # the demo finds its assets next to the source tree; point it at the installed copy
           postInstall = ''
             mkdir -p $out/share/margin

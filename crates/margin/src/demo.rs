@@ -15,10 +15,15 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
+/// The demo's files: `$MARGIN_ASSETS`, else the installed copy a nix build compiled in
+/// (`MARGIN_ASSETS_BUILTIN`, set in flake.nix: a binary that `margin pin` copied out from behind
+/// the nix wrapper still finds them), else the source tree's.
 pub fn assets() -> PathBuf {
     std::env::var("MARGIN_ASSETS")
+        .ok()
+        .or_else(|| option_env!("MARGIN_ASSETS_BUILTIN").map(String::from))
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo"))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo"))
 }
 
 fn block(v: Value) -> Block {
