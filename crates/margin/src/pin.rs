@@ -128,6 +128,7 @@ pub fn report(home: &Path) -> String {
         let what = if args[1] == "view" { format!("pane {}", args.get(2).cloned().unwrap_or_default()) } else { "daemon".to_string() };
         let how = match (runs_pin(home, pid), exe_of(pid)) {
             (Some(true), _) => "runs the pin".to_string(),
+            (_, Some(e)) if args[1] == "daemon" => format!("runs {} (not the pin: it moves there once its runs in flight finish)", e.display()),
             (_, Some(e)) => format!("runs {} (not the pin: it moves to the pin when the pin next changes)", e.display()),
             _ => "runs a binary that cannot be read".to_string(),
         };

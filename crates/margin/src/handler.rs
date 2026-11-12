@@ -393,6 +393,12 @@ pub struct Ctl {
     pub reason: Mutex<String>,
     /// Raised with `stop`, and never lowered: what a blocked worker is woken by.
     pub wake: Waker,
+    /// Finish the run in hand and take no more events (`drain`): the daemon is about to become
+    /// another build (daemon.rs). The running command is left alone, unlike a stop.
+    pub draining: AtomicBool,
+    /// Raised with `drain`: wakes a worker that is waiting for events, never one waiting on its
+    /// command (that wait ends when the command does).
+    pub drain_wake: Waker,
 }
 
 impl Ctl {
@@ -403,6 +409,16 @@ impl Ctl {
         *self.reason.lock().unwrap() = why.into();
         self.stop.store(true, Ordering::Relaxed);
         self.wake.wake();
+    }
+    /// End the worker after the run it is in, if any: its command is not signalled, its cursor
+    /// moves as after any run, and what is still queued stays pending for the next worker.
+    pub fn drain(&self) {
+        *self.reason.lock().unwrap() = "restart".into();
+        self.draining.store(true, Ordering::Relaxed);
+        self.drain_wake.wake();
+    }
+    pub fn draining(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
     }
     /// What ends a worker's wait from outside: this handler's stop, and the daemon's exit.
     fn interrupts(&self) -> [i32; 2] {
@@ -724,14 +740,14 @@ impl Worker {
         // Armed before the first look at the log: an event appended between a look and the wait
         // after it is already queued on the watch, and that wait returns at once.
         let [stop, exit] = self.ctl.interrupts();
-        let mut watch = self.st.watch_events().interrupt(stop).interrupt(exit);
+        let mut watch = self.st.watch_events().interrupt(stop).interrupt(exit).interrupt(self.ctl.drain_wake.fd());
         if let Some(why) = watch.fallback() {
             self.log.line(&format!("{why}; checking the event log every {} ms instead", crate::watch::FALLBACK_TICK.as_millis()));
         }
         // what the log held when this worker last looked, and the matches not yet handled
         let mut scanned = self.st.cursor_or_create(&self.h.cursor());
         let mut queue: Vec<Event> = Vec::new();
-        while !self.ctl.stopped() {
+        while !self.ctl.stopped() && !self.ctl.draining() {
             let last = self.st.last_seq();
             if last > scanned {
                 queue.extend(self.st.events_since(scanned).into_iter().filter(|e| self.h.wants(e)));

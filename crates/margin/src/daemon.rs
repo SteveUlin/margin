@@ -1,7 +1,8 @@
 //! `margin daemon`: the dispatcher for one project store. It hands appended events to the
 //! registered handlers (handler.rs: one worker thread each, fed from the event log through the
 //! handler's cursor), and does nothing else: it has no timer and watches no file but its own
-//! store's. A schedule lives outside margin and reaches a handler as an event (`margin emit` from cron or a systemd
+//! store's. It follows the pinned build (pin.rs): when the pin names another binary than the one
+//! running, it lets the runs in flight finish and execs the pin with the same arguments. A schedule lives outside margin and reaches a handler as an event (`margin emit` from cron or a systemd
 //! timer).
 //!
 //! One per project, held by `flock` on `<project>/daemon.lock` (a second one exits at once). It
@@ -109,7 +110,8 @@ pub fn ensure(st: &Store) -> Result<Option<u32>, String> {
     if running(st).is_some() {
         return Ok(None);
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // the pinned build when there is one (pin.rs), else this binary
+    let exe = crate::pin::launcher(&st.home).map_err(|e| e.to_string())?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path(st)).map_err(|e| e.to_string())?;
     let mut c = Command::new(exe);
     c.args(["daemon", "--project", &st.project, "--home"])
@@ -143,6 +145,23 @@ pub fn wake(st: &Store) {
 pub fn since(st: &Store) -> Option<f64> {
     std::fs::metadata(st.dir().join("daemon.pid")).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
 }
+
+/// The binary process `pid` of this store's daemon runs, and whether that is the pinned build
+/// (None: nothing is pinned): for `margin daemon status`.
+pub fn binary(st: &Store, pid: u32) -> (Option<std::path::PathBuf>, Option<bool>) {
+    (crate::pin::exe_of(pid), crate::pin::runs_pin(&st.home, pid))
+}
+
+/// Should a daemon running `own` become the pinned build `target`? When there is a pin and it
+/// is another file than the one running: the pin moved, or the daemon was started from a build
+/// that is not the pin. `tried` is a target an exec was already made for (it failed, or it led
+/// here): never the same one twice, so a pin that cannot be run is not a loop.
+fn should_move(own: &std::path::Path, target: Option<&std::path::Path>, tried: Option<&std::path::Path>) -> bool {
+    target.is_some_and(|t| t != own && Some(t) != tried)
+}
+
+/// The variable a daemon sets when it execs the pinned build: the target it execed for.
+const PIN_EXEC: &str = "MARGIN_PIN_EXEC";
 
 /// With no unpaused handler left (and no `--stay`), the daemon exits after this many seconds.
 const IDLE_GRACE: f64 = 1.5;
@@ -184,6 +203,18 @@ pub fn run(st: Store, stay: bool) -> Result<(), String> {
     // registry, so a change between that read and the wait is not missed.
     let ended = Arc::new(Waker::new());
     let mut watch = Watch::new().dir(&st.dir(), &["handlers.json"]).interrupt(exit_fd()).interrupt(ended.fd());
+    // The pin (pin.rs): its link is replaced in `<home>/bin`; before anything is pinned that
+    // directory is not there, and its appearing in the home is the news. Nothing is created.
+    let bin = crate::pin::dir(&st.home);
+    let mut bin_watched = false;
+    if !bin.is_dir() && st.home.is_dir() {
+        watch.add_dir(&st.home, &[crate::pin::DIR]);
+    }
+    let canon = |p: std::path::PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    let own = std::env::current_exe().map(canon).unwrap_or_default();
+    // the target an exec was last made for: the one that led here, then any that failed
+    let mut tried = std::env::var_os(PIN_EXEC).map(std::path::PathBuf::from);
+    std::env::remove_var(PIN_EXEC);
     if let Some(why) = watch.fallback() {
         eprintln!("{} margin daemon: {why}; checking the registry every {} ms instead", crate::util::now_rfc3339(), crate::watch::FALLBACK_TICK.as_millis());
     }
@@ -193,6 +224,34 @@ pub fn run(st: Store, stay: bool) -> Result<(), String> {
     let (mut hreg, mut herr) = (crate::handler::Registry::default(), String::new());
     let mut idle_since: Option<f64> = None;
     while !exiting() {
+        // arm, then read: a pin made between the two is already queued on the watch
+        if !bin_watched && bin.is_dir() {
+            watch.add_dir(&bin, &["margin"]);
+            bin_watched = true;
+        }
+        // follow the pin: when it names another build than this one, let every worker finish
+        // the run it is in (no command is signalled, no new event is taken), then become the
+        // pinned build with the same arguments. Handlers resume from their cursors
+        let target = crate::pin::target(&st.home).map(canon);
+        if should_move(&own, target.as_deref(), tried.as_deref()) {
+            let target = target.unwrap();
+            eprintln!("{} margin daemon {}: the pin is {}; finishing runs in flight, then becoming it", crate::util::now_rfc3339(), std::process::id(), target.display());
+            for w in handlers.values() {
+                w.ctl.drain();
+            }
+            for (_, w) in handlers.drain() {
+                let _ = w.join.join();
+            }
+            if exiting() {
+                break;
+            }
+            // the lock and the watches close on exec; the new image takes the lock again and
+            // rewrites the pid file (the pid is the same)
+            let err = Command::new(crate::pin::link(&st.home)).args(std::env::args_os().skip(1)).env(PIN_EXEC, &target).exec();
+            eprintln!("{} margin daemon {}: cannot run the pinned build {}: {err}; staying on {}", crate::util::now_rfc3339(), std::process::id(), target.display(), own.display());
+            tried = Some(target);
+            ended.drain();
+        }
         // reconcile against handlers.json: stop what was removed, paused or changed
         match crate::handler::Registry::load_strict(&st.dir()) {
             Ok(r) => {
@@ -293,4 +352,23 @@ pub fn run(st: Store, stay: bool) -> Result<(), String> {
     eprintln!("{} margin daemon {} down: signalled", crate::util::now_rfc3339(), std::process::id());
     drop(lock);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The daemon moves to the pin when one names another build than the one running, whether
+    /// the pin moved or the daemon was started from a build that is not the pin; never with no
+    /// pin, and never twice for a target an exec was already made for.
+    #[test]
+    fn the_daemon_moves_to_the_pin_once_per_target() {
+        let (own, a, b) = (Path::new("/src/target/debug/margin"), Path::new("/h/bin/margin-a"), Path::new("/h/bin/margin-b"));
+        assert!(!should_move(own, None, None), "nothing pinned: unchanged");
+        assert!(should_move(own, Some(a), None), "started from a build that is not the pin");
+        assert!(!should_move(a, Some(a), Some(a)), "it runs the pin");
+        assert!(should_move(a, Some(b), Some(a)), "the pin moved");
+        assert!(!should_move(own, Some(a), Some(a)), "that exec failed, or led here: not again");
+    }
 }

@@ -220,10 +220,11 @@ const PIN_HELP: &str = "margin pin [--show]
   pin the build this is run from: copy this binary to <home>/bin/margin-<hash> and point the link
   <home>/bin/margin at it (<home>: --home, $MARGIN_HOME, else ~/.local/state/margin). Prints the
   copy's path. The link is replaced in one rename; the copy pinned before is kept, older ones go
-  While a pin exists, panes follow it and not the newest build: margin open starts panes with
+  While a pin exists, panes and the daemon follow it and not the newest build: margin open starts panes with
   <home>/bin/margin, and a running pane re-execs it in place when the pin moves. A rebuild
   (cargo build) restarts no pane until you run margin pin from the new build. With no pin a
-  pane follows the binary it was started from, as before
+  pane follows the binary it was started from, as before. The daemon moves to the pin after
+  the handler runs in flight finish (margin daemon status says which binary it runs)
   --show  print what is pinned (the link and the copy it names), or: nothing pinned
   margin doctor lists the running panes and daemons and whether each runs the pin
 ";
@@ -266,8 +267,12 @@ const DAEMON_HELP: &str = "margin daemon [--stay]
   registered it exits (--stay keeps it up). SIGTERM stops it cleanly: running handlers are
   stopped (not failed), their events stay pending, and the next daemon gives them again
 margin daemon status [--json]
-  is it running and since when; each handler's state, last run, events still waiting and last
-  error; and how it comes back after a reboot (the unit, or the next command that appends an event)
+  is it running, since when and from which binary (and whether that is the pinned build); each
+  handler's state, last run, events still waiting and last error; and how it comes back after a
+  reboot (the unit, or the next command that appends an event)
+  With a build pinned (margin pin) the daemon follows the pin as panes do: when the pin moves
+  it lets the handler runs in flight finish, then re-execs <home>/bin/margin with the same
+  arguments; handlers resume from their cursors
 margin daemon install [--unit-dir DIR]
   write a systemd user unit for this project's daemon (restart on failure, started at login) and
   print the systemctl line that enables it; it runs nothing itself
@@ -2261,8 +2266,10 @@ fn daemon_cmd(a: &Args) -> Result<(), String> {
                     json!({"name": h.name, "on": h.on, "state": state, "pending": handler::pending(&st, h).len(), "cursor": st.cursor(&h.cursor()), "last": s.last_run_text(now), "last_error": if matches!(s.last_outcome.as_str(), "failed" | "skipped") { s.last_error.clone() } else { String::new() }})
                 })
                 .collect();
+            // which binary it runs, and whether that is the pinned build (null: nothing pinned)
+            let (exe, on_pin) = running.filter(|p| *p > 0).map(|p| daemon::binary(&st, p)).unwrap_or((None, None));
             if a.has("--json") {
-                println!("{}", json!({"v": 1, "project": st.project, "running": running.is_some(), "pid": running.unwrap_or(0), "since": up.map(util::rfc3339), "unit": {"name": unit, "installed": installed, "enabled": enabled}, "handlers": rows}));
+                println!("{}", json!({"v": 1, "project": st.project, "running": running.is_some(), "pid": running.unwrap_or(0), "since": up.map(util::rfc3339), "binary": exe.as_ref().map(|e| e.display().to_string()), "pinned": on_pin, "unit": {"name": unit, "installed": installed, "enabled": enabled}, "handlers": rows}));
                 return Ok(());
             }
             match (running, up) {
@@ -2271,6 +2278,17 @@ fn daemon_cmd(a: &Args) -> Result<(), String> {
                 (Some(p), Some(t)) => println!("daemon: running for project {}, pid {p}, up since {} ({})", st.project, util::rfc3339(t), util::ago(now - t)),
                 (Some(p), None) => println!("daemon: running for project {}, pid {p}", st.project),
                 _ => println!("daemon: not running for project {}", st.project),
+            }
+            if let Some(e) = &exe {
+                println!(
+                    "binary: {}{}",
+                    e.display(),
+                    match on_pin {
+                        Some(true) => " (the pinned build)".to_string(),
+                        Some(false) => format!(" (not the pinned build, {}: it moves there once its runs in flight finish)", pin::show(&st.home)),
+                        None => String::new(),
+                    }
+                );
             }
             println!(
                 "after a reboot: {}",
