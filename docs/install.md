@@ -34,6 +34,11 @@ margin open services   # inside Zellij: a split beside the tab you ran it from, 
   `difft`; `margin new hello && margin add hello - todo t1 "my first step" && margin view hello`
   needs nothing else.
 
+To send selected text to a command of your own, set `select_command` in
+`~/.config/margin/config.json` (or `$MARGIN_SELECT_COMMAND`), for example
+`{"select_command": "my-lookup"}`. A double-click or a highlight that is not an `mg:` token
+then goes to that shell command on stdin, in place of margin's link opening and clipboard copy.
+
 `margin example services` prints, on stderr, the steps that make the dashboard live (a handler
 and the cron line that emits its refresh). `margin help` lists the commands and the reference
 topics.

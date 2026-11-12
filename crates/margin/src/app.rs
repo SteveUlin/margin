@@ -2094,7 +2094,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
                         if moved {
                             let text = sel_text(&g, &sel_rows(a, b, size.cols));
                             if !text.is_empty() {
-                                let how = select::copy(&text, &lv.cfg);
+                                let how = select::plain(&text, &lv.cfg);
                                 select::log_line(&format!("pane copy {} chars via {how}", text.chars().count()));
                             }
                             prev = None; // repaint without the highlight

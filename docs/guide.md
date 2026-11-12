@@ -350,6 +350,7 @@ not in the doc.
 | `mouse` | false | start with mouse reporting on |
 | `opener` | auto | URL opener; auto uses `opener` over ssh |
 | `clipboard` | auto | wl-copy, osc52, none |
+| `select_command` | — | a shell command for selected text that is not an `mg:` token: the text goes to its stdin (`sh -c`), and margin opens no link and copies nothing |
 | `archive_days` | 30 | 0 = never |
 | `ring` | flow | focus border: flow, static, plain |
 | `fps` | 30 | frame ceiling while animating |
@@ -357,7 +358,7 @@ not in the doc.
 
 Also `float_x` `float_y` `float_width` `float_height`, `ring_period`, `pulse_breaths`, `pulse_period`, `status_style`.
 
-Environment: `MARGIN_DIFFT` names difftastic outright; `MARGIN_HOST`, `MARGIN_MOTION`, `MARGIN_IMAGES` override the file; `MARGIN_HOME` moves the store (default `~/.local/state/margin`); `MARGIN_PROJECT` forces the project; `--home` and `--project` do the same per command.
+Environment: `MARGIN_DIFFT` names difftastic outright; `MARGIN_HOST`, `MARGIN_MOTION`, `MARGIN_IMAGES`, `MARGIN_SELECT_COMMAND` override the file; `MARGIN_HOME` moves the store (default `~/.local/state/margin`); `MARGIN_PROJECT` forces the project; `--home` and `--project` do the same per command.
 
 ```text
 ~/.local/state/margin/<project>/

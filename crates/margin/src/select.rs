@@ -6,6 +6,9 @@
 //! 2. An `http(s)://` line opens through the configured opener.
 //! 3. Anything else goes to the clipboard, because setting `copy_command` replaces Zellij's own
 //!    OSC 52 write and the copy must still work.
+//!
+//! With the config key `select_command` set, 2 and 3 are that command's instead: text that is
+//! not a token goes to it on stdin, and margin neither opens nor copies.
 
 use crate::config::Config;
 use crate::store::{default_home, projects, Event, Store};
@@ -72,6 +75,8 @@ pub enum Outcome {
     Applied(Event),
     Opened(String),
     Copied(&'static str),
+    /// Handed to the configured `select_command`.
+    Handed,
     Ignored(String),
 }
 
@@ -280,6 +285,10 @@ pub fn dispatch(text: &str, via: &str, cfg: &Config) -> Outcome {
             }
         };
     }
+    if !cfg.select_command.trim().is_empty() {
+        hand_over(text, &cfg.select_command);
+        return Outcome::Handed;
+    }
     if (t.starts_with("http://") || t.starts_with("https://")) && !t.contains(char::is_whitespace) {
         return match open_url(t, cfg) {
             Ok(()) => Outcome::Opened(t.to_string()),
@@ -334,6 +343,50 @@ pub fn open_url(url: &str, cfg: &Config) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("{prog}: {e}"))
+}
+
+/// How long `hand_over` waits for the command before leaving it to finish by itself.
+const HAND_OVER_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Selected text that is not a token, where it goes: the configured `select_command` when one
+/// is set, else the clipboard. Returns which path it took. A selection dragged in the pane and
+/// one Zellij pipes to `margin select` both end here.
+pub fn plain(text: &str, cfg: &Config) -> &'static str {
+    if cfg.select_command.trim().is_empty() {
+        return copy(text, cfg);
+    }
+    hand_over(text, &cfg.select_command);
+    "select_command"
+}
+
+/// Run the person's command for selected text: `sh -c <cmd>` with the text on stdin, its output
+/// discarded. Waited on for HAND_OVER_WAIT, so a command that fails at once is reported in
+/// select.log; one still running then is left to finish. Every failure goes to select.log:
+/// there is nowhere else to say it (Zellij runs `margin select` with no terminal).
+pub fn hand_over(text: &str, cmd: &str) {
+    log_line(&format!("  select_command: {}", truncate_for_log(cmd)));
+    let mut c = match Command::new("sh").arg("-c").arg(cmd).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        Ok(c) => c,
+        Err(e) => return log_line(&format!("  select_command did not start: {e}")),
+    };
+    if let Some(mut i) = c.stdin.take() {
+        // a command that does not read its stdin closes the pipe: not a failure of its own
+        let _ = i.write_all(text.as_bytes());
+    }
+    let t0 = std::time::Instant::now();
+    loop {
+        match c.try_wait() {
+            Ok(Some(st)) if st.success() => return,
+            Ok(Some(st)) => return log_line(&format!("  select_command failed: {st}")),
+            Err(e) => return log_line(&format!("  select_command: {e}")),
+            Ok(None) if t0.elapsed() >= HAND_OVER_WAIT => break,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    // still running: reap it when it ends (a pane lives on; `margin select` exits and leaves it)
+    std::thread::spawn(move || {
+        let _ = c.wait();
+    });
 }
 
 /// Put text on the clipboard. Returns which path it took.
@@ -410,6 +463,30 @@ pub fn client_ttys() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With `select_command` set, text that is not a token goes to the command on stdin, a link
+    /// included, and nothing is opened or copied; a token is still margin's.
+    #[test]
+    fn plain_text_goes_to_the_select_command_when_one_is_set() {
+        let dir = std::env::temp_dir().join(format!("margin-selcmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("got");
+        let cfg = Config { select_command: format!("cat >> {}", out.display()), clipboard: "none".into(), opener: "false".into(), ..Default::default() };
+        assert_eq!(dispatch("two words\n", "select", &cfg), Outcome::Handed);
+        assert_eq!(dispatch("https://example.com/x", "select", &cfg), Outcome::Handed, "a link is the command's too");
+        assert_eq!(plain("dragged", &cfg), "select_command");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "two words\nhttps://example.com/xdragged");
+        assert!(matches!(dispatch("mg:todo/no-such-row-anywhere-zz9", "select", &cfg), Outcome::Ignored(_)), "a token never reaches the command");
+        assert_eq!(std::fs::read_to_string(&out).unwrap().len(), 38);
+        // a command that fails, or one that outlives the wait, does not stop the selection
+        hand_over("x", "exit 3");
+        let t0 = std::time::Instant::now();
+        hand_over("x", "sleep 3");
+        assert!(t0.elapsed() < std::time::Duration::from_millis(2500));
+        // without the key the clipboard path is as before
+        assert_eq!(plain("x", &Config { clipboard: "none".into(), ..Default::default() }), "none");
+        std::fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn grammar() {
         assert_eq!(

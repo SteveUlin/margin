@@ -2,7 +2,8 @@
 //! default is one line of JSON away from changing.
 //!
 //! File: `$MARGIN_CONFIG`, else `~/.config/margin/config.json`. Env overrides win over the file:
-//! `MARGIN_MOTION=off`, `MARGIN_IMAGES=blocks`, `MARGIN_HOST=plain`, `MARGIN_HOME=<store dir>`.
+//! `MARGIN_MOTION=off`, `MARGIN_IMAGES=blocks`, `MARGIN_HOST=plain`, `MARGIN_SELECT_COMMAND=<shell
+//! command>`, `MARGIN_HOME=<store dir>`.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -24,6 +25,10 @@ pub struct Config {
     /// Clipboard for non-token selections: "auto" (wl-copy when a Wayland display is reachable and
     /// we're not over ssh, else OSC 52 to the session's client ttys), "wl-copy", "osc52", "none".
     pub clipboard: String,
+    /// A shell command for selected text that is not an `mg:` token (select.rs `hand_over`): run
+    /// with `sh -c`, the text on its stdin, in place of margin's link opening and clipboard.
+    /// Empty: margin opens links and copies. `MARGIN_SELECT_COMMAND` overrides it.
+    pub select_command: String,
     /// Archive an artifact after this many days untouched (0 = never).
     pub archive_days: u32,
     /// Default pane shape for `margin open`: "split" or "float" (pinned). Split by default: a
@@ -87,6 +92,7 @@ impl Default for Config {
             fps: 30.0,
             opener: "auto".into(),
             clipboard: "auto".into(),
+            select_command: String::new(),
             archive_days: 30,
             pane: "split".into(),
             float_x: "62%".into(),
@@ -150,6 +156,9 @@ impl Config {
         }
         if let Ok(h) = std::env::var("MARGIN_HOST") {
             c.host = h;
+        }
+        if let Ok(x) = std::env::var("MARGIN_SELECT_COMMAND") {
+            c.select_command = x;
         }
         c
     }
