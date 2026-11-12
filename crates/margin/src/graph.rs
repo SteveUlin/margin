@@ -21,6 +21,14 @@ pub const DOWN_FROM_LEFT: char = '\u{F5E0}'; // ┬, the run arrives from the le
 pub const DOWN_FROM_RIGHT: char = '\u{F5E1}'; // ┬, the run arrives from the right
 pub const UP_TO_LEFT: char = '\u{F5E3}'; // ┴, the lane from above turns left
 pub const UP_TO_RIGHT: char = '\u{F5E4}'; // ┴, the lane from above turns right
+// a lane that takes a connection from the node and carries on down: an edge ends here from above
+// and the node starts another in the same lane. One glyph per side the node is on.
+pub const JOIN_LEFT: char = '\u{F5DD}'; // ┤, the node is to the left
+pub const JOIN_RIGHT: char = '\u{F5DA}'; // ├, the node is to the right
+// the same lane with the horizontal run carrying on past it to a farther end: all four lines are
+// the node's own
+pub const CROSS_LEFT: char = '\u{F5E8}'; // ┼, the node is to the left
+pub const CROSS_RIGHT: char = '\u{F5E9}'; // ┼, the node is to the right
 /// Where the node goes in `cells`.
 pub const NODE: char = '\0';
 
@@ -42,7 +50,7 @@ pub struct Row {
 /// horizontal run end here), so a row taller than one line continues them with `V` below, and
 /// the lanes stay joined to the next row. The node's own cell is the caller's: `Row::down`.
 pub fn continues_down(c: char) -> bool {
-    matches!(c, V | TL | TR | DOWN_FROM_LEFT | DOWN_FROM_RIGHT)
+    matches!(c, V | TL | TR | DOWN_FROM_LEFT | DOWN_FROM_RIGHT | JOIN_LEFT | JOIN_RIGHT | CROSS_LEFT | CROSS_RIGHT)
 }
 
 /// The node glyph for a row: Flog's circles come in filled / hollow pairs, one per combination of
@@ -82,8 +90,11 @@ pub fn glyph(c: char, flog: bool) -> char {
         0xF5D7 => '╮',
         0xF5D8 => '╰',
         0xF5D9 => '╯',
-        0xF5E0 | 0xF5E1 => '┬',
-        0xF5E3 | 0xF5E4 => '┴',
+        0xF5DA..=0xF5DC => '├',
+        0xF5DD..=0xF5DF => '┤',
+        0xF5E0..=0xF5E2 => '┬',
+        0xF5E3..=0xF5E5 => '┴',
+        0xF5E6..=0xF5ED => '┼',
         n @ 0xF5EE..=0xF60D => if n % 2 == 0 { '●' } else { '○' },
         _ => c,
     }
@@ -92,6 +103,14 @@ pub fn glyph(c: char, flog: bool) -> char {
 /// Lay out `nodes` (id and the ids it comes after, in display order). Edges to ids that aren't
 /// earlier in the list are dropped: an edge can only run downward. Returns a row per node, all
 /// the same width, or nothing when no node has an edge (the section draws as before).
+///
+/// Where lines meet:
+/// - A horizontal run crossing a lane that only passes through draws the lane's vertical, with
+///   the run's connectors either side: a crossing must not read as a join.
+/// - A lane where one of the node's edges ends from above and another of its edges starts
+///   downward is a join (`JOIN_*`), or a cross (`CROSS_*`) when the run carries on past it.
+/// - A lane an edge ended in is not given to another node's edge on the next row: the new edge
+///   takes another lane, so two unrelated edges never look like one.
 pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
     let pos: HashMap<&str, usize> = nodes.iter().enumerate().map(|(i, (id, _))| (id.as_str(), i)).collect();
     // who waits on each node, in display order
@@ -112,6 +131,21 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
     }
     // a lane is an edge in flight: (waiting for, from, the row it left)
     let mut lanes: Vec<Option<(String, String, usize)>> = Vec::new();
+    // per lane, the row an edge last ended in it
+    let mut ended: Vec<Option<usize>> = Vec::new();
+    // the first free lane from `from` that no edge ended in on the row before `i`; a new lane
+    // when there is none
+    fn free_lane(lanes: &mut Vec<Option<(String, String, usize)>>, ended: &mut Vec<Option<usize>>, from: usize, i: usize) -> usize {
+        ended.resize(lanes.len(), None);
+        match (from..lanes.len()).find(|&l| lanes[l].is_none() && (i == 0 || ended[l] != Some(i - 1))) {
+            Some(l) => l,
+            None => {
+                lanes.push(None);
+                ended.push(None);
+                lanes.len() - 1
+            }
+        }
+    }
     let mut rows: Vec<(String, Row)> = Vec::new();
     for (i, (id, _)) in nodes.iter().enumerate() {
         let incoming: Vec<usize> = (0..lanes.len()).filter(|&l| lanes[l].as_ref().map(|x| &x.0) == Some(id)).collect();
@@ -123,8 +157,11 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
             (e.1.clone(), e.0.clone(), (i.saturating_sub(e.2)) as f32 / span)
         };
         let was_edge: Vec<Option<(String, String, f32)>> = lanes.iter().map(|l| l.as_ref().map(along)).collect();
+        let outs = &waiters[i];
         let k = match incoming.first() {
             Some(&k) => k,
+            // a node that starts an edge keeps clear of a lane an edge has just ended in
+            None if !outs.is_empty() => free_lane(&mut lanes, &mut ended, 0, i),
             None => match lanes.iter().position(|l| l.is_none()) {
                 Some(k) => k,
                 None => {
@@ -133,21 +170,20 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
                 }
             },
         };
+        ended.resize(lanes.len(), None);
         let merges: Vec<usize> = incoming.iter().skip(1).copied().collect();
         for &m in &merges {
             lanes[m] = None;
+            ended[m] = Some(i);
         }
-        let outs = &waiters[i];
+        if !incoming.is_empty() && outs.is_empty() {
+            ended[k] = Some(i);
+        }
         lanes[k] = outs.first().map(|o| (o.clone(), id.clone(), i));
         let mut branches = Vec::new();
         for o in outs.iter().skip(1) {
-            let j = match (k + 1..lanes.len()).find(|&l| lanes[l].is_none()) {
-                Some(j) => j,
-                None => {
-                    lanes.push(None);
-                    lanes.len() - 1
-                }
-            };
+            // a lane merged on this row may be taken: both edges are this node's (a join)
+            let j = free_lane(&mut lanes, &mut ended, k + 1, i);
             lanes[j] = Some((o.clone(), id.clone(), i));
             branches.push(j);
         }
@@ -171,6 +207,14 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
             let was = before.get(l).copied().unwrap_or(false);
             cells[l * 2] = if l == k {
                 NODE
+            } else if merges.contains(&l) && branches.contains(&l) {
+                // one edge of the node ends here from above and another starts downward
+                match (l > k, l == hi || l == lo) {
+                    (true, true) => JOIN_LEFT,
+                    (true, false) => CROSS_LEFT,
+                    (false, true) => JOIN_RIGHT,
+                    (false, false) => CROSS_RIGHT,
+                }
             } else if merges.contains(&l) {
                 // the farthest end is a corner; one the run passes on its way there is a junction,
                 // or the line would stop at it and the ends beyond would hang unconnected
@@ -204,7 +248,7 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
             if l != k {
                 edges[l * 2] = match cells[l * 2] {
                     V => was_edge.get(l).cloned().flatten(),
-                    BR | BL | TR | TL | DOWN_FROM_LEFT | DOWN_FROM_RIGHT | UP_TO_LEFT | UP_TO_RIGHT => end_edge(l),
+                    BR | BL | TR | TL | DOWN_FROM_LEFT | DOWN_FROM_RIGHT | UP_TO_LEFT | UP_TO_RIGHT | JOIN_LEFT | JOIN_RIGHT | CROSS_LEFT | CROSS_RIGHT => end_edge(l),
                     H => ends.iter().filter(|&&e| if e > k { e > l } else { e < l }).min_by_key(|&&e| e.abs_diff(l)).and_then(|&e| end_edge(e)),
                     _ => None,
                 };
@@ -277,6 +321,8 @@ mod tests {
                         TR => '╮',
                         BL => '╰',
                         BR => '╯',
+                        JOIN_LEFT => '┤',
+                        CROSS_LEFT => '┼',
                         c => c,
                     })
                     .collect::<String>()
@@ -326,6 +372,37 @@ mod tests {
         assert_eq!(text("e").trim_end(), "●─┴─╯");
         assert_eq!(rows["a"].cells[2], DOWN_FROM_LEFT);
         assert_eq!(rows["e"].cells[2], UP_TO_LEFT);
+    }
+
+    #[test]
+    fn a_run_crossing_a_passing_lane_draws_the_lane() {
+        // e waits on a (lane 0) and c (lane 2); b's edge to f passes between them
+        let rows = layout(&[n("a", &[]), n("b", &[]), n("c", &[]), n("e", &["a", "c"]), n("f", &["b"])]);
+        assert_eq!(show(&rows, &["a", "b", "c", "e", "f"]), ["┯", "│ ┯", "│ │ ┯", "┷─│─╯", "  ┷"]);
+        assert_eq!(rows["e"].cells[2], V);
+    }
+
+    #[test]
+    fn a_lane_that_ends_one_edge_of_the_node_and_starts_another_is_a_join() {
+        // d merges b and c, then fans out again: the merged lane carries d's second edge on
+        let rows = layout(&[n("a", &[]), n("b", &["a"]), n("c", &["a"]), n("d", &["b", "c"]), n("e", &["d"]), n("f", &["d"])]);
+        assert_eq!(show(&rows, &["a", "b", "c", "d", "e", "f"]), ["┯─╮", "┿ │", "│ ┿", "┿─┤", "┷ │", "  ┷"]);
+        assert_eq!(rows["d"].cells[2], JOIN_LEFT);
+        assert!(continues_down(JOIN_LEFT) && glyph(JOIN_LEFT, false) == '┤' && glyph(JOIN_RIGHT, false) == '├');
+        // a third edge from d runs on past the join: all four lines there are d's, a cross
+        let rows = layout(&[n("a", &[]), n("b", &["a"]), n("c", &["a"]), n("d", &["b", "c"]), n("e", &["d"]), n("f", &["d"]), n("g", &["d"])]);
+        assert_eq!(show(&rows, &["d"]), ["┿─┼─╮"]);
+        assert_eq!(glyph(rows["d"].cells[2], false), '┼');
+    }
+
+    #[test]
+    fn a_new_edge_keeps_clear_of_a_lane_an_edge_just_ended_in() {
+        // two chains one after the other: the second takes another lane
+        let rows = layout(&[n("a", &[]), n("b", &["a"]), n("c", &[]), n("d", &["c"])]);
+        assert_eq!(show(&rows, &["a", "b", "c", "d"]), ["┯", "┷", "  ┯", "  ┷"]);
+        // a row of gap is enough, and a step with no edge of its own may sit there
+        let rows = layout(&[n("a", &[]), n("b", &["a"]), n("x", &[]), n("c", &[]), n("d", &["c"])]);
+        assert_eq!(show(&rows, &["a", "b", "x", "c", "d"]), ["┯", "┷", "●", "┯", "┷"]);
     }
 
     #[test]
