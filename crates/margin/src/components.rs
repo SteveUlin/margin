@@ -3098,7 +3098,9 @@ mod dash_tests {
     #[test]
     fn a_runs_column_can_end_in_its_failure_count() {
         let fails: Vec<&str> = std::iter::repeat("ok").take(11).chain(["fail"]).collect();
-        let table = |summary: bool| doc(1, json!([
+        // a revision per table: the layout cache goes by the doc's address and revision, and the
+        // second doc may be allocated where the first was (it was, in the nix build's sandbox)
+        let table = |summary: bool| doc(1 + summary as u64, json!([
             {"type": "table", "id": "t", "columns": [{"key": "job", "title": "Job"}, {"key": "ci", "title": "Runs", "kind": "runs", "summary": summary}], "children": [
                 {"type": "tr", "id": "a", "cells": {"job": "deploy", "ci": ["ok", "fail", "ok", null, "ok", "ok", "ok"]}},
                 {"type": "tr", "id": "b", "cells": {"job": "backup", "ci": fails}},

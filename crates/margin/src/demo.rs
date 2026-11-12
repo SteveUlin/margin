@@ -17,12 +17,13 @@ use std::time::Duration;
 
 /// The demo's files: `$MARGIN_ASSETS`, else the installed copy a nix build compiled in
 /// (`MARGIN_ASSETS_BUILTIN`, set in flake.nix: a binary that `margin pin` copied out from behind
-/// the nix wrapper still finds them), else the source tree's.
+/// the nix wrapper still finds them), else the source tree's. The compiled-in path counts only
+/// once it exists: the nix build runs the tests before it installs anything.
 pub fn assets() -> PathBuf {
     std::env::var("MARGIN_ASSETS")
         .ok()
-        .or_else(|| option_env!("MARGIN_ASSETS_BUILTIN").map(String::from))
         .map(PathBuf::from)
+        .or_else(|| option_env!("MARGIN_ASSETS_BUILTIN").map(PathBuf::from).filter(|p| p.is_dir()))
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo"))
 }
 
