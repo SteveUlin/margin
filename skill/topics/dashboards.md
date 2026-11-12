@@ -244,8 +244,9 @@ its own id.
 | `graph` | nothing: it reads each row's `after` | a node per row and lanes joining the rows that name each other |
 
 **A graph column** shows how the rows of one table relate: a pull request stacked on its base, a
-task that waits on another. A row names the rows it depends on or sits on with `after`: one row
-id, or a list. The rows stay in the order written, and a named row may be above or below.
+ticket linked to another, a job and the jobs it waits on. A row names the rows it follows with
+`after`: one row id, or a list. It is the field todos use, drawn the same way (`margin help
+graphs`). The rows stay in the order written, and a named row may be above or below.
 
 ```json
 {"type": "table", "id": "pr",

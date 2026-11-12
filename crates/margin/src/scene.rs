@@ -271,7 +271,7 @@ fn head_lines(inp: &Input) -> Vec<HeadLine> {
             let st = components::status_of(inp.state, b);
             if components::yours(inp.state, b) {
                 // an `after` that names no step holds nothing up (the lanes ignore it too)
-                let free = b.strs("after").iter().all(|d| finished.contains(d.as_str()) || !steps.contains(d.as_str()));
+                let free = crate::doc::row_links(b).iter().all(|d| finished.contains(d.as_str()) || !steps.contains(d.as_str()));
                 if !matches!(st.as_str(), "done" | "skipped") && free {
                     needs.push(b.id.clone());
                 }
@@ -908,12 +908,12 @@ impl Scene {
         // the first top-level block sits tight under the head, unless something of the pane's own
         // (the Agents block, a recap) is drawn above it: then it keeps its breathing room
         let mut first_top = matches!(items.first().map(|i| &i.kind), Some(Kind::Block { .. }) | None);
-        // dependency lanes, per section: its todos in order with their `after` ids (graph.rs)
+        // lanes, per section: its todos in order with the todos their `after` names (graph.rs)
         let mut graphs: HashMap<String, crate::graph::Row> = HashMap::new();
         walk(&inp.doc.blocks, &mut |b, _, _| {
             if b.kind == "section" {
-                let nodes: Vec<(String, Vec<String>)> = b.children.iter().filter(|c| c.kind == "todo").map(|c| (c.id.clone(), c.strs("after"))).collect();
-                graphs.extend(crate::graph::layout(&nodes));
+                let nodes: Vec<(String, Vec<String>)> = b.children.iter().filter(|c| c.kind == "todo").map(|c| (c.id.clone(), crate::doc::row_links(c))).collect();
+                graphs.extend(crate::graph::layout_linked(&nodes));
             }
         });
         for it in &items {

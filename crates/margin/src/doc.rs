@@ -104,6 +104,8 @@ pub struct Kind {
 /// What `actions` holds, said once for every type that takes it.
 const ACTIONS_NOTE: &str = "list of {key, name, label?}: with this block focused, the key appends the event <board>.<name> carrying the block's id and a snapshot of it; a handler registered for that name does the work (margin help handlers). key: one character the pane doesn't use itself; label: what the hint row shows (default: name). A table's actions apply to each of its rows";
 
+/// `after`, wherever a kind takes it (todo, tr): one field, one meaning.
+const LINKS_NOTE: &str = "the rows this one follows: an id or a list of ids of rows in the same list (a section's todos, a table's rows); the pane draws each link as a lane (margin help graphs); an id that names no such row is ignored";
 const PROPOSAL: (&str, Ty, &str) = ("proposal", Ty::Any, "written by margin propose");
 
 /// The component schema, checked on every write (CLI, apply, handlers, owners) and printed by `margin
@@ -121,7 +123,7 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "bullet", about: "a bullet; children are sub-bullets", children: true, action: "",
         fields: &[("text", Ty::Text, "one idea; wraps; markup as in text"), ("tone", Ty::Enum(TONES), "the text's color"), ("task", Ty::Enum(&["open", "done"]), "a checklist item of a note: a box in place of the bullet (content; a step you track is a todo)"), ("target", Ty::Text, "URL or mg: token, as on text")] },
     Kind { name: "todo", about: "a plan step", children: false, action: "tick (mg:todo/<id>, space)",
-        fields: &[("text", Ty::Text, "the step; wraps; **bold** `code` @[name]"), ("note", Ty::Text, "dim text after the step: a result, a reason"), ("status", Ty::Enum(STATUSES), "default todo; next: sulin's mark for what to do next"), ("after", Ty::List, "ids of the steps in this section it waits on (drawn as lanes); not part of the documented set; may be removed"), ("rests_on", Ty::List, "ids of the claims this step assumes; striking one flags the step"), ("owner", Ty::Enum(&["you", "claude"]), "you: sulin's own step; Claude stops there and they mark it done"), PROPOSAL] },
+        fields: &[("text", Ty::Text, "the step; wraps; **bold** `code` @[name]"), ("note", Ty::Text, "dim text after the step: a result, a reason"), ("status", Ty::Enum(STATUSES), "default todo; next: sulin's mark for what to do next"), ("after", Ty::Any, LINKS_NOTE), ("rests_on", Ty::List, "ids of the claims this step assumes; striking one flags the step"), ("owner", Ty::Enum(&["you", "claude"]), "you: sulin's own step; Claude stops there and they mark it done"), PROPOSAL] },
     Kind { name: "progress", about: "a bar: a section's done todos, or a value", children: false, action: "",
         fields: &[("of", Ty::Text, "a section id"), ("value", Ty::Num, "0-1"), ("label", Ty::Text, "text before the bar")] },
     Kind { name: "timer", about: "elapsed since, or left until", children: false, action: "",
@@ -147,7 +149,7 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "table", about: "a table: a header and aligned columns; its children are tr rows", children: true, action: "",
         fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state graph (default text; graph: lanes joining each row to the rows its after names, no cells), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows"), ("rows", Ty::Text, "a dataset's name (margin data add): each of its records is a row, read by the pane when it draws; the table then holds no tr children of its own. A record's fields are the cells, by column key; its target and detail fields are the row's"), ("key", Ty::Text, "with rows: the record field that names a row (default id). The row's id is <table id>-<value>, so the focus and actions follow the record; records sharing a value are one row, the newest"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "tr", about: "one table row, only inside a table; give it a stable id so a rewrite reconciles", children: false, action: "open (enter or a double click, when it has a target)",
-        fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)"), ("after", Ty::Any, "the id of a row of this table it depends on or sits on (a pull request's base), or a list of ids; a column of kind graph draws the links; an id that is not a row is ignored"), ("actions", Ty::Any, ACTIONS_NOTE)] },
+        fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)"), ("after", Ty::Any, LINKS_NOTE), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "runs", about: "a run strip: the last n outcomes as small squares, oldest left, a cross for a failure", children: false, action: "",
         fields: &[("label", Ty::Text, "text at the left: what ran"), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed"), ("data", Ty::Text, "a dataset's name (margin data add): the outcomes are read from its newest records instead of values"), ("y", Ty::Text, "with data: the record field holding ok fail skip running (default outcome)"), ("last", Ty::Num, "with data: how many of the newest records to read (default: as many as fit)")] },
     Kind { name: "plot", about: "a plot drawn in the pane: lines, an area, bars, columns, a histogram, sparklines or heat strips", children: false, action: "",
@@ -318,7 +320,7 @@ pub fn check_columns(table: &Block) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-/// The rows a table row names with `after`: one id as text, or a list of ids.
+/// The rows a row names with `after` (a todo, a table row): one id as text, or a list of ids.
 pub fn row_links(row: &Block) -> Vec<String> {
     match row.f.get("after") {
         Some(Value::String(s)) => vec![s.clone()],
@@ -327,15 +329,19 @@ pub fn row_links(row: &Block) -> Vec<String> {
     }
 }
 
-/// A row's cells against its table's columns: every key names a column, and a runs cell holds
-/// run outcomes. Its `after` is a row id or a list of them (which rows exist is not checked: rows
-/// come and go as a handler rewrites them).
-fn check_cells(row: &Block, cols: &[(String, String)]) -> Result<(), String> {
+/// A row's `after` is a row id or a list of them (which rows exist is not checked: rows come and
+/// go as a handler rewrites them).
+fn check_links(row: &Block) -> Result<(), String> {
     match row.f.get("after") {
-        None | Some(Value::Null) | Some(Value::String(_)) => {}
-        Some(Value::Array(a)) if a.iter().all(|x| x.is_string()) => {}
-        Some(v) => return Err(format!("{}: tr after must be a row id or a list of row ids, got {v}", row.id)),
+        None | Some(Value::Null) | Some(Value::String(_)) => Ok(()),
+        Some(Value::Array(a)) if a.iter().all(|x| x.is_string()) => Ok(()),
+        Some(v) => Err(format!("{}: after must be a row id or a list of row ids, got {v}", row.id)),
     }
+}
+
+/// A row's cells against its table's columns: every key names a column, and a runs cell holds
+/// run outcomes.
+fn check_cells(row: &Block, cols: &[(String, String)]) -> Result<(), String> {
     let Some(v) = row.f.get("cells").filter(|v| !v.is_null()) else { return Ok(()) };
     let cells = v.as_object().ok_or_else(|| format!("{}: tr cells must be an object keyed by column key, got {v}", row.id))?;
     for (k, cell) in cells {
@@ -435,6 +441,9 @@ pub fn check_under(b: &Block, parent: Option<&Block>) -> Result<(), String> {
                 }
             }
         }
+    }
+    if matches!(b.kind.as_str(), "todo" | "tr") {
+        check_links(b)?;
     }
     let in_table = parent.map(|p| p.kind == "table").unwrap_or(false);
     match (b.kind.as_str(), in_table) {

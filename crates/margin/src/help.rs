@@ -334,10 +334,9 @@ mod tests {
         assert!(SKILL.contains("- `diagrams`:"));
     }
 
-    /// The parked components (image, dependency lanes, `demo live`) are not taught: the
-    /// skill and the topics leave them out, but for the one line on lanes the graphs topic keeps.
-    /// (A table's graph column is not parked: dashboards documents it.)
-    /// Their schema entries stay, each marked.
+    /// The parked components (image, `demo live`) are not taught: the skill and the topics leave
+    /// them out. Their schema entries stay, each marked. The diff block and the links between
+    /// rows (`after`) are documented: each has its topic.
     #[test]
     fn parked_components_are_not_taught() {
         assert!(topic("diffs").is_some() && topic("images").is_none(), "the diff block is documented again; images stay parked");
@@ -345,19 +344,13 @@ mod tests {
             for gone in ["margin image", "demo live", "a PNG"] {
                 assert!(!text.contains(gone), "{name} still teaches {gone:?}");
             }
-            let lanes = text.lines().filter(|l| l.contains("\"after\": [") || l.contains("`after`")).count();
-            // a table's graph column is taught (dashboards), and the graphs topic points at it
-            let taught = match *name {
-                "graphs" => 2,
-                "dashboards" => lanes,
-                _ => 0,
-            };
-            assert_eq!(lanes, taught, "{name}: lanes between todos are documented in one line of the graphs topic only");
         }
         let mark = "not part of the documented set; may be removed";
         assert!(crate::doc::kind("image").unwrap().about.ends_with(mark));
         assert!(!crate::doc::kind("diff").unwrap().about.contains(mark));
-        assert!(crate::doc::kind("todo").unwrap().fields.iter().any(|f| f.0 == "after" && f.2.ends_with(mark)));
+        // one field, one description, on every kind that takes it
+        let links = |kind: &str| crate::doc::kind(kind).unwrap().fields.iter().find(|f| f.0 == "after").map(|f| f.2);
+        assert!(links("todo").is_some() && links("todo") == links("tr") && topic("graphs").unwrap().contains("`after`"));
     }
 
     /// One way keeps a board current: a handler run by an event, an outside owner, or a dataset.

@@ -143,7 +143,7 @@ margin show plan                           # the pane as text, with {{user}}'s d
 - `lifecycle`: what survives a session end, a closed pane, a reboot; `margin doctor`, `daemon status`.
 - `toasts`: `margin toast`, news that matters for a moment (a test result, a failure).
 - `diffs`: `margin diff`, a file's change as a structural diff they approve or reject.
-- `graphs`: `owner` ({{user}}'s steps), `rests_on` (steps tied to claims), lanes.
+- `graphs`: `after` (a row names the rows it follows; lanes join them), `owner`, `rests_on`.
 - `diagrams`: the house style for a diagram typed by hand: boxes, edges, arrowheads, 64 cells.
 - `proposals`: `margin claude propose`, offering a change to one of their decisions.
 - `subagents`: the Agents section the pane builds from your subagents, and the recap row.
