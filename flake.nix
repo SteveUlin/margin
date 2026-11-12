@@ -26,8 +26,8 @@
         # shells out to sit here too: difftastic renders diff blocks, jq for
         # the skill's examples, python+pyte renders a captured client stream
         # to text (we can't see the screen); graphviz + librsvg build the
-        # diagrams in docs/ (docs/tools/*.dot). Pillow and JetBrainsMono Nerd
-        # Font draw the mockups cell by cell (docs/tools/termshot.py), so Nerd
+        # diagrams (tests/e2e/tools/*.dot). Pillow and JetBrainsMono Nerd
+        # Font draw the mockups cell by cell (tests/e2e/tools/termshot.py), so Nerd
         # Font icons show exactly as Ghostty would draw them; MARGIN_FONT_DIR
         # tells termshot where the font files live.
         devShells.default = pkgs.mkShell {
@@ -49,7 +49,7 @@
           version = "0.1.0";
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
-            filter = path: type: !(pkgs.lib.hasInfix "/docs/img" path) && !(pkgs.lib.hasInfix "/target" path);
+            filter = path: type: !(pkgs.lib.hasInfix "/target" path);
           };
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ pkgs.makeWrapper ];

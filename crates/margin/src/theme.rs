@@ -13,7 +13,7 @@ use std::rc::Rc;
 use vellum::color::{Palette, Rgb, EVERFOREST};
 use vellum::widgets::{Mark, Theme, WhoOverride};
 
-/// `"dashboard": {…}` in config.json. See docs/dashboards.md.
+/// `"dashboard": {…}` in config.json. See margin help dashboards.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DashConfig {

@@ -7,7 +7,7 @@ import sys
 
 import pyte
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../docs/tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
 from termshot import from_pyte  # noqa: E402
 
 

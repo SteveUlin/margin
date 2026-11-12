@@ -9,8 +9,6 @@ for the events they asked for. No AI is involved in any of that. One consumer of
 clicks go back to it (see [With Claude Code](#with-claude-code)). `vellum`, the second crate in
 this workspace, is the terminal UI toolkit margin draws with.
 
-![A margin pane: two plan steps, a question answered "yes" and marked sent, and an assumption with a strike token](docs/img/readme/plan.png)
-
 The pane is not a rendered markdown file. Each row is a typed component with a stable id; whoever
 writes the board owns its content, you own the decisions, and every decision is one event that a
 handler, a script following the log, or a session's hooks can act on.
@@ -35,20 +33,13 @@ handler, a script following the log, or a session's hooks can act on.
   Whoever keeps rows current owns them; nobody else can overwrite them. `margin help integrate`
   has the cron and systemd recipes.
 - **Dashboards.** A pull-request queue, service health, a work tracker: `margin example` prints
-  three complete ones (board, fetch script, sample data); see [docs/dashboards.md](docs/dashboards.md).
+  three complete ones (board, fetch script, sample data); `margin help dashboards` covers the pieces.
 - **Shipped scripts** (`providers/`): a jj change ledger, a monitor of Claude Code sessions, a board
   of queued messages, a turn ledger. Each one's header gives the handler (or owner) registration
   and the cron line that run it.
 - Also: long-form notes (`margin doc`), and toasts.
 
-![A dashboard tab: a table of pull requests with author badges, CI run strips and ages](docs/img/readme/dashboard.png)
-
-*Both pictures are real frames from `margin render`, drawn by the test harness
-(`tests/e2e/shot.py`); two badge glyphs were swapped for ones its font has.*
-
 ## Install
-
-[docs/install.md](docs/install.md) has the full steps. In short:
 
 ```sh
 git clone https://github.com/SteveUlin/margin && cd margin
@@ -76,7 +67,6 @@ that exists; every other write refuses a name with no board (and suggests the ne
 typo is an error, never a second board. `margin example services | margin new services` makes a
 sample dashboard, `margin demo` writes a larger sample plan (it needs difftastic), and
 `margin help` lists every command and reference topic.
-[docs/guide.md](docs/guide.md) walks through a board and a handler, then a session with Claude;
 `margin help dashboards` and `margin help handlers` cover standing boards.
 
 ## With Claude Code
@@ -121,19 +111,9 @@ margin for this" in a session.
 
 ## Documentation
 
-| file | what it covers |
-|---|---|
-| [docs/install.md](docs/install.md) | build, a first pane, `margin claude init`, undoing it |
-| [docs/guide.md](docs/guide.md) | the model, walkthroughs of a board and a handler, a cheat sheet of commands, keys and config, then Claude Code |
-| [docs/dashboards.md](docs/dashboards.md) | tables, run strips, badges, rules, and the theme |
-| [docs/design.md](docs/design.md) | the original design, in its dated terms: owners, events, the toolkit, panes, and a feed runner that has since been removed (handlers, owners and datasets replaced it) |
-| [docs/research.md](docs/research.md), [docs/landscape.md](docs/landscape.md), [docs/research/](docs/research/) | the measurements and prior art behind the design |
-
-The design and research documents are dated notes from the build; they say "artifact" for what
-the tool now calls a board, and describe a feed runner (`margin feed`, a command on margin's own
-timer) that has been removed: a handler run by an event that cron emits, an outside owner or a
-dataset keeps a board current now. Where they disagree with
-`margin help` or the guide, the tool is right.
+The reference ships in the binary, so it matches the build you run: `margin help` lists the
+commands and topics, `margin help <topic>` prints one, and `margin <command> --help` gives a
+command's flags.
 
 ## Status
 

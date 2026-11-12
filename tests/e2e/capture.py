@@ -17,12 +17,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "../.."))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(ROOT, "docs/tools"))
+sys.path.insert(0, os.path.join(ROOT, "tests/e2e/tools"))
 from ptyhost import Host  # noqa: E402
 from termshot import animate  # noqa: E402
 
 MARGIN = os.path.join(ROOT, "target/debug/margin")
-OUT = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "docs/img/real")
+OUT = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "target/shots")
 os.makedirs(OUT, exist_ok=True)
 T = tempfile.mkdtemp(prefix="margin-cap-")
 ENV = dict(os.environ, MARGIN_HOME=os.path.join(T, "home"), MARGIN_PROJECT="demo", MARGIN_IMAGES="blocks",

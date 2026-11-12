@@ -80,7 +80,7 @@ pub struct Config {
     pub toast_countdown: String,
     /// A toast's frame: double (default), round, light, heavy or none.
     pub toast_border: String,
-    /// How dashboard pieces look (rules, tables, name badges, run strips): docs/dashboards.md.
+    /// How dashboard pieces look (rules, tables, name badges, run strips): margin help dashboards.
     pub dashboard: crate::theme::DashConfig,
 }
 

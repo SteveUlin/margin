@@ -233,7 +233,7 @@ class Host:
 
     def canvas(self):
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../docs/tools"))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))
         from termshot import from_pyte
         with self.lock:
             cv = from_pyte(self.screen)
