@@ -25,6 +25,7 @@ mod help;
 mod host;
 mod mdoc;
 mod owner;
+mod pin;
 mod scene;
 mod select;
 mod store;
@@ -87,7 +88,7 @@ datasets (values a board displays, outside the document; the pane reads them whe
   margin data set <name> ... | append <name> <VALUE|JSON|-> | put <name> < records | show <name> [--last N] | ls [--json] | rm <name>
 
 panes and screen (host: zellij or plain; config key host):
-  margin open <board> [--float|--split|--stacked] [--tab-id N] [--session S]   beside the tab it is run from
+  margin open <board> [--float|--split|--stacked] [--tab-id N] [--session S] [--while-pid PID]   beside the tab it is run from
                                 --stacked: onto the tab's margin pane
                                 plain host: prints the `margin view` command to run in a terminal
   margin close <board>          margin panes <board>   (where it's showing)
@@ -96,6 +97,7 @@ panes and screen (host: zellij or plain; config key host):
   margin render <board> [--width W] [--height H] [--section ID] [--focus ID] [--ansi]   one frame, no pane
   margin select [TEXT]          Zellij copy_command target (stdin if no TEXT)
   margin session [NAME]         start a Zellij session wired for margin (copy_command)
+  margin pin [--show]           pin this build: panes follow <home>/bin/margin, not the newest build
   margin demo                   write a sample plan board named plan
 
 reference:
@@ -200,6 +202,7 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "view", help: "margin view <board> [<board>...] [--while-pid PID]\n  the live renderer (what a margin pane runs). More boards show as tabs on the title line\n  (PROJECT:board: a board of another project)\n  (click, gt / gT, 3gt); with one board the pane shows the tabs its view file remembers\n  --while-pid PID: the pane exits as q does (its view saved) when that process ends; with a PID\n  that is not running it prints one line and exits\n", flags: &["--while-pid"], max_pos: None },
     Cmd { name: "render", help: RENDER_HELP, flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus", "--section"], max_pos: None },
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n  With the config key select_command set (or $MARGIN_SELECT_COMMAND), text that is not an mg:\n  token goes to that shell command on stdin (sh -c) instead: margin then opens no link and\n  copies nothing. The command's output is discarded; a failure is written to select.log in\n  the store. A selection dragged in the pane goes the same way\n", flags: &[], max_pos: None },
+    Cmd { name: "pin", help: PIN_HELP, flags: &["--show"], max_pos: Some(0) },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
     Cmd { name: "daemon", help: DAEMON_HELP, flags: &["--stay", "--unit-dir", "--json"], max_pos: Some(1) },
     Cmd { name: "doctor", help: "margin doctor [--fix] [--days N]\n  what was left behind by a session, a pane or a daemon that went without saying so, and what on\n  a board cannot work yet. Lists, and removes nothing without --fix:\n    stale  rewake and review marks whose process is gone; the cursor, activity entry and pane view\n           of a session or pane untouched for N days (default: config archive_days, else 30); the\n           pid file of a daemon that is not running; a handler recorded as running when none is\n    note   a board whose rows have targets or actions that no handler takes (with the line that\n           registers one); history.jsonl files, which margin no longer writes (delete them by hand)\n           each feed a store still lists in feeds.json (margin no longer runs commands on a timer, a\n           file watch or as a stream): the handler and schedule line, or the owner line, that\n           replaces it, and who owns its rows now\n    stale  the removed feed runner's files (feeds.json, feeds/*.log, feeds/*.status.json): --fix\n           moves them into the project's .archive/ directory instead of deleting them\n  --fix removes the stale items. It never touches a board, an event, a named cursor (a tool's or a\n  handler's) or a registration, and it is safe to run at any time. margin help lifecycle\n", flags: &["--fix", "--days"], max_pos: Some(0) },
@@ -212,6 +215,18 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "example", help: "margin example\n  list the bundled example dashboards\nmargin example <name> [--script | --data | --tool]\n  print one: the board (a whole document: margin example reviews | margin new reviews), with\n  the steps to make it live on stderr; --script: the script that fetches its rows (a handler runs it); --data: a sample\n  of the data that script reads. margin help dashboards explains the parts\n", flags: &["--script", "--data", "--tool"], max_pos: Some(1) },
     Cmd { name: "skill", help: "margin claude skill\n  print the skill Claude loads, rendered with the configured user_name and this binary's path\n  (margin claude init installs it; margin help <topic> has the reference it points to)\n", flags: &[], max_pos: Some(0) },
 ];
+
+const PIN_HELP: &str = "margin pin [--show]
+  pin the build this is run from: copy this binary to <home>/bin/margin-<hash> and point the link
+  <home>/bin/margin at it (<home>: --home, $MARGIN_HOME, else ~/.local/state/margin). Prints the
+  copy's path. The link is replaced in one rename; the copy pinned before is kept, older ones go
+  While a pin exists, panes follow it and not the newest build: margin open starts panes with
+  <home>/bin/margin, and a running pane re-execs it in place when the pin moves. A rebuild
+  (cargo build) restarts no pane until you run margin pin from the new build. With no pin a
+  pane follows the binary it was started from, as before
+  --show  print what is pinned (the link and the copy it names), or: nothing pinned
+  margin doctor lists the running panes and daemons and whether each runs the pin
+";
 
 const EVENTS_HELP: &str = "margin events [--since N | --cursor NAME [--no-commit]] [--name GLOB] [--kind K] [--board B]
               [--follow] [--all] [--json]
@@ -438,7 +453,7 @@ struct Args {
 }
 
 const BOOL_FLAGS: &[&str] = &[
-    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit", "--stay", "--fix", "--tool",
+    "--json", "--ansi", "--float", "--split", "--stacked", "--focused", "--detail", "--unread", "--all", "--brief", "--stream", "--follow", "--replace", "--dry-run", "--yes", "--no-commit", "--stay", "--fix", "--tool", "--show",
 ];
 
 impl Args {
@@ -1112,6 +1127,16 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 }
             }
         }
+        "pin" => {
+            let home = store(a).home;
+            if a.has("--show") {
+                println!("{}", pin::show(&home));
+            } else {
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let to = pin::pin(&home, &exe)?;
+                println!("{}", to.display());
+            }
+        }
         "doctor" => {
             let st = store(a);
             let days = match a.get("--days") {
@@ -1120,6 +1145,9 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 None => 30,
             };
             print!("{}", doctor::run(&st, a.has("--fix"), days));
+            // the pinned build, and which panes and daemons of this store run it (pin.rs);
+            // nothing when nothing is pinned
+            print!("{}", pin::report(&st.home));
         }
         "events" => events_cmd(&store(a), a)?,
         "emit" => {
@@ -1358,7 +1386,6 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
         "view" => {
             let st = store(a);
             let h = host::pick(&cfg, None);
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let art = a.pos(0, "board")?.to_string();
             let more: Vec<String> = a.pos[1..].iter().map(|x| tabs::normalize(&st.project, x)).collect();
             let until = while_pid(a)?;
@@ -1366,7 +1393,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 println!("margin view: process {pid} (--while-pid) is not running; not starting");
                 return Ok(());
             }
-            if app::run(st, art.clone(), more, cfg, h, until)? {
+            if let Some(exe) = app::run(st, art.clone(), more, cfg, h, until)? {
                 // the terminal is restored (app::run's Terminal dropped); become the new build.
                 // Only the pane's own artifact is named again: the tab set is in the view file by
                 // now, and naming the tabs it started with would undo a `margin tab` since

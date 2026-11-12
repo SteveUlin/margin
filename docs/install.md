@@ -19,6 +19,12 @@ so the hooks point at a path that survives the next rebuild.
 
 Put the binary's directory on your PATH if you like; the examples below assume it.
 
+To keep open panes on one build while you rebuild, pin it: `margin pin`, run from the build you
+want, copies that binary into the store and points `<home>/bin/margin` at it (`<home>` is
+`~/.local/state/margin`, or `$MARGIN_HOME`). Panes then follow that link and restart only when
+you pin again. Put `<home>/bin` on your PATH or symlink it, and point the hooks at it in step 3
+with `margin claude init --bin <home>/bin/margin`.
+
 ## 2. Open a first pane
 
 ```sh

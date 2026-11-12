@@ -12,7 +12,8 @@ what is left over.
 | a new session starts in the project | none of its own yet | `margin claude hook start` tells it which boards exist, or which one is linked to it | untouched | untouched |
 | the pane is closed, or gets SIGTERM / SIGHUP / ctrl-c, or panics | restores the terminal (raw mode, mouse, alternate screen, cursor), takes its images down, saves its view, removes its review mark, exits 0 | untouched | untouched | the view file (folds, focus, scroll, tabs) comes back with the next pane |
 | the process named by `--while-pid PID` ends (`margin open <board> --while-pid PID`, `margin view … --while-pid PID`) | exits as `q` does: view saved, terminal restored | untouched | untouched | untouched |
-| the margin binary is rebuilt | re-execs itself in place, with the same view | untouched | the daemon keeps running the old binary until it is restarted | untouched |
+| the margin binary is rebuilt, nothing pinned | re-execs itself in place, with the same view | untouched | the daemon keeps running the old binary until it is restarted | untouched |
+| the margin binary is rebuilt, a build pinned (`margin pin`) | nothing: it follows `<home>/bin/margin`, and re-execs that in place when `margin pin` moves it | untouched | untouched | untouched |
 | the daemon gets SIGTERM | shows what it had | untouched | running commands are stopped (their whole process group: TERM, then KILL after a second), recorded `stopped`, not failed; nothing they printed is applied; cursors do not move | untouched |
 | the daemon is killed, or the machine reboots | starts again when you open it | runtime files are gone (they live in `$XDG_RUNTIME_DIR`); links and cursors are in the store | the next daemon resumes every handler from its cursor: an event appended while it was down is delivered once, an interrupted run's events are given again | boards, events, cursors, registrations: all in the store |
 

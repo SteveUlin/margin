@@ -141,7 +141,8 @@ pub fn open(st: &Store, art: &str, o: &OpenOpts, cfg: &Config) -> Result<(String
     if let Some(p) = list_panes(&sess)?.into_iter().find(|p| p.title == t && p.tab_id == tab && !p.exited) {
         return Ok((p.handle(), false));
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // the pinned build when there is one (pin.rs), else this binary
+    let exe = crate::pin::launcher(&st.home).map_err(|e| e.to_string())?;
     let exe = exe.to_string_lossy().into_owned();
     let tab_s = tab.to_string();
     let float = o.float.unwrap_or(cfg.pane == "float");

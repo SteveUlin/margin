@@ -1264,9 +1264,26 @@ fn exe_mtime(exe: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(exe).ok()?.modified().ok()
 }
 
-/// Run the pane. Returns true when the binary was rebuilt and the caller should exec the new one
-/// in this same pane: a rebuild then reaches every open pane without anyone closing, reopening or
-/// restacking panes in sulin's Zellij layout.
+/// What a pane does about the pinned build (pin.rs), from the pin's target when the pane
+/// started and its target now.
+#[derive(Debug, PartialEq)]
+enum Follow {
+    /// No pin: the pane follows its own executable, as before there were pins.
+    Own,
+    /// The pin is where it was: nothing to do, whatever was rebuilt elsewhere.
+    Stay,
+    /// The pin moved (or was made) since the pane started: become the pinned build.
+    Pin,
+}
+
+fn follow(at_start: &Option<std::path::PathBuf>, now: &Option<std::path::PathBuf>) -> Follow {
+    match now {
+        None => Follow::Own,
+        Some(_) if now == at_start => Follow::Stay,
+        Some(_) => Follow::Pin,
+    }
+}
+
 /// How long an image placement must hold still before it is sent.
 const IMG_SETTLE: f64 = 0.15;
 
@@ -1678,7 +1695,13 @@ fn take_down(imgs: &ImgSync, lv: &Live, fitted: &std::collections::HashMap<(u32,
 
 /// `art` is the pane's own artifact; `more` the other artifacts to show as tabs beside it (none:
 /// the tabs its view file remembers).
-pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn Host>, while_pid: Option<u32>) -> Result<bool, String> {
+/// Run the pane. Returns the binary the caller should exec in this same pane, when there is a
+/// newer one to become: the pinned build once the pin moves (pin.rs), or, with no pin, the
+/// pane's own executable once it is rebuilt. A new build then reaches every open pane without
+/// anyone closing, reopening or restacking panes in sulin's Zellij layout.
+pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn Host>, while_pid: Option<u32>) -> Result<Option<std::path::PathBuf>, String> {
+    let home = st.home.clone();
+    let pin0 = crate::pin::target(&home);
     // --while-pid: the pane lives as long as that process. Its pid fd wakes the loop when it
     // ends; without one (an old kernel) the loop's other wakes ask whether it is still there
     let until = while_pid.map(|p| (p, crate::watch::PidFd::open(p)));
@@ -1724,6 +1747,10 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         for p in pn.watch_missing() {
             ino.also(&p);
         }
+        // the pin: its directory, where the link is replaced; before there is one, the home it
+        // will appear in
+        let bin = crate::pin::dir(&home);
+        ino.also(if bin.is_dir() { &bin } else { &home });
         ino
     };
     let mut data_files = pn.data_files();
@@ -1994,7 +2021,18 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         }
         // reload once the new binary has stopped changing for a second (the linker writes it in
         // pieces); a file mid-write would fail to exec
-        if let (Some(e), Some(t0)) = (exe.as_deref(), exe_t0) {
+        // with a pin the pane follows the pin and nothing else: a rebuild of the binary it was
+        // started from changes nothing. The pinned copy is whole before the link moves, so
+        // there is nothing to wait out
+        let following = follow(&pin0, &crate::pin::target(&home));
+        if following == Follow::Pin {
+            pn.hide(epoch_now());
+            for l in &mut pn.tabs {
+                l.save_view();
+            }
+            return Ok(Some(crate::pin::link(&home)));
+        }
+        if let (Some(e), Some(t0), Follow::Own) = (exe.as_deref(), exe_t0, &following) {
             if let Some(m) = exe_mtime(e).filter(|m| *m != t0) {
                 match rebuilt {
                     Some((pm, since)) if pm == m && t - since >= 1.0 => {
@@ -2003,7 +2041,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
                         for l in &mut pn.tabs {
                             l.save_view();
                         }
-                        return Ok(true);
+                        return Ok(Some(e.to_path_buf()));
                     }
                     Some((pm, _)) if pm == m => {}
                     _ => rebuilt = Some((m, t)),
@@ -2155,7 +2193,7 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         let _ = term.write(&down);
     }
     leave(&mut pn);
-    Ok(false)
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -2866,6 +2904,18 @@ mod action_tests {
         assert!(lv.try_action(Key::Char('c'), false, 1.0) && lv.keys.pending().is_empty());
         assert!(!lv.try_action(Key::Char('d'), true, 1.0), "ctrl-d scrolls");
         std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A pane follows the pin when there is one: it moves only when the pin does, and a pin
+    /// made while it runs takes it over. With no pin it follows its own executable.
+    #[test]
+    fn a_pane_follows_the_pin_and_only_the_pin() {
+        let (a, b) = (Some(std::path::PathBuf::from("/h/bin/margin-a")), Some(std::path::PathBuf::from("/h/bin/margin-b")));
+        assert_eq!(follow(&None, &None), Follow::Own);
+        assert_eq!(follow(&a, &a), Follow::Stay);
+        assert_eq!(follow(&a, &b), Follow::Pin);
+        assert_eq!(follow(&None, &a), Follow::Pin, "pinned while the pane ran");
+        assert_eq!(follow(&a, &None), Follow::Own, "the pin was removed: as without one");
     }
 
     /// The sent mark goes when the row's content changes: whoever handled it wrote the row.

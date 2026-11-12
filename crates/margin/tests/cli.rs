@@ -162,6 +162,7 @@ fn every_command_honors_home_and_project_on_either_side() {
         ("data", s(&["rm", "nums"]), "", true),
         ("daemon", s(&["status"]), "", true),
         ("doctor", s(&[]), "", true),
+        ("pin", s(&["--show"]), "", true),
         ("claude init", s(&["--dry-run", "--claude-dir", &claude_dir]), "", true),
         ("example", s(&[]), "", true),
         ("claude skill", s(&[]), "", true),

@@ -2096,7 +2096,7 @@ fn check_base(old: Option<&Doc>, base: Option<u64>) -> Result<(), String> {
 /// Every project directory under the store home (for resolving tokens without a known project).
 pub fn projects(home: &Path) -> Vec<String> {
     fs::read_dir(home)
-        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != crate::pin::DIR).collect())
         .unwrap_or_default()
 }
 
