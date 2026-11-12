@@ -140,10 +140,11 @@ pub struct Inotify {
     /// The watch on the pane's own view directory: a write there is this pane saving its view, or
     /// `margin tab` changing the tab set, and neither is a reason to reload the documents.
     view_wd: i32,
-    /// The project directory's watch. Its `.lock` is opened by every command that takes the
-    /// project lock, whatever it then writes: the write itself is the news, not the lock (an
-    /// append to a dataset ten times a second would otherwise reload every tab each time).
-    proj_wd: i32,
+    /// The project directories' watches (the pane's own, and one per other project a tab comes
+    /// from). A project's `.lock` is opened by every command that takes the project lock,
+    /// whatever it then writes: the write itself is the news, not the lock (an append to a
+    /// dataset ten times a second would otherwise reload every tab each time).
+    proj_wds: Vec<i32>,
     /// The watches whose changes mean "reload".
     other: Vec<i32>,
     /// The watches on datasets: the project's `data/` directory (any name), and the directory of
@@ -183,7 +184,22 @@ impl Inotify {
                 data.push((add(dir, false), Some(name.to_string_lossy().into_owned())));
             }
         }
-        Inotify { fd, view_wd, proj_wd, other, data }
+        Inotify { fd, view_wd, proj_wds: vec![proj_wd], other, data }
+    }
+    /// Another project a tab comes from: its directory (already among the paths given to `new`)
+    /// has its `.lock` ignored too, and its `data/` directory is a dataset watch.
+    pub fn project(&mut self, proj: &Path, data_dir: &Path) {
+        self.proj_wds.push(sys::add(self.fd, proj, sys::PANE));
+        let _ = std::fs::create_dir_all(data_dir);
+        self.data.push((sys::add(self.fd, data_dir, sys::PANE), None));
+    }
+    /// Reload on changes in `p` too, if it is there: nothing is created (a tab whose project or
+    /// board is missing waits here for it to appear).
+    pub fn also(&mut self, p: &Path) {
+        let wd = sys::add(self.fd, p, sys::PANE);
+        if wd >= 0 {
+            self.other.push(wd);
+        }
     }
     /// Read what fired.
     pub fn drain(&self) -> Fired {
@@ -194,7 +210,7 @@ impl Inotify {
                 out.views = true;
             } else if is_data {
                 out.data = true;
-            } else if self.other.contains(&wd) && !(wd == self.proj_wd && name == ".lock") {
+            } else if self.other.contains(&wd) && !(self.proj_wds.contains(&wd) && name == ".lock") {
                 out.other = true;
             }
         });

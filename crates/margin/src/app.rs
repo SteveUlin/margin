@@ -17,8 +17,22 @@ use vellum::input::{Event, Key, MouseKind, Parser};
 use vellum::term::{self, Modes, Terminal};
 
 struct Live {
+    /// The store of the project this tab's board is in: the pane's own, or another project's
+    /// under the same home. Everything this tab reads and writes (state, events, datasets, its
+    /// view file) goes through it.
     st: Store,
     art: String,
+    /// The tab as the pane's view file names it (tabs.rs): `art`, or `project:art` when the
+    /// board is another project's.
+    key: String,
+    /// The board is another project's.
+    foreign: bool,
+    /// The board (or its whole project) is not there: the line the tab shows instead. Nothing is
+    /// written to that project while this is set, so a mistyped name creates no directory.
+    gone: Option<String>,
+    /// What this tab's files are changed since the watches were built (a missing board appeared,
+    /// or went): the pane builds them again.
+    rewatch: bool,
     cfg: Config,
     pane: String,
     view: View,
@@ -131,6 +145,21 @@ fn tab_act(tok: &str) -> Option<PaneAct> {
         "next" => Some(PaneAct::Next(1)),
         n => n.parse().ok().map(PaneAct::Go),
     }
+}
+
+/// What a tab says when its board, in another project, is not there: one line naming what is
+/// missing.
+fn missing_line(st: &Store, art: &str) -> String {
+    if st.dir().is_dir() {
+        format!("no board {art:?} in project {}: this tab shows it once it exists", st.project)
+    } else {
+        format!("no project {:?} in {}: this tab shows its board {art} once it exists", st.project, st.home.display())
+    }
+}
+
+/// The document a tab shows in place of a missing board. Never written anywhere.
+fn missing_doc(art: &str, why: &str) -> crate::doc::Doc {
+    serde_json::from_value(json!({"id": art, "title": art, "blocks": [{"type": "text", "id": "missing", "text": why}]})).expect("a text block is a document")
 }
 
 fn store_like(st: &Store) -> Store {
@@ -248,7 +277,33 @@ fn bindings() -> Vec<(&'static str, Act)> {
 impl Live {
     /// One artifact as this pane shows it: its document, the pane's view of it, and its scene.
     fn open(st: &Store, art: &str, cfg: &Config, pane: &str, mouse: bool, focused: bool) -> Result<Live, String> {
-        let doc = st.load(art)?;
+        Ok(Live::build(st, art, st.load(art)?, cfg, pane, mouse, focused))
+    }
+
+    /// A tab by its view-file entry, seen from the pane's own store `own`: `board`, or
+    /// `project:board`. A board of another project that is not there opens all the same, as a
+    /// tab that says what is missing; it fills in when the board appears.
+    fn open_tab(own: &Store, entry: &str, cfg: &Config, pane: &str, mouse: bool, focused: bool) -> Result<Live, String> {
+        let (st, art) = crate::tabs::store_for(own, entry);
+        if st.project == own.project {
+            return Live::open(own, &art, cfg, pane, mouse, focused);
+        }
+        let mut l = match st.load(&art) {
+            Ok(doc) => Live::build(&st, &art, doc, cfg, pane, mouse, focused),
+            Err(_) if !st.exists(&art) => {
+                let why = missing_line(&st, &art);
+                let mut l = Live::build(&st, &art, missing_doc(&art, &why), cfg, pane, mouse, focused);
+                l.gone = Some(why);
+                l
+            }
+            Err(e) => return Err(e),
+        };
+        l.key = entry.to_string();
+        l.foreign = true;
+        Ok(l)
+    }
+
+    fn build(st: &Store, art: &str, doc: crate::doc::Doc, cfg: &Config, pane: &str, mouse: bool, focused: bool) -> Live {
         let saved = st.view(art, pane);
         let mut view = saved.clone();
         if view.seen_at.is_empty() {
@@ -261,10 +316,14 @@ impl Live {
             crate::scene::show_in_tabs(&doc, &mut view, &f);
         }
         scene.restore(&view);
-        Ok(Live {
+        Live {
             last_seq: st.last_seq(),
             st: store_like(st),
             art: art.to_string(),
+            key: art.to_string(),
+            foreign: false,
+            gone: None,
+            rewatch: false,
             cfg: cfg.clone(),
             pane: pane.to_string(),
             view,
@@ -302,7 +361,15 @@ impl Live {
             detail_at: None,
             detail_sent: None,
             asked: None,
-        })
+        }
+    }
+
+    /// A passive event about this tab's board, in its own project's log. Nothing while the
+    /// board is missing: there is no board for it to be about.
+    fn view_log(&self, kind: &str, value: serde_json::Value) {
+        if self.gone.is_none() {
+            let _ = self.st.log(&self.art, "", kind, value, "pane");
+        }
     }
 
     /// Write the view file when the view, the focus or the scroll anchor changed since the last write.
@@ -375,9 +442,23 @@ impl Live {
         // when that file changed. An owner's write leaves the board's rev (the layout's) where it
         // was and moves its own, in `owned`
         let mut owner_wrote = false;
-        if let Ok(d) = self.st.load(&self.art) {
-            owner_wrote = d.rev == self.raw.rev && d.owned != self.raw.owned;
-            self.raw = d;
+        match self.st.load(&self.art) {
+            Ok(d) => {
+                owner_wrote = d.rev == self.raw.rev && d.owned != self.raw.owned;
+                self.raw = d;
+                self.rewatch |= self.gone.take().is_some();
+            }
+            // another project's board that is not there (never was, or was removed): the tab
+            // says so. A file caught mid-write keeps what the tab had
+            Err(_) if self.foreign && !self.st.exists(&self.art) => {
+                let why = missing_line(&self.st, &self.art);
+                if self.gone.as_ref() != Some(&why) {
+                    self.raw = missing_doc(&self.art, &why);
+                    self.gone = Some(why);
+                    self.rewatch = true;
+                }
+            }
+            Err(_) => {}
         }
         // the tab on screen reads its datasets with the document (a binding added by this
         // revision draws at once); a tab out of view keeps the rows it had until it is shown.
@@ -400,7 +481,8 @@ impl Live {
         self.state = self.st.state(&self.art);
         // who is working on this board, through the seam (consumer.rs): nobody, unless a
         // consumer's session keeps it
-        self.activity = self.scene.present(crate::consumer::on_board(&self.st, &self.art));
+        // (the pane's own project only: a consumer's sessions are not followed into another)
+        self.activity = self.scene.present(if self.foreign { Default::default() } else { crate::consumer::on_board(&self.st, &self.art) });
         self.scene.stopped = self.st.stopped();
         self.scene.stale = crate::owner::stale_on(&self.st, &self.art, epoch_now());
         self.toasts = crate::toast::load(&self.st, &self.art);
@@ -426,6 +508,9 @@ impl Live {
     }
 
     fn save_view(&mut self) {
+        if self.gone.is_some() {
+            return;
+        }
         self.view.focus = self.scene.focus.clone();
         self.view.anchor = self.scene.anchor.as_ref().map(|a| a.0.clone());
         self.view.anchor_off = self.scene.anchor.as_ref().map(|a| a.1).unwrap_or(0);
@@ -438,7 +523,7 @@ impl Live {
         self.fresh_look = true;
         if !ids.is_empty() {
             self.view.seen_rev = self.doc.rev;
-            let _ = self.st.log(&self.art, "", "seen", json!({"rev": self.doc.rev, "ids": ids}), "pane");
+            self.view_log("seen", json!({"rev": self.doc.rev, "ids": ids}));
         }
     }
 
@@ -534,6 +619,9 @@ impl Live {
     /// nothing: a handler registered for the name may answer by writing the block or a dataset.
     /// Returns when to look again (pane clock) while a block waits out the settle time.
     fn detail_step(&mut self, t: f64, wall: f64) -> Option<f64> {
+        if self.gone.is_some() {
+            return None;
+        }
         let focus = self.scene.focus.clone().filter(|f| self.view.detail && self.doc.find(f).is_some());
         let Some(f) = focus else {
             (self.detail_at, self.detail_sent) = (None, None);
@@ -597,6 +685,21 @@ impl Live {
     }
 
     fn key(&mut self, k: Key, ctrl: bool, now: f64, term: &mut Terminal) {
+        // a tab whose board is missing has nothing to act on: only the pane's keys work
+        if self.gone.is_some() {
+            let counted = self.keys.pending().starts_with(|c: char| c.is_ascii_digit());
+            let fed = self.keys.feed(vellum::keymap::Press { key: k, ctrl }, now);
+            self.scene.pending_keys = self.keys.pending();
+            match fed {
+                vellum::keymap::Fed::Act(Act::TabNext, n) if counted => self.pane_act = Some(PaneAct::Go(n as usize - 1)),
+                vellum::keymap::Fed::Act(Act::TabNext, _) => self.pane_act = Some(PaneAct::Next(1)),
+                vellum::keymap::Fed::Act(Act::TabPrev, n) => self.pane_act = Some(PaneAct::Prev(n)),
+                vellum::keymap::Fed::Act(Act::Quit, _) => self.quit = true,
+                vellum::keymap::Fed::Act(Act::Help, _) => self.scene.help_open = !self.scene.help_open,
+                _ => {}
+            }
+            return;
+        }
         if self.search.is_some() {
             self.search_key(k);
             return;
@@ -925,6 +1028,9 @@ impl Live {
             self.pane_act = Some(a);
             return;
         }
+        if self.gone.is_some() {
+            return;
+        }
         if let Some((tabs, sec)) = button.as_deref().and_then(|b| b.strip_prefix("mg:subtab/")).and_then(|r| r.split_once('/')).map(|(a, b)| (a.to_string(), b.to_string())) {
             self.subtab_show(&tabs, &sec);
             self.scene.focus = Some(tabs);
@@ -1179,13 +1285,13 @@ impl Pane {
         let active_art = set[active].clone();
         let mut tabs = vec![first];
         for a in &set[1..] {
-            match Live::open(st, a, cfg, pane, mouse, focused) {
+            match Live::open_tab(st, a, cfg, pane, mouse, focused) {
                 Ok(l) => tabs.push(l),
                 Err(e) if more.contains(a) => return Err(e),
                 Err(e) => select::log_line(&format!("tab {a} dropped: {e}")),
             }
         }
-        let active = tabs.iter().position(|l| l.art == active_art).unwrap_or(0);
+        let active = tabs.iter().position(|l| l.key == active_art).unwrap_or(0);
         let mut pn = Pane { tabs, active, shown: None, hidden_at: Default::default(), blurred: None };
         pn.store_set();
         Ok(pn)
@@ -1196,25 +1302,38 @@ impl Pane {
     /// key, a click, `margin tab`) and once at the pane's start. `shown` carries how long the
     /// board was off screen in this pane (`since`, seconds; null the first time).
     fn view_step(&mut self, wall: f64) {
-        let art = self.tabs[self.active].art.clone();
-        if self.shown.as_ref().map(|(a, _)| *a == art).unwrap_or(false) {
+        let l = &self.tabs[self.active];
+        let key = l.key.clone();
+        if self.shown.as_ref().map(|(a, _)| *a == key).unwrap_or(false) {
             return;
         }
         self.hide(wall);
-        let since = self.hidden_at.get(&art).map(|h| (wall - h).max(0.0).round() as u64);
-        let _ = self.tabs[self.active].st.log(&art, "", &format!("{art}.shown"), json!({"since": since}), "pane");
-        self.shown = Some((art, wall));
+        let l = &self.tabs[self.active];
+        let since = self.hidden_at.get(&key).map(|h| (wall - h).max(0.0).round() as u64);
+        // in the log of the board's own project: its handlers are the ones to hear it
+        l.view_log(&format!("{}.shown", l.art), json!({"since": since}));
+        self.shown = Some((key, wall));
     }
 
     /// The board on screen stops being it (another tab, or the pane is leaving): `<board>.hidden`,
     /// with how long it was on screen. Its detail panel asks again when it is next shown.
     fn hide(&mut self, wall: f64) {
-        let Some((art, at)) = self.shown.take() else { return };
-        let _ = self.tabs[0].st.log(&art, "", &format!("{art}.hidden"), json!({"for": (wall - at).max(0.0).round() as u64}), "pane");
-        if let Some(l) = self.tabs.iter_mut().find(|l| l.art == art) {
-            (l.detail_at, l.detail_sent) = (None, None);
+        let Some((key, at)) = self.shown.take() else { return };
+        let value = json!({"for": (wall - at).max(0.0).round() as u64});
+        match self.tabs.iter_mut().find(|l| l.key == key) {
+            Some(l) => {
+                l.view_log(&format!("{}.hidden", l.art), value);
+                (l.detail_at, l.detail_sent) = (None, None);
+            }
+            // its tab was removed: the board is still told, if it is there
+            None => {
+                let (st, art) = crate::tabs::store_for(&self.tabs[0].st, &key);
+                if st.exists(&art) {
+                    let _ = st.log(&art, "", &format!("{art}.hidden"), value, "pane");
+                }
+            }
         }
-        self.hidden_at.insert(art, wall);
+        self.hidden_at.insert(key, wall);
     }
 
     /// The terminal focus left the pane or came back. Back after `REFOCUS_SECS` or more, the
@@ -1226,13 +1345,15 @@ impl Pane {
             return;
         }
         let Some(away) = self.blurred.take().map(|b| wall - b) else { return };
-        if let (true, Some((art, _))) = (away >= REFOCUS_SECS, self.shown.as_ref()) {
-            let _ = self.tabs[0].st.log(art, "", &format!("{art}.shown"), json!({"since": away.round() as u64}), "pane");
+        if let (true, Some((key, _))) = (away >= REFOCUS_SECS, self.shown.as_ref()) {
+            if let Some(l) = self.tabs.iter().find(|l| l.key == *key) {
+                l.view_log(&format!("{}.shown", l.art), json!({"since": away.round() as u64}));
+            }
         }
     }
 
     fn set(&self) -> Vec<String> {
-        self.tabs.iter().map(|l| l.art.clone()).collect()
+        self.tabs.iter().map(|l| l.key.clone()).collect()
     }
 
     /// Put the tab set and the tab on screen into the pane's own view (written by `persist`).
@@ -1306,21 +1427,34 @@ impl Pane {
     /// was last on screen, whether it waits on the person, whether something in it failed.
     fn infos(&self) -> Vec<crate::tabs::TabInfo> {
         let titles = crate::tabs::short_titles(&self.tabs.iter().map(|l| if l.doc.title.is_empty() { l.art.clone() } else { l.doc.title.clone() }).collect::<Vec<_>>());
+        let own = &self.tabs[0].st.project;
+        // a tab from another project names it; one of the pane's own does only when a tab from
+        // another project has the same title
+        let projects: Vec<String> = self
+            .tabs
+            .iter()
+            .zip(&titles)
+            .map(|(l, t)| if l.foreign || self.tabs.iter().zip(&titles).any(|(o, ot)| o.foreign && ot == t) { crate::tabs::short_project(own, &l.st.project) } else { String::new() })
+            .collect();
         self.tabs
             .iter()
             .zip(titles)
+            .zip(projects)
             .enumerate()
-            .map(|(i, (l, title))| {
+            .map(|(i, ((l, title), project))| {
                 let (needs, failed) = crate::tabs::attention(&l.doc, &l.state);
                 // Claude blocked on a permission prompt in a session that keeps this artifact
                 let waiting = l.activity.iter().find(|a| a.agent.is_empty()).map(|a| a.state == "waiting").unwrap_or(false);
                 crate::tabs::TabInfo {
                     art: l.art.clone(),
                     title,
-                    unseen: if i == self.active { 0 } else { l.scene.unseen_count() },
+                    project,
+                    // (a missing board has nothing to see: only its mark)
+                    unseen: if i == self.active || l.gone.is_some() { 0 } else { l.scene.unseen_count() },
                     needs: needs || waiting,
-                    // an overdue writer of the board is a failure of the board
-                    failed: failed || !l.scene.stale.is_empty() || !l.data.stale(epoch_now()).is_empty() || l.toasts.iter().any(|t| t.level == "error"),
+                    // an overdue writer of the board is a failure of the board; so is a board
+                    // that is not there
+                    failed: failed || l.gone.is_some() || !l.scene.stale.is_empty() || !l.data.stale(epoch_now()).is_empty() || l.toasts.iter().any(|t| t.level == "error"),
                 }
             })
             .collect()
@@ -1346,19 +1480,19 @@ impl Pane {
         let (mouse, focused) = (self.tabs[0].mouse, self.tabs[0].focused);
         let mut old: Vec<Live> = std::mem::take(&mut self.tabs);
         for a in &set {
-            match old.iter().position(|l| l.art == *a) {
+            match old.iter().position(|l| l.key == *a) {
                 Some(i) => self.tabs.push(old.remove(i)),
-                None => match Live::open(&st, a, cfg, &pane, mouse, focused) {
+                None => match Live::open_tab(&st, a, cfg, &pane, mouse, focused) {
                     Ok(mut l) => {
                         l.reload(now);
-                        let _ = st.log(a, "", "view", json!({"pane": pane, "tab_of": primary}), "pane");
+                        l.view_log("view", json!({"pane": pane, "tab_of": primary}));
                         self.tabs.push(l);
                     }
                     Err(e) => select::log_line(&format!("tab {a}: {e}")),
                 },
             }
         }
-        self.active = self.tabs.iter().position(|l| l.art == active_art).unwrap_or(0);
+        self.active = self.tabs.iter().position(|l| l.key == active_art).unwrap_or(0);
         let lv = self.lv();
         lv.visible_since = None;
         lv.last_seen_poll = -10.0;
@@ -1387,16 +1521,39 @@ impl Pane {
     }
 
     /// The directories whose changes mean "reload": each tab's artifact, and the
-    /// project's shared ones.
+    /// project's shared ones. A tab from another project adds that project's directory (its
+    /// event log), its cursors (who took an action) and its toasts. A missing board adds nothing
+    /// here: these are created when absent.
     fn watch(&self) -> Vec<std::path::PathBuf> {
         let st = &self.tabs[0].st;
         let mut w = vec![st.dir(), st.dir().join("delivered"), st.dir().join("cursors"), st.activity_dir(), st.dir().join("toasts")];
-        for l in &self.tabs {
-            w.push(st.art(&l.art));
+        for l in self.tabs.iter().filter(|l| l.gone.is_none()) {
+            if l.foreign {
+                w.extend([l.st.dir(), l.st.dir().join("cursors"), l.st.dir().join("toasts")]);
+            }
+            w.push(l.st.art(&l.art));
             // where its owners' files are: an owner's write changes nothing else of the board
-            w.push(st.owned_dir(&l.art));
+            w.push(l.st.owned_dir(&l.art));
         }
         w
+    }
+
+    /// Where a missing board would appear: the store's home (a project is created there) and
+    /// the project's directory if it exists. Watched as they are, never created.
+    fn watch_missing(&self) -> Vec<std::path::PathBuf> {
+        self.tabs.iter().filter(|l| l.gone.is_some()).flat_map(|l| [l.st.home.clone(), l.st.dir()]).collect()
+    }
+
+    /// The other projects whose boards are on show: (project directory, its `data/`).
+    fn foreign_projects(&self) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+        let mut v: Vec<_> = self.tabs.iter().filter(|l| l.foreign && l.gone.is_none()).map(|l| (l.st.dir(), l.st.data_dir())).collect();
+        v.dedup();
+        v
+    }
+
+    /// A tab's board appeared or went since the watches were built.
+    fn take_rewatch(&mut self) -> bool {
+        self.tabs.iter_mut().fold(false, |any, l| std::mem::take(&mut l.rewatch) || any)
     }
 
     fn view_dir(&self) -> std::path::PathBuf {
@@ -1406,7 +1563,9 @@ impl Pane {
     /// The registered external dataset files (`margin data add --file`): each is watched where
     /// it is.
     fn data_files(&self) -> Vec<std::path::PathBuf> {
-        crate::data::Registry::load(&self.tabs[0].st.dir()).datasets.values().filter_map(|d| d.file.as_ref().map(std::path::PathBuf::from)).collect()
+        let mut dirs = vec![self.tabs[0].st.dir()];
+        dirs.extend(self.foreign_projects().into_iter().map(|(d, _)| d));
+        dirs.iter().flat_map(|d| crate::data::Registry::load(d).datasets.into_values().filter_map(|d| d.file.map(std::path::PathBuf::from))).collect()
     }
 
     /// A dataset's file changed: every tab's datasets are out of date. Nothing is read here.
@@ -1488,7 +1647,14 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         let mut w = pn.watch();
         w.extend(exe_dir.clone());
         let st = &pn.tabs[0].st;
-        Inotify::new(&w, &pn.view_dir(), &st.dir(), &st.data_dir(), files)
+        let mut ino = Inotify::new(&w, &pn.view_dir(), &st.dir(), &st.data_dir(), files);
+        for (dir, data) in pn.foreign_projects() {
+            ino.project(&dir, &data);
+        }
+        for p in pn.watch_missing() {
+            ino.also(&p);
+        }
+        ino
     };
     let mut data_files = pn.data_files();
     let mut ino = watch(&pn, &data_files);
@@ -1497,8 +1663,9 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
     let now = || clock.elapsed().as_secs_f64();
     pn.on_screen(term::size().cols);
     pn.reload(0.0);
+    pn.take_rewatch();
     for l in &pn.tabs {
-        let _ = l.st.log(&l.art, "", "view", json!({"pane": l.pane, "kitty": probe_kitty}), "pane");
+        l.view_log("view", json!({"pane": l.pane, "kitty": probe_kitty}));
     }
     let mut prev: Option<Grid> = None;
     let mut imgs = ImgSync::default();
@@ -1701,15 +1868,16 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
         let acts = pn.activity();
         if let Some(c) = consumer.as_mut().filter(|_| !acts.is_empty() || consumer_on) {
             consumer_on = !acts.is_empty();
-            let boards: Vec<(&crate::doc::Doc, &crate::store::State)> = pn.tabs.iter().map(|l| (&l.doc, &l.state)).collect();
+            // the pane's own project's boards: another project's log has its own seqs
+            let boards: Vec<(&crate::doc::Doc, &crate::store::State)> = pn.tabs.iter().filter(|l| !l.foreign).map(|l| (&l.doc, &l.state)).collect();
             let tick = crate::consumer::Tick {
                 activity: &acts,
                 t,
                 wall: epoch_now(),
                 cfg: &cfg,
                 store: &pn.tabs[0].st,
-                last_seq: pn.tabs.iter().map(|l| l.last_seq).max().unwrap_or(0),
-                review: pn.tabs.iter().any(|l| l.review),
+                last_seq: pn.tabs.iter().filter(|l| !l.foreign).map(|l| l.last_seq).max().unwrap_or(0),
+                review: pn.tabs.iter().any(|l| l.review && !l.foreign),
                 boards: &boards,
                 visible: &|| host.is_visible(),
             };
@@ -1793,11 +1961,17 @@ pub fn run(st: Store, art: String, more: Vec<String>, cfg: Config, host: Box<dyn
                 let fired = ino.drain();
                 if fired.other {
                     pn.reload(t);
-                    // a dataset registered on a file of its own is watched where that file is
-                    let files = pn.data_files();
-                    if files != data_files {
+                    // a dataset registered on a file of its own is watched where that file is; a
+                    // board of another project that appeared (or went) is watched where it is
+                    // now. Arm, then read: whatever was written before the new watches is read
+                    for _ in 0..3 {
+                        let files = pn.data_files();
+                        if files == data_files && !pn.take_rewatch() {
+                            break;
+                        }
                         data_files = files;
                         ino = watch(&pn, &data_files);
+                        pn.reload(t);
                     }
                 }
                 // the view directory: this pane's own saves, or `margin tab` changing the set
@@ -1996,6 +2170,75 @@ mod pane_tests {
         assert!(evs.iter().all(|e| !crate::store::is_decision(e) && !crate::store::is_action(e)));
         assert!(crate::claude::hook::unread(&st, "sess").is_empty());
         assert!(crate::claude::hook::actions_for_session(&st, "a", 0).is_empty() && crate::claude::hook::actions_for_session(&st, "b", 0).is_empty());
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A tab from another project: read from that project's store, and what the person does on
+    /// it (an action key, the view events) is appended to that project's log, not the pane's.
+    #[test]
+    fn a_foreign_tab_reads_and_writes_its_own_project() {
+        let (st, _) = pane(&["a"]);
+        let work = Store::new(st.home.clone(), "work".into());
+        let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "reviews", "title": "Reviews", "blocks": [
+            {"type": "row", "id": "pr-1", "text": "Cache the layout", "actions": [{"key": "e", "name": "retry"}]}]}))
+        .unwrap();
+        work.put(doc, None).unwrap();
+        let mut pn = Pane::open(&st, "a", &["work:reviews".into()], &Config::default(), "tty", false, true).unwrap();
+        pn.reload(0.0);
+        assert_eq!(pn.set(), ["a", "work:reviews"]);
+        let infos = pn.infos();
+        assert_eq!((infos[0].project.as_str(), infos[1].title.as_str(), infos[1].project.as_str()), ("", "Reviews", "work"));
+        assert!(pn.act(PaneAct::Next(1)));
+        pn.view_step(10.0);
+        let lv = pn.lv();
+        lv.scene.focus = Some("pr-1".into());
+        assert!(lv.action_key('e', 1.0));
+        let kinds = |s: &Store| s.events().into_iter().map(|e| e.kind).filter(|k| k.starts_with("reviews.")).collect::<Vec<_>>();
+        assert_eq!(kinds(&work), ["reviews.shown", "reviews.retry"]);
+        assert!(kinds(&st).is_empty(), "nothing of it in the pane's own project");
+        let e = work.events().into_iter().find(|e| e.kind == "reviews.retry").unwrap();
+        assert_eq!((e.artifact.as_str(), e.id.as_str()), ("reviews", "pr-1"));
+        // the set, with the project, is in the pane's own view file; the tab's view in its project's
+        pn.persist();
+        assert_eq!((st.view("a", "tty").tabs, st.view("a", "tty").tab), (vec!["a".to_string(), "work:reviews".into()], "work:reviews".to_string()));
+        assert_eq!(work.view("reviews", "tty").focus.as_deref(), Some("pr-1"));
+        let again = Pane::open(&st, "a", &[], &Config::default(), "tty", false, true).unwrap();
+        assert_eq!((again.set(), again.active, again.tabs[1].st.project.as_str()), (vec!["a".to_string(), "work:reviews".into()], 1, "work"));
+        std::fs::remove_dir_all(&st.home).ok();
+    }
+
+    /// A tab whose project or board is not there opens saying so, writes nothing there, and
+    /// fills in when the board appears.
+    #[test]
+    fn a_missing_foreign_board_is_a_tab_that_says_so() {
+        let (st, _) = pane(&["a"]);
+        let mut v = st.view("a", "tty");
+        crate::tabs::edit(&mut v, "a", "add", "gone:reviews").unwrap();
+        crate::tabs::edit(&mut v, "a", "show", "gone:reviews").unwrap();
+        st.save_view("a", "tty", &v);
+        let mut pn = Pane::open(&st, "a", &[], &Config::default(), "tty", false, true).unwrap();
+        pn.reload(0.0);
+        assert_eq!((pn.set(), pn.active), (vec!["a".to_string(), "gone:reviews".into()], 1));
+        let why = pn.tabs[1].gone.clone().unwrap();
+        assert!(why.starts_with("no project \"gone\" in ") && pn.tabs[1].doc.find("missing").is_some(), "{why}");
+        assert!(pn.infos()[1].failed);
+        // looked at, switched away from, saved: the project is not created by any of it
+        pn.view_step(1.0);
+        pn.mark_seen(2.0);
+        assert!(pn.act(PaneAct::Prev(1)));
+        pn.view_step(3.0);
+        pn.persist();
+        leave(&mut pn);
+        let gone = Store::new(st.home.clone(), "gone".into());
+        assert!(!gone.dir().exists());
+        // the project with another board: the line names the board; then the board itself
+        gone.put(serde_json::from_value(json!({"id": "other", "blocks": []})).unwrap(), None).unwrap();
+        pn.reload(4.0);
+        assert_eq!(pn.tabs[1].gone.as_deref(), Some("no board \"reviews\" in project gone: this tab shows it once it exists"));
+        gone.put(serde_json::from_value(json!({"id": "reviews", "title": "Reviews", "blocks": [{"type": "text", "id": "x", "text": "here"}]})).unwrap(), None).unwrap();
+        pn.reload(5.0);
+        assert!(pn.tabs[1].gone.is_none() && pn.tabs[1].doc.find("x").is_some() && pn.take_rewatch());
+        assert!(pn.watch().contains(&gone.art("reviews")));
         std::fs::remove_dir_all(&st.home).ok();
     }
 

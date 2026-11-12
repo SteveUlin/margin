@@ -127,8 +127,17 @@ note1 text="…"`, `margin add reviews - text note2 "…" --after note1`, `margi
 margin open reviews --tabs services,tracker   # a pane on reviews, the others as tabs beside it
 margin tab reviews add services               # add a tab to the pane whose own board is reviews
 margin tab reviews rm services | margin tab reviews show services | margin tab reviews
+margin tab reviews add tracker --from <project>   # a board of another project (or <project>:tracker)
 margin view reviews services tracker          # the renderer itself, for a plain terminal
 ```
+
+- A tab from another project (same store, a name as `--project` takes it) is read and watched
+  where it is. Keys and clicks on it write that project's state and event log, so its handlers
+  and daemon act on them, not this project's. `margin tab reviews` lists it as `project:board`;
+  `rm` / `show` take that, or the bare board name while only one tab has it. Its tab shows the
+  project, dim, after the title. A board or project that is missing shows as a tab saying so,
+  and fills in when it appears. Session links and the agents strip stay with the pane's own
+  project.
 
 - The live pane's status glyphs (a `state` cell, a row's `glyph`, a todo's circle) are Nerd Font
   icons: without one they show as boxes or blanks, and the board still works. `margin render`

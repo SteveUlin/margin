@@ -193,11 +193,11 @@ const CMDS: &[Cmd] = &[
     Cmd { name: "link", help: "margin claude link [<board>] [--session S]\n  the board this Claude session keeps (its pane): show it, or set it (explicit beats the\n  automatic links made by open and at session start). The prompt hook then carries one line\n  with the pane's state, and the live strip shows only this session.\nmargin claude unlink [--session S]\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "unlink", help: "margin claude unlink [--session S]\n  drop this session's link\n", flags: &["--session"], max_pos: Some(0) },
     Cmd { name: "unread", help: "margin claude unread [--session S] [--json]\n  sulin's decisions in the pane that a Claude session has not been handed yet, one line each\n  (--json: one event per line, as margin events --json prints them). The hooks hand them over\n  at the next prompt or tool call and move the session's cursor; this reads without moving it\n  --session S  that session's (default: the one this runs in)\n", flags: &["--session", "--json"], max_pos: Some(0) },
-    Cmd { name: "open", help: "margin open <board> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the board in a pane beside the tab this is run from (Zellij: a split or a pinned float\n  there; focus stays where it was)\n  --tabs B,C: with those boards as tabs beside it (added to the pane if it is already open)\n  --stacked: onto the tab's margin pane\n  a board already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
-    Cmd { name: "tab", help: "margin tab <board> [--pane P] [--session S]\n  the tabs of the pane whose own board is <board>\nmargin tab <board> add|rm|show <tab-board> [--pane P] [--session S]\n  add a board as a tab, remove one, or bring one on screen. The pane follows without a\n  restart: the set lives in its view file. --pane names the pane (zj-12, tty) when it can't be\n  found by its title. In the pane: click a tab, gt / gT, or 3gt for the third\n", flags: &["--pane", "--session"], max_pos: Some(3) },
+    Cmd { name: "open", help: "margin open <board> [--tabs B,C] [--float|--split|--stacked] [--tab-id N] [--session S]\n  show the board in a pane beside the tab this is run from (Zellij: a split or a pinned float\n  there; focus stays where it was)\n  --tabs B,C: with those boards as tabs beside it (added to the pane if it is already open);\n  PROJECT:B is a board of another project (margin help tab)\n  --stacked: onto the tab's margin pane\n  a board already on show as a tab of a pane in this tab is not opened again\n  plain host: prints the view command to run in a terminal\n", flags: &["--float", "--split", "--stacked", "--tab-id", "--session", "--tabs"], max_pos: Some(1) },
+    Cmd { name: "tab", help: "margin tab <board> [--pane P] [--session S]\n  the tabs of the pane whose own board is <board>\nmargin tab <board> add|rm|show <tab-board> [--from PROJECT] [--pane P] [--session S]\n  add a board as a tab, remove one, or bring one on screen. The pane follows without a\n  restart: the set lives in its view file. --pane names the pane (zj-12, tty) when it can't be\n  found by its title. In the pane: click a tab, gt / gT, or 3gt for the third\n  --from PROJECT: <tab-board> is a board of another project in the same store (a name as\n  --project takes it); PROJECT:<tab-board> says the same. The list shows such a tab as\n  PROJECT:board, and rm / show also take its bare board name while only one tab has it.\n  The pane reads and watches that board where it is: keys and clicks on it write its\n  project's state and event log, so that project's handlers and daemon act on them. A board\n  or project that is not there shows as a tab saying so, and fills in when it appears\n    margin tab tracker add reviews --from home-me-work-api\n", flags: &["--pane", "--session", "--from"], max_pos: Some(3) },
     Cmd { name: "close", help: "margin close <board> [--session S]\n  close the panes showing it\n", flags: &["--session"], max_pos: Some(1) },
     Cmd { name: "panes", help: "margin panes <board> [--session S]\n  where it's showing (pane ids, or pids under the plain host)\n", flags: &["--session"], max_pos: Some(1) },
-    Cmd { name: "view", help: "margin view <board> [<board>...]\n  the live renderer (what a margin pane runs). More boards show as tabs on the title line\n  (click, gt / gT, 3gt); with one board the pane shows the tabs its view file remembers\n", flags: &[], max_pos: None },
+    Cmd { name: "view", help: "margin view <board> [<board>...]\n  the live renderer (what a margin pane runs). More boards show as tabs on the title line\n  (PROJECT:board: a board of another project)\n  (click, gt / gT, 3gt); with one board the pane shows the tabs its view file remembers\n", flags: &[], max_pos: None },
     Cmd { name: "render", help: RENDER_HELP, flags: &["--width", "--height", "--ansi", "--focused", "--at", "--pane", "--motion", "--tab", "--detail", "--focus", "--section"], max_pos: None },
     Cmd { name: "select", help: "margin select [TEXT]\n  Zellij copy_command target: applies an mg: token, opens a link, or copies (stdin if no TEXT)\n", flags: &[], max_pos: None },
     Cmd { name: "session", help: "margin session [NAME]\n  start (or attach) a Zellij session wired for margin (copy_command); default name margin\n", flags: &[], max_pos: Some(1) },
@@ -1241,9 +1241,10 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                 stacked: a.has("--stacked"),
             };
             let h = host::pick(&cfg, a.get("--session"));
-            let more: Vec<String> = a.get("--tabs").map(|t| t.split(',').filter(|x| !x.is_empty() && *x != art).map(String::from).collect()).unwrap_or_default();
-            if let Some(t) = more.iter().find(|t| !st.exists(t)) {
-                return Err(format!("--tabs: {}", st.missing(t)));
+            // (a tab may be another project's board: project:board)
+            let more: Vec<String> = a.get("--tabs").map(|t| t.split(',').map(|x| tabs::normalize(&st.project, x)).filter(|x| !x.is_empty() && x != art).collect()).unwrap_or_default();
+            for t in &more {
+                tab_exists(&st, t).map_err(|e| format!("--tabs: {e}"))?;
             }
             // on show already as a tab of another pane beside the chat: that pane is its pane
             if more.is_empty() && !a.has("--stacked") {
@@ -1317,17 +1318,24 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             }
             let edit = match (a.pos.get(1), a.pos.get(2)) {
                 (None, _) => None,
-                (Some(op), Some(art)) => {
-                    if op == "add" && !st.exists(art) {
-                        return Err(st.missing(art));
+                (Some(op), Some(name)) => {
+                    // the tab as the view file names it: a board of this project, or with
+                    // --from (or as project:board) a board of another one
+                    let entry = match (a.get("--from"), tabs::split(name)) {
+                        (Some(_), (Some(_), _)) => return Err(format!("{name} already names its project: leave out --from")),
+                        (Some(p), (None, b)) => tabs::entry(&st.project, p, b),
+                        (None, _) => tabs::normalize(&st.project, name),
+                    };
+                    if op == "add" {
+                        tab_exists(&st, &entry)?;
                     }
-                    Some((op.as_str(), art.as_str()))
+                    Some((op.clone(), entry))
                 }
                 (Some(op), None) => return Err(format!("margin tab {primary} {op} <board>")),
             };
             for p in panes {
                 let mut v = st.view(primary, &p);
-                if let Some((op, art)) = edit {
+                if let Some((op, art)) = &edit {
                     if tabs::edit(&mut v, primary, op, art)? {
                         st.save_view(primary, &p, &v);
                     }
@@ -1342,7 +1350,8 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
             let h = host::pick(&cfg, None);
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let art = a.pos(0, "board")?.to_string();
-            if app::run(st, art.clone(), a.pos[1..].to_vec(), cfg, h)? {
+            let more: Vec<String> = a.pos[1..].iter().map(|x| tabs::normalize(&st.project, x)).collect();
+            if app::run(st, art.clone(), more, cfg, h)? {
                 // the terminal is restored (app::run's Terminal dropped); become the new build.
                 // Only the pane's own artifact is named again: the tab set is in the view file by
                 // now, and naming the tabs it started with would undo a `margin tab` since
@@ -1411,7 +1420,7 @@ fn run(cmd: &str, a: &Args) -> Result<(), String> {
                         let (needs, failed) = tabs::attention(d, &st.state(&d.id));
                         // an overdue writer is a failure of the board: the same mark
                         let failed = failed || !owner::stale_on(&st, &d.id, util::epoch_now()).is_empty();
-                        tabs::TabInfo { art: d.id.clone(), title, unseen: 0, needs, failed }
+                        tabs::TabInfo { art: d.id.clone(), title, unseen: 0, needs, failed, project: String::new() }
                     })
                     .collect();
                 sc.tab = tab;
@@ -2299,6 +2308,22 @@ fn rm_artifact(st: &Store, art: &str, yes: bool, panes: &[String]) -> Result<Str
 }
 
 /// What sulin sees, as text: content merged with his decisions.
+/// A board to add as a tab is there: `entry` is `board`, or `project:board` for another
+/// project's. The error names what is missing, the project or the board.
+fn tab_exists(st: &Store, entry: &str) -> Result<(), String> {
+    let (fst, board) = tabs::store_for(st, entry);
+    if fst.project != st.project && !fst.dir().is_dir() {
+        let mut have = store::projects(&st.home);
+        have.retain(|p| p != "zellij" && !p.starts_with('.'));
+        have.sort();
+        return Err(format!("no project {:?} in {} (projects there: {})", fst.project, st.home.display(), if have.is_empty() { "none".to_string() } else { have.join(" ") }));
+    }
+    if !fst.exists(&board) {
+        return Err(fst.missing(&board));
+    }
+    Ok(())
+}
+
 /// The live panes that show `art` as a tab of another artifact: (pane handle, the pane's own
 /// artifact). A view file outlives its pane, so each is checked against the host. `beside`: only
 /// panes in the caller's Zellij tab (where `margin open` would put a new one).

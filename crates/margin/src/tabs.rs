@@ -5,6 +5,10 @@
 //! file holds what can be said without a terminal: the set and its edits, what a tab's badge
 //! says, and the bar's layout.
 //!
+//! A tab may be a board of another project under the same home: the view file names it
+//! `project:board` (a bare name is the pane's own project, so older view files read as they
+//! did), and the pane reads, watches and writes it through that project's store.
+//!
 //! The bar sits on the pane's title line, where a single artifact's title would be:
 //! `1 Work  2 Reviews +3 ●  3 Services ✗`. The tab on screen is a filled pill, the shape and
 //! colors the title has in a pane without tabs; another tab shows how many blocks changed since it was last on
@@ -32,6 +36,67 @@ pub struct TabInfo {
     pub needs: bool,
     /// Something in it failed.
     pub failed: bool,
+    /// The project to name beside the title, already short (`short_project`): set for a tab
+    /// from another project, and for a local tab whose title a tab from another project shares.
+    /// Empty: nothing is shown.
+    pub project: String,
+}
+
+/// A tab as the view file names it: `board` for a board of the pane's own project,
+/// `project:board` for a board of another one. Board ids hold no `:`, so the last one divides.
+pub fn split(entry: &str) -> (Option<&str>, &str) {
+    match entry.rsplit_once(':') {
+        Some((p, b)) if !p.is_empty() => (Some(p), b),
+        _ => (None, entry),
+    }
+}
+
+/// The view-file name of `board` in `project`, for a pane whose own project is `own`: a board of
+/// the pane's own project is always the bare name, so old view files and new ones agree.
+pub fn entry(own: &str, project: &str, board: &str) -> String {
+    if project == own {
+        board.to_string()
+    } else {
+        format!("{project}:{board}")
+    }
+}
+
+/// A tab name as typed (`board`, `project:board`) as the view file would have it.
+pub fn normalize(own: &str, name: &str) -> String {
+    match split(name) {
+        (Some(p), b) => entry(own, p, b),
+        (None, b) => b.to_string(),
+    }
+}
+
+/// The store and board id a tab entry names, seen from the pane's own store.
+pub fn store_for(own: &Store, entry: &str) -> (Store, String) {
+    let (p, b) = split(entry);
+    (Store { home: own.home.clone(), project: p.unwrap_or(&own.project).to_string(), author: own.author.clone() }, b.to_string())
+}
+
+/// Which tab of `set` does `name` mean? The entry itself (`board`, `project:board`), else the
+/// one tab from another project whose board has that bare name. Two such tabs is an error that
+/// lists them.
+pub fn locate(set: &[String], name: &str) -> Result<Option<usize>, String> {
+    if let Some(i) = set.iter().position(|e| e == name) {
+        return Ok(Some(i));
+    }
+    let hits: Vec<usize> = set.iter().enumerate().filter(|(_, e)| split(e).1 == name).map(|(i, _)| i).collect();
+    match hits[..] {
+        [] => Ok(None),
+        [i] => Ok(Some(i)),
+        _ => Err(format!("{name} names more than one tab: {}", hits.iter().map(|&i| set[i].as_str()).collect::<Vec<_>>().join(", "))),
+    }
+}
+
+/// A project's name as a tab shows it: what is left after the leading `-` parts it shares with
+/// the pane's own project (`home-me-work-api` beside `home-me-margin` is `work-api`), cut to 12
+/// columns. The pane's own project is its last part.
+pub fn short_project(own: &str, project: &str) -> String {
+    let (a, b): (Vec<&str>, Vec<&str>) = (own.split('-').collect(), project.split('-').collect());
+    let shared = a.iter().zip(&b).take_while(|(x, y)| x == y).count().min(b.len() - 1);
+    truncate(&b[shared..].join("-"), 12).into_owned()
 }
 
 /// Does the doc wait on the person, and did something in it fail? The same rules as the pinned
@@ -104,7 +169,8 @@ pub fn store(view: &mut View, set: &[String], active: usize) {
 pub fn edit(view: &mut View, primary: &str, op: &str, art: &str) -> Result<bool, String> {
     let (mut set, mut active) = resolve(primary, &[], view);
     let before = (view.tabs.clone(), view.tab.clone());
-    let at = set.iter().position(|a| a == art);
+    // add takes the entry as given; rm and show also take a foreign tab's bare board name
+    let at = if op == "add" { set.iter().position(|a| a == art) } else { locate(&set, art)? };
     match (op, at) {
         ("add", None) => set.push(art.to_string()),
         ("add", Some(_)) => {}
@@ -180,12 +246,21 @@ fn badge_w(t: &TabInfo) -> usize {
     badge(t).iter().map(|(s, _)| width(s) + 1).sum()
 }
 
+/// The columns a tab's project takes after its title: a blank and the name, or nothing.
+fn proj_w(t: &TabInfo) -> usize {
+    if t.project.is_empty() {
+        0
+    } else {
+        width(&t.project) + 1
+    }
+}
+
 /// The widest title cap at which every tab fits in `room` columns as ` n title badges `, a
 /// column apart; None when even the shortest cap doesn't (the bar collapses).
 fn fit(infos: &[TabInfo], room: usize) -> Option<usize> {
     (7..=28usize).rev().find(|&cap| {
         // a cap (or its blank) each side, a blank inside each, the number and its blank
-        let total: usize = infos.iter().enumerate().map(|(i, t)| 5 + width(&(i + 1).to_string()) + width(&truncate(&t.title, cap)) + badge_w(t)).sum::<usize>();
+        let total: usize = infos.iter().enumerate().map(|(i, t)| 5 + width(&(i + 1).to_string()) + width(&truncate(&t.title, cap)) + proj_w(t) + badge_w(t)).sum::<usize>();
         total <= room
     })
 }
@@ -223,18 +298,22 @@ pub fn draw(g: &mut Grid, x0: u16, y: u16, infos: &[TabInfo], active: usize, w: 
             }
             let on = i == active;
             let xs = x;
-            let label = format!(" {} {} ", i + 1, truncate(&t.title, cap));
+            let head = format!(" {} {}", i + 1, truncate(&t.title, cap));
+            let proj = if t.project.is_empty() { String::new() } else { format!(" {}", t.project) };
             if on {
                 // the tab on screen: the title's pill, purple while the pane has the keyboard.
                 // It has no badge: its changes are in front of him
                 let (bg, fg) = if focused { (p.purple, p.bg0) } else { (p.bg3, p.fg) };
-                x = vellum::parts::pill(g, x, y, &label, bg, fg, p.bg0, clip);
+                x = vellum::parts::pill(g, x, y, &format!("{head}{proj} "), bg, fg, p.bg0, clip);
+                // the project, dimmer than the title, in the pill's own cells (after its cap)
+                g.put_clipped(xs + 1 + width(&head) as u16, y, &proj, Style::fg(fg.mix(bg, 0.45)).on(bg), clip);
             } else {
                 // another tab: dim text in the same cells a pill would take (a blank where each
                 // cap would be), so nothing shifts when the tab on screen changes
                 x = g.put_clipped(x, y, " ", Style::default().on(p.bg0), clip);
                 x = g.put_clipped(x, y, &format!(" {}", i + 1), Style::fg(p.grey0).on(p.bg0), clip);
                 x = g.put_clipped(x, y, &format!(" {}", truncate(&t.title, cap)), Style::fg(p.grey1).on(p.bg0), clip);
+                x = g.put_clipped(x, y, &proj, Style::fg(p.grey0).on(p.bg0), clip);
                 x = put_badges(g, x, y, t, p, p.bg0, clip);
                 x = g.put_clipped(x, y, "  ", Style::default().on(p.bg0), clip);
             }
@@ -247,7 +326,7 @@ pub fn draw(g: &mut Grid, x0: u16, y: u16, infos: &[TabInfo], active: usize, w: 
     let pos = format!("{}/{n}", active + 1);
     let others: Vec<(usize, &TabInfo)> = infos.iter().enumerate().filter(|(i, t)| *i != active && !badge(t).is_empty()).collect();
     // the chooser keeps at least 6 columns of title; what is left after it goes to the others
-    let fixed = 3 + width(&pos) + 1 + 2;
+    let fixed = 3 + width(&pos) + 1 + 2 + proj_w(cur);
     // the tabs with something to say keep up to half the bar; the title on screen has the rest
     // (those of them that fit whole in that half; when not even the first does, only its mark)
     let mut reserve = 0;
@@ -269,6 +348,9 @@ pub fn draw(g: &mut Grid, x0: u16, y: u16, infos: &[TabInfo], active: usize, w: 
     x = g.put_clipped(x, y, &pos, Style::fg(if focused { p.purple } else { p.grey2 }).on(p.bg0).bold(), clip);
     x = g.put_clipped(x, y, " ", blank, clip);
     x = g.put_clipped(x, y, &truncate(&cur.title, tcap), Style::fg(p.fg).on(p.bg0).bold(), clip);
+    if !cur.project.is_empty() {
+        x = g.put_clipped(x, y, &format!(" {}", cur.project), Style::fg(p.grey0).on(p.bg0), clip);
+    }
     let nx = g.put_clipped(x, y, " ", blank, clip);
     x = g.put_clipped(nx, y, "›", Style::fg(p.grey1).on(p.bg0).bold(), clip);
     hits.push((nx.saturating_sub(1), 2, "mg:tab/next".into()));
@@ -303,7 +385,7 @@ mod tests {
     use vellum::color::EVERFOREST;
 
     fn info(title: &str, unseen: usize, needs: bool, failed: bool) -> TabInfo {
-        TabInfo { art: title.to_lowercase(), title: title.into(), unseen, needs, failed }
+        TabInfo { art: title.to_lowercase(), title: title.into(), unseen, needs, failed, project: String::new() }
     }
 
     fn bar(infos: &[TabInfo], active: usize, w: u16) -> (String, Vec<Hit>) {
@@ -350,6 +432,62 @@ mod tests {
         // back to one: nothing of the tabs is left in the view
         assert!(edit(&mut v, "a", "rm", "b").unwrap());
         assert_eq!(v, View::default());
+    }
+
+    /// The view file names a tab of another project `project:board`; a bare name (every entry of
+    /// an old view file) is a board of the pane's own project, and stays bare when written.
+    #[test]
+    fn a_tab_entry_names_its_project_and_old_files_read_as_before() {
+        let old: View = serde_json::from_str(r#"{"tabs": ["a", "b"], "tab": "b"}"#).unwrap();
+        assert_eq!(resolve("a", &[], &old), (vec!["a".to_string(), "b".into()], 1));
+        assert_eq!((split("b"), split("work:reviews")), ((None, "b"), (Some("work"), "reviews")));
+        assert_eq!((entry("own", "own", "b"), entry("own", "work", "reviews")), ("b".to_string(), "work:reviews".to_string()));
+        assert_eq!((normalize("own", "own:b"), normalize("own", "work:b"), normalize("own", "b")), ("b".to_string(), "work:b".to_string(), "b".to_string()));
+        let mut v = old.clone();
+        assert!(edit(&mut v, "a", "add", "work:reviews").unwrap());
+        assert!(edit(&mut v, "a", "show", "work:reviews").unwrap());
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains(r#""tabs":["a","b","work:reviews"]"#) && json.contains(r#""tab":"work:reviews""#), "{json}");
+        let back: View = serde_json::from_str(&json).unwrap();
+        assert_eq!(resolve("a", &[], &back), (vec!["a".to_string(), "b".into(), "work:reviews".into()], 2));
+        let st = Store::new("/h".into(), "own".into());
+        let (f, board) = store_for(&st, "work:reviews");
+        assert_eq!((f.project.as_str(), f.home == st.home, board.as_str()), ("work", true, "reviews"));
+        assert_eq!(store_for(&st, "b").0.project, "own");
+    }
+
+    /// rm and show take `project:board`, or the bare board name while only one tab has it.
+    #[test]
+    fn a_foreign_tab_is_addressed_by_its_entry_or_an_unambiguous_bare_name() {
+        let mut v = View::default();
+        for t in ["work:reviews", "b", "work:b", "ops:deploys", "lab:deploys"] {
+            edit(&mut v, "a", "add", t).unwrap();
+        }
+        assert!(edit(&mut v, "a", "show", "reviews").unwrap());
+        assert_eq!(v.tab, "work:reviews");
+        // the pane's own board of that name is the bare name's meaning
+        assert!(edit(&mut v, "a", "show", "b").unwrap());
+        assert_eq!(v.tab, "b");
+        let e = edit(&mut v, "a", "rm", "deploys").unwrap_err();
+        assert_eq!(e, "deploys names more than one tab: ops:deploys, lab:deploys");
+        assert!(edit(&mut v, "a", "rm", "ops:deploys").unwrap());
+        assert!(edit(&mut v, "a", "rm", "deploys").unwrap(), "one left: the bare name is enough");
+        assert_eq!(v.tabs, ["a", "work:reviews", "b", "work:b"]);
+        assert!(edit(&mut v, "a", "rm", "nope:reviews").is_err());
+    }
+
+    /// The project sits after the title, for the tabs that carry one, and takes room in the fit.
+    #[test]
+    fn a_foreign_tab_shows_its_project_after_the_title() {
+        let mut infos = [info("Work", 0, false, false), info("Reviews", 2, false, false)];
+        infos[1].project = "api".into();
+        let (text, _) = bar(&infos, 0, 80);
+        assert!(text.contains("2 Reviews api +2") && !text.contains("Work api"), "{text}");
+        let (on, _) = bar(&infos, 1, 80);
+        assert!(on.contains(" 2 Reviews api "), "{on}");
+        assert_eq!(short_project("home-me-margin", "home-me-work-api"), "work-api");
+        assert_eq!(short_project("home-me-margin", "boards"), "boards");
+        assert_eq!(short_project("home-me-margin", "home-me-margin"), "margin");
     }
 
     /// Every tab with its number; another tab says how much changed and whether it needs him.
