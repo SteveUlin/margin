@@ -91,6 +91,7 @@ impl Consumer for Adapter {
             recap: recap::for_pane(st, board),
             workers_title: "Agents".into(),
             workers: agents::workers(&agents::for_pane(st, board)),
+            undelivered: if linked { undelivered(st, board, &sessions) } else { None },
         })
     }
 
@@ -105,6 +106,47 @@ impl Consumer for Adapter {
     fn review(&self, st: &Store, pane: &str, board: &str, on: bool) {
         // said in the store, where the rewake watcher reads it (wake.rs)
         wake::review_mark(st, pane, board, on);
+    }
+}
+
+/// The person's decisions on `board` that a live session keeping it has not been handed (the
+/// session's cursor under `delivered/` is behind them; the hooks move it), and whether that
+/// session has worked on since. The session furthest behind answers for the board.
+fn undelivered(st: &Store, board: &str, sessions: &[String]) -> Option<crate::consumer::Undelivered> {
+    let doc = st.load(board).ok();
+    sessions
+        .iter()
+        .filter(|s| st.activity(s).map(|a| a.state != "ended").unwrap_or(true))
+        .filter_map(|s| {
+            let evs: Vec<_> = hook::unread(st, s).into_iter().filter(|e| e.artifact == board).collect();
+            let oldest = crate::util::parse_rfc3339(&evs.first()?.at)?;
+            Some(crate::consumer::Undelivered { count: evs.len(), oldest, active_since: active_since(st.activity(s).as_ref(), doc.as_ref(), oldest) })
+        })
+        .max_by_key(|u| u.count)
+}
+
+/// Has a session worked on past decisions made at `oldest` without being handed them? From
+/// what is recorded, by two signals, each counted only once the decisions had settled (a hook
+/// holds back a decision younger than `hook::SETTLE_SECS`):
+/// - the session's own activity record, which its hooks write. `thinking` is written by the
+///   prompt and post-tool hooks, the two that hand decisions over: one after the decisions
+///   settled means a hook ran and delivered nothing. `idle` (the turn ended) and `running` or
+///   `waiting` (one tool call in flight; the hook after it delivers) are the normal waits;
+/// - the board itself: a revision written from inside a session after the decisions settled.
+///   This one needs no hook, so it is what catches a session whose hooks do not run at all.
+///
+/// `Some(false)` when the record says the session is idle or mid-call, `None` when there is no
+/// record or it says nothing either way.
+fn active_since(act: Option<&crate::store::Activity>, doc: Option<&crate::doc::Doc>, oldest: f64) -> Option<bool> {
+    let settled = oldest + hook::SETTLE_SECS;
+    let after = |t: &str| crate::util::parse_rfc3339(t).is_some_and(|t| t > settled);
+    if doc.is_some_and(|d| d.by == AUTHOR && after(&d.updated)) {
+        return Some(true);
+    }
+    match act.map(|a| (a.state.as_str(), after(&a.since))) {
+        Some(("thinking", true)) => Some(true),
+        Some(("idle" | "running" | "waiting", _)) => Some(false),
+        _ => None,
     }
 }
 
@@ -188,6 +230,38 @@ mod tests {
     fn board(st: &Store) {
         let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "ci", "title": "CI", "blocks": [{"type": "row", "id": "j1", "text": "build"}]})).unwrap();
         st.put(doc, None).unwrap();
+    }
+
+    /// What the adapter tells the seam about decisions a session has not been handed: none once
+    /// its cursor is past them; while they wait, whether the session worked on without them.
+    #[test]
+    fn undelivered_decisions_are_counted_per_board_until_the_cursor_passes_them() {
+        let st = crate::store::tests::temp_store();
+        let doc: crate::doc::Doc = serde_json::from_value(json!({"id": "ci", "title": "CI", "blocks": [{"type": "question", "id": "q1", "text": "Which?", "options": ["x", "y"]}]})).unwrap();
+        st.put(doc, None).unwrap();
+        link::set(&st, "mine", "ci", "explicit");
+        st.first_seen("mine");
+        assert_eq!(Adapter.on_board(&st, "ci").unwrap().undelivered, None, "nothing decided");
+        let e = st.decide("ci", "q1", "pick", json!("x"), "key", None).unwrap();
+        let u = Adapter.on_board(&st, "ci").unwrap().undelivered.expect("one waits");
+        assert_eq!((u.count, u.active_since), (1, None), "no activity recorded: nothing says why");
+        let act = |state: &str, since: f64| crate::store::Activity { session: "mine".into(), state: state.into(), since: crate::util::rfc3339(since), ..Default::default() };
+        st.set_activity(&act("idle", u.oldest + 30.0));
+        assert_eq!(Adapter.on_board(&st, "ci").unwrap().undelivered.unwrap().active_since, Some(false), "the turn ended: an idle session is normal");
+        st.set_activity(&act("thinking", u.oldest + 30.0));
+        assert_eq!(Adapter.on_board(&st, "ci").unwrap().undelivered.unwrap().active_since, Some(true), "a delivering hook ran and delivered nothing");
+        // the hook hands it over: the cursor passes it and nothing waits
+        st.set_delivered("mine", e.seq);
+        assert_eq!(Adapter.on_board(&st, "ci").unwrap().undelivered, None);
+        // the signals, one at a time
+        let d = |by: &str, at: f64| crate::doc::Doc { by: by.into(), updated: crate::util::rfc3339(at), ..crate::doc::Doc::empty("ci") };
+        let t = 1_000_000.0;
+        assert_eq!(active_since(Some(&act("running", t + 30.0)), None, t), Some(false), "one call in flight: the hook after it delivers");
+        assert_eq!(active_since(Some(&act("thinking", t + 2.0)), None, t), None, "before the decision settled: no hook would have handed it over yet");
+        assert_eq!(active_since(None, Some(&d(AUTHOR, t + 30.0)), t), Some(true), "it wrote the board since, with no hook recording anything");
+        assert_eq!(active_since(Some(&act("idle", t - 9.0)), Some(&d(AUTHOR, t + 30.0)), t), Some(true));
+        assert_eq!(active_since(None, Some(&d("you", t + 30.0)), t), None, "the person's own write says nothing of the session");
+        std::fs::remove_dir_all(&st.home).ok();
     }
 
     /// Nobody keeps a board until a session links to it: the project's other sessions, however

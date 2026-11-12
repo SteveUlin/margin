@@ -209,6 +209,10 @@ enum HeadKind {
     Purpose,
     Running,
     Needs,
+    /// The person's decisions have not reached the board's consumer: a warning, or (when
+    /// nothing says why) a plain count.
+    Undelivered,
+    Waiting,
 }
 
 /// One line of the pinned head: where the work stands, said without scrolling.
@@ -340,6 +344,9 @@ pub struct Scene {
     pub linked: bool,
     /// The consumer's display name, as the pane writes it; empty when nobody keeps the board.
     pub consumer: String,
+    /// The person's decisions the consumer has not been handed (`present` sets it); the head
+    /// says so once they have waited `consumer::UNDELIVERED_SECS`.
+    pub undelivered: Option<crate::consumer::Undelivered>,
     /// The board is kept by a session that has ended, and by none that is live: when
     /// it ended (local HH:MM), for one quiet line where the live strip was.
     pub ended: Option<String>,
@@ -460,6 +467,7 @@ impl Scene {
             show_ids: false,
             linked: false,
             consumer: String::new(),
+            undelivered: None,
             ended: None,
             stale: Vec::new(),
             stale_data: HashMap::new(),
@@ -593,6 +601,7 @@ impl Scene {
     pub fn present(&mut self, who: crate::consumer::Presence) -> Vec<crate::store::Activity> {
         self.linked = who.linked;
         self.consumer = who.name;
+        self.undelivered = who.undelivered;
         self.ended = who.ended;
         self.recap = who.recap;
         self.agents = who.workers;
@@ -1266,6 +1275,15 @@ impl Scene {
             folded_needs = head.iter().skip(1).filter(|l| l.kind == HeadKind::Needs).map(|l| l.ids.len()).sum();
             head.truncate(1);
         }
+        // decisions that have not reached the consumer lead the head, folded or not; until
+        // they have waited long enough to say so, the pane comes back when they will have
+        if let Some(u) = &self.undelivered {
+            match u.line(&self.consumer, inp.wall) {
+                Some((text, warn)) => head.insert(0, HeadLine { kind: if warn { HeadKind::Undelivered } else { HeadKind::Waiting }, text, right: String::new(), target: String::new(), ids: Vec::new() }),
+                None if u.count > 0 && u.active_since != Some(false) && inp.wall <= u.due() => wake.at(now + (u.due() - inp.wall).max(0.0) + 0.1),
+                None => {}
+            }
+        }
         let show_head = !head.is_empty() && full_h >= head.len() as u16 + 5;
         // the head's lines wrap (HEAD_WRAP rows each), but the list keeps at least 4 rows
         let head_max = (head.len() * if inp.view.head_folded { 1 } else { HEAD_WRAP }).min(full_h.saturating_sub(5) as usize) as u16;
@@ -1877,6 +1895,8 @@ impl Scene {
                 HeadKind::Purpose => (icon::PIN.to_string(), p.green, p.grey2),
                 HeadKind::Running => (parts::spinner(inp.now, m).to_string(), p.yellow, p.fg),
                 HeadKind::Needs => (icon::BELL.to_string(), p.purple, p.purple),
+                HeadKind::Undelivered => (icon::WARN.to_string(), p.yellow, p.yellow),
+                HeadKind::Waiting => (icon::HOURGLASS.to_string(), p.grey1, p.grey1),
             };
             if l.kind == HeadKind::Running {
                 // spinner frames, or just the elapsed time's pace
@@ -3013,6 +3033,20 @@ mod tests {
         // the live strip sits on the keys' row; with the session quiet the keys name whom S stops
         let t = text(&mut sc, &[], true);
         assert!(t.contains("stop Otto") && !t.contains("Build the pane"), "{t}");
+        // decisions it has not been handed: nothing while it is idle, a warning in the head once
+        // it has worked on without them, a plain count when nothing says why; gone once handed
+        let at = parse_rfc3339("2026-11-08T09:58:00Z").unwrap();
+        let waits = |active_since| crate::consumer::Presence { name: "Otto".into(), linked: true, undelivered: Some(crate::consumer::Undelivered { count: 2, oldest: at, active_since }), ..Default::default() };
+        let acts = sc.present(waits(Some(false)));
+        assert!(!text(&mut sc, &acts, false).contains("decisions"));
+        let acts = sc.present(waits(Some(true)));
+        let t = text(&mut sc, &acts, false);
+        assert!(t.lines().nth(2).is_some_and(|l| l.contains("2 decisions not delivered to Otto: its hooks are not running (restart the session, or /hooks)")), "{t}");
+        let acts = sc.present(waits(None));
+        let t = text(&mut sc, &acts, false);
+        assert!(t.contains("2 decisions waiting for Otto") && !t.contains("hooks"), "{t}");
+        let acts = sc.present(crate::consumer::Presence { name: "Otto".into(), linked: true, ..Default::default() });
+        assert!(!text(&mut sc, &acts, false).contains("decisions"));
         // and gone again once nobody does
         let acts = sc.present(crate::consumer::Presence::default());
         let t = text(&mut sc, &acts, true);

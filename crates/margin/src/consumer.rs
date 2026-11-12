@@ -164,6 +164,47 @@ pub struct Presence {
     /// The heading over the workers' rows.
     pub workers_title: String,
     pub workers: Vec<Group>,
+    /// The person's decisions on this board that a live session has not been handed, if any.
+    pub undelivered: Option<Undelivered>,
+}
+
+/// The person's decisions on a board that its consumer has not been handed. The core asks only
+/// this; how a consumer is handed decisions, and how it is known to have been active, is the
+/// adapter's to answer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Undelivered {
+    /// How many decisions wait.
+    pub count: usize,
+    /// When the oldest of them was made (epoch seconds).
+    pub oldest: f64,
+    /// Has the consumer been at work since then, past a moment at which it would have been
+    /// handed them? `Some(true)`: yes, so its delivery is broken. `Some(false)`: no, it has
+    /// been idle or busy with one thing since, which is normal. `None`: nothing recorded says.
+    pub active_since: Option<bool>,
+}
+
+/// How long decisions may wait before the pane says anything (seconds).
+pub const UNDELIVERED_SECS: f64 = 60.0;
+
+impl Undelivered {
+    /// The line for the pane's head, and whether it is a warning: nothing while the decisions
+    /// are young or the consumer is merely idle; a warning once it has worked on without them;
+    /// a plain count when nothing recorded says either way (no claim about the cause).
+    pub fn line(&self, name: &str, wall: f64) -> Option<(String, bool)> {
+        if self.count == 0 || name.is_empty() || wall - self.oldest <= UNDELIVERED_SECS {
+            return None;
+        }
+        let n = format!("{} decision{}", self.count, if self.count == 1 { "" } else { "s" });
+        match self.active_since {
+            Some(true) => Some((format!("{n} not delivered to {name}: its hooks are not running (restart the session, or /hooks)"), true)),
+            Some(false) => None,
+            None => Some((format!("{n} waiting for {name}"), false)),
+        }
+    }
+    /// When `line` may first have something to say (epoch seconds), for the pane's wake-up.
+    pub fn due(&self) -> f64 {
+        self.oldest + UNDELIVERED_SECS
+    }
 }
 
 /// What the pane's main loop hands a consumer each frame.
@@ -245,6 +286,21 @@ mod tests {
         assert_eq!(w.took(100.0), "1m");
         let done = Worker { finished: true, started: Some(0.0), ended: Some(45.0), ..w };
         assert_eq!((done.phase(1000.0), done.waiting_for(1000.0), done.took(1000.0).as_str()), (Phase::Done, None, "45s"));
+    }
+
+    /// The three states of decisions that wait, and the one where nothing says which it is:
+    /// delivered (nothing), waiting on an idle consumer (nothing: that is normal), undelivered
+    /// while the consumer worked on (the warning), and unknown (a plain count, no cause named).
+    #[test]
+    fn undelivered_decisions_warn_only_when_the_consumer_worked_on_without_them() {
+        let u = |count, active_since| Undelivered { count, oldest: 1000.0, active_since };
+        assert_eq!(u(0, Some(true)).line("Otto", 2000.0), None, "delivered");
+        assert_eq!(u(2, Some(false)).line("Otto", 2000.0), None, "waiting, and the consumer is idle");
+        assert_eq!(u(2, Some(true)).line("Otto", 1000.0 + UNDELIVERED_SECS), None, "young: it may yet be handed them");
+        assert_eq!(u(2, Some(true)).line("Otto", 1061.0), Some(("2 decisions not delivered to Otto: its hooks are not running (restart the session, or /hooks)".to_string(), true)));
+        assert_eq!(u(1, None).line("Otto", 1061.0), Some(("1 decision waiting for Otto".to_string(), false)), "no signal: no claim about hooks");
+        assert_eq!(u(2, Some(true)).line("", 2000.0), None, "nobody keeps the board");
+        assert_eq!(u(2, None).due(), 1060.0);
     }
 
     /// The core's source files: everything but the adapter, `main.rs` (which dispatches to it),
