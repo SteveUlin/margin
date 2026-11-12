@@ -229,7 +229,8 @@ its own id.
   column only): each strip ends with its failure count.
 - Row fields: `cells` (an object keyed by column key; a missing key is a blank cell), `target` (a
   URL or `mg:` token: enter or a click appends `<board>.open` for the `open` handler), `detail`
-  (shown in the detail panel), `actions` (keys on this row; on the table: on every row).
+  (shown in the detail panel), `after` (the rows it sits on, for a `graph` column), `actions`
+  (keys on this row; on the table: on every row).
 
 | kind | the cell holds | drawn as |
 |---|---|---|
@@ -240,6 +241,29 @@ its own id.
 | `runs` | a list of `"ok"` `"fail"` `"skip"` `"running"` or `null` | a run strip, newest at the right (at most the newest 20); with `"summary": true` on the column, then failed/ran such as `1/6` (dim; red when the newest run failed), inside the column's width |
 | `age` | an RFC 3339 time, or unix seconds | a live age (`12s` `4m` `2h` `3d`) the pane keeps ticking |
 | `state` | `spin` `done` `fail` `you` `perm` `idle` `ended` `commit` `wc` `file` `term`, or any one character | a status glyph in its color (`spin` animates) |
+| `graph` | nothing: it reads each row's `after` | a node per row and lanes joining the rows that name each other |
+
+**A graph column** shows how the rows of one table relate: a pull request stacked on its base, a
+task that waits on another. A row names the rows it depends on or sits on with `after`: one row
+id, or a list. The rows stay in the order written, and a named row may be above or below.
+
+```json
+{"type": "table", "id": "pr",
+ "columns": [{"key": "g", "kind": "graph"}, {"key": "pr", "title": "PR", "kind": "id"}, {"key": "title", "title": "Title"}],
+ "children": [
+   {"type": "tr", "id": "pr-16", "after": "pr-14", "cells": {"pr": "#16", "title": "Retry: jitter"}},
+   {"type": "tr", "id": "pr-15", "after": "pr-13", "cells": {"pr": "#15", "title": "Metrics for the cap"}},
+   {"type": "tr", "id": "pr-14", "after": "pr-13", "cells": {"pr": "#14", "title": "Cap the backoff"}},
+   {"type": "tr", "id": "pr-13", "cells": {"pr": "#13", "title": "Split the retry path"}}]}
+```
+
+- The column is as wide as its lanes, eight at most; give it no title and no cells. A row with a
+  link has a filled node, a row with none a hollow one. Lanes are dim.
+- An id in `after` that is not a row of the table is ignored, so a handler can write a base that
+  is not listed. `after` that is neither text nor a list of text is refused.
+- In a table fed by a dataset (`rows`), a record's `after` field names other records by their
+  `key` value.
+- The glyphs follow the config's `graph_glyphs`, like the lanes between todos (`margin help graphs`).
 
 - Width: every kind but `text` takes its natural width; `text` columns share the rest and are cut
   with `…`. Below 20 cells of text, `optional` columns drop, rightmost first. The focused row

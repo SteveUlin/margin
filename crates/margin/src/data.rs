@@ -720,7 +720,8 @@ fn key_slug(v: &Value) -> Option<String> {
 
 /// A bound table's rows: one `tr` per record, its id `<table id>-<key value>` (stable, so the
 /// focus, actions and the reconcile's animation follow a record), its cells the record's fields,
-/// its `target` and `detail` the fields of those names. Records sharing a key are one row: the
+/// its `target` and `detail` the fields of those names, its `after` the rows of the records that
+/// field names by key value. Records sharing a key are one row: the
 /// newest one's content, at the place the key first appeared. A record without the key field
 /// (or a bare number) is no row.
 pub fn table_rows(table: &Block, records: &[Value]) -> Vec<Block> {
@@ -735,6 +736,18 @@ pub fn table_rows(table: &Block, records: &[Value]) -> Vec<Block> {
             if let Some(s) = o.get(field).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                 f.insert(field.into(), json!(s));
             }
+        }
+        // a record's `after` names other records by their key values: the rows' ids
+        let links: Vec<Value> = match o.get("after") {
+            Some(Value::Array(a)) => a.iter().filter_map(key_slug).collect(),
+            Some(v) => key_slug(v).into_iter().collect(),
+            None => Vec::new(),
+        }
+        .into_iter()
+        .map(|l| json!(format!("{}-{l}", table.id)))
+        .collect();
+        if !links.is_empty() {
+            f.insert("after".into(), Value::Array(links));
         }
         let row = Block { kind: "tr".into(), id: format!("{}-{k}", table.id), children: Vec::new(), f };
         match rows.iter_mut().find(|x| x.id == row.id) {
@@ -1067,9 +1080,11 @@ pub mod tests {
         assert_eq!(inline_ref("@a"), Some(("a", None, INLINE_W, None)));
         assert_eq!((inline_ref("a"), inline_ref("@a b"), inline_ref("@a.:3"), inline_ref("@a:0")), (None, None, None, None));
         let table = d.find("prs").unwrap();
-        let rows = table_rows(table, &[json!({"id": 12, "title": "old"}), json!({"id": "a/b", "title": "x", "target": "https://example.com/x", "detail": "more"}), json!(5), json!({"title": "no key"}), json!({"id": 12, "title": "new"})]);
+        let rows = table_rows(table, &[json!({"id": 12, "title": "old"}), json!({"id": "a/b", "title": "x", "target": "https://example.com/x", "detail": "more", "after": 12}), json!(5), json!({"title": "no key"}), json!({"id": 12, "title": "new"})]);
         assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["prs-12", "prs-a-b"]);
         assert_eq!((rows[0].f["cells"]["title"].as_str(), rows[1].opt("target"), rows[1].opt("detail")), (Some("new"), Some("https://example.com/x"), Some("more")));
+        // a record's `after` names records by key value: the row carries their row ids
+        assert_eq!((rows[0].f.get("after"), rows[1].f.get("after")), (None, Some(&json!(["prs-12"]))));
         let ids: Vec<(String, String)> = bound_ids(&d);
         assert!(ids.contains(&("p".into(), "requests".into())) && ids.contains(&("t".into(), "load".into())) && ids.contains(&("prs".into(), "prs".into())), "{ids:?}");
     }

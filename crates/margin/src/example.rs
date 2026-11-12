@@ -43,7 +43,7 @@ macro_rules! example {
 }
 
 pub const EXAMPLES: &[Example] = &[
-    example!("reviews", "pr", "pull requests to review: a table (id, author badge, title, CI run strip, age), rules, hints"),
+    example!("reviews", "pr", "pull requests to review: a table (stack graph, id, author badge, title, CI run strip, age), rules, hints"),
     example!("services", "svc", "background services: a latency plot fed by a dataset; tabs Failing / All; rows with the error, run strips with a failure count, a table with state glyphs", SERVICES_DATA),
     example!("tracker", "wk", "a work tracker: sections Now / Next / Waiting (todos, rows, owner badges) kept by a handler, beside a Rules in force section that is yours"),
 ];

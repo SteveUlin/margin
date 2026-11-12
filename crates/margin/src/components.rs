@@ -2137,6 +2137,8 @@ enum ColKind {
     Runs,
     Age,
     State,
+    /// Lanes joining each row to the rows its `after` names (graph.rs); it reads no cell.
+    Graph,
 }
 
 /// The most runs a strip column shows unless its `width` says otherwise, and the fewest it keeps
@@ -2148,6 +2150,8 @@ const RUNS_MIN: usize = 5;
 const TEXT_MIN: u16 = 20;
 /// An age column's width: "now", "59s", "23h", "999d".
 const AGE_W: u16 = 4;
+/// The most lanes a graph column shows; a wider graph draws the lanes that fit.
+const GRAPH_LANES: usize = 8;
 
 /// One table laid out for one pane width: where each visible column sits. Every row of the table
 /// draws from the same one.
@@ -2162,6 +2166,8 @@ pub(crate) struct TableLayout {
     /// Per column: the cells a `runs` column keeps after its strip for the failure count
     /// (`summary: true`), the blank between them included; 0 for every other column.
     sum_w: Vec<u16>,
+    /// With a graph column: each row's lanes, by row id. Empty when no row names another.
+    graph: HashMap<String, crate::graph::Row>,
 }
 
 /// A runs cell's failure count as a `summary: true` column prints it: `1/6`, and whether the
@@ -2201,6 +2207,8 @@ fn cell_natural(kind: ColKind, v: Option<&serde_json::Value>, th: &Theme) -> u16
         ColKind::Age => AGE_W as usize,
         // an icon and a blank: nerd-font icons draw wider than their cell
         ColKind::State => 2,
+        // the lanes belong to the whole table: `table_layout_of` measures them
+        ColKind::Graph => 0,
     };
     w.min(u16::MAX as usize) as u16
 }
@@ -2244,7 +2252,35 @@ fn cell_pieces(cx: &Ctx, th: &Theme, kind: ColKind, v: Option<&serde_json::Value
                 vec![(gl, Style::fg(c).bold())]
             }
         },
+        // drawn per row from the table's lanes: `graph_pieces`
+        ColKind::Graph => Vec::new(),
     }
+}
+
+/// A graph column's cell for one row: its lanes and its node, cut to the `w` cells of the slot.
+/// `below` is a line under the row's first (a focused row whose text wrapped): the lanes that
+/// leave the row downward carry on as plain verticals. Lanes are dim, the node a step brighter:
+/// filled on a row with a link, hollow on a row with none.
+fn graph_pieces(cx: &Ctx, row: Option<&crate::graph::Row>, w: u16, below: bool) -> Vec<Piece> {
+    use crate::graph::{continues_down, glyph, node_glyph, NODE, V};
+    let p = cx.p;
+    // a table where no row names another: every row is a lone node
+    let lone = crate::graph::Row { cells: vec![NODE], ..Default::default() };
+    let row = row.unwrap_or(&lone);
+    let linked = row.up || row.down || row.left || row.right;
+    row.cells
+        .iter()
+        .take(w as usize)
+        .map(|&c| {
+            let (ch, st) = match (c == NODE, below) {
+                (true, false) => (node_glyph(row, linked), Style::fg(p.grey2)),
+                (true, true) => (if row.down { V } else { ' ' }, Style::fg(p.grey1)),
+                (false, false) => (c, Style::fg(p.grey1)),
+                (false, true) => (if continues_down(c) { V } else { ' ' }, Style::fg(p.grey1)),
+            };
+            (glyph(ch, cx.flog).to_string(), st)
+        })
+        .collect()
 }
 
 
@@ -2282,6 +2318,7 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
     let ind: u16 = indent(depth);
     let specs = t.f.get("columns").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let (mut keys, mut kinds, mut cols, mut sum_w) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut graph, mut graph_w) = (HashMap::new(), None::<u16>);
     for c in &specs {
         let key = c["key"].as_str().unwrap_or("").to_string();
         let kind = match c["kind"].as_str().unwrap_or("text") {
@@ -2291,8 +2328,16 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
             "runs" => ColKind::Runs,
             "age" => ColKind::Age,
             "state" => ColKind::State,
+            "graph" => ColKind::Graph,
             _ => ColKind::Text,
         };
+        if kind == ColKind::Graph && graph_w.is_none() {
+            let nodes: Vec<(String, Vec<String>)> = t.children.iter().map(|r| (r.id.clone(), crate::doc::row_links(r))).collect();
+            graph = crate::graph::layout_linked(&nodes);
+            // two cells per lane; the last lane's connector is always blank, so it is not kept
+            let lanes = graph.values().next().map_or(1, |r| r.cells.len() / 2);
+            graph_w = Some((lanes.min(GRAPH_LANES) * 2 - 1) as u16);
+        }
         // numbers, ages and strips read from the right: digits line up, the newest run lines up
         let align = match c["align"].as_str() {
             Some("left") => Align::Left,
@@ -2315,6 +2360,7 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
             (Some(n), _) => (n, n, false),
             (None, ColKind::Text) => (natural, TEXT_MIN, true),
             (None, ColKind::Runs) => (natural + count, widgets::runs_width(RUNS_MIN, th.runs.gap) + count, false),
+            (None, ColKind::Graph) => (graph_w.unwrap_or(1), graph_w.unwrap_or(1), false),
             (None, _) => (natural, natural, false),
         };
         sum_w.push(count);
@@ -2324,7 +2370,7 @@ fn table_layout_of(t: &Block, depth: usize, w: u16, th: &Theme) -> TableLayout {
     }
     let slots = widgets::table_layout(&cols, w.saturating_sub(ind + 1));
     let zebra = t.f.get("zebra").and_then(|z| z.as_bool()).unwrap_or(th.zebra);
-    TableLayout { ind, keys, kinds, cols, slots, zebra, sum_w }
+    TableLayout { ind, keys, kinds, cols, slots, zebra, sum_w, graph }
 }
 
 /// The layouts of every table in the doc being drawn, built once per doc revision, pane width
@@ -2435,11 +2481,14 @@ fn draw_tr(cx: &Ctx, b: &Block, w: u16) -> Drawn {
     // columns stay on the first line
     let full = in_full(cx, b);
     let mut tick = None;
-    let lines: Vec<Vec<Vec<Piece>>> = lay
+    let mut lines: Vec<Vec<Vec<Piece>>> = lay
         .slots
         .iter()
         .map(|slot| {
             let kind = lay.kinds[slot.col];
+            if kind == ColKind::Graph {
+                return vec![graph_pieces(cx, lay.graph.get(&b.id), slot.w, false)];
+            }
             let ps = cell_pieces(cx, &th, kind, cells.and_then(|c| c.get(&lay.keys[slot.col])), slot.w, lay.sum_w[slot.col], &mut tick);
             if full && kind == ColKind::Text && widgets::pieces_width(&ps) > slot.w as usize {
                 wrap_runs(&ps, slot.w.max(1) as usize)
@@ -2449,6 +2498,10 @@ fn draw_tr(cx: &Ctx, b: &Block, w: u16) -> Drawn {
         })
         .collect();
     let rows = lines.iter().map(|l| l.len()).max().unwrap_or(1).clamp(1, 40) as u16;
+    // a row taller than one line: its lanes carry on down every line of it
+    for (slot, cell) in lay.slots.iter().zip(lines.iter_mut()).filter(|(s, _)| lay.kinds[s.col] == ColKind::Graph) {
+        cell.resize_with(rows as usize, || graph_pieces(cx, lay.graph.get(&b.id), slot.w, true));
+    }
     let mut g = new_grid(w, rows, g0);
     let a = g.area();
     let ground = if lay.zebra && idx % 2 == 1 { th.zebra_ground } else { g0 };
@@ -2751,6 +2804,42 @@ mod dash_tests {
         assert_eq!(fg("pr1", 7), fg("pr3", 9), "ada is ada in every row");
         assert_eq!(fg("pr1", 1), Some(th.id_color("#412")));
         assert!(dr["pr1"].grid.as_ref().unwrap().get(25, 0).unwrap().style.bold, "markup in a text cell: **layout**");
+    }
+
+    /// A table with a graph column and each row's id as its text; the drawn rows.
+    fn stack(rows: &[(&str, serde_json::Value)], w: u16) -> Vec<String> {
+        let children: Vec<serde_json::Value> = rows.iter().map(|(id, after)| json!({"type": "tr", "id": id, "after": after, "cells": {"t": id}})).collect();
+        // a revision of its own per table: the layout cache goes by revision
+        static REV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100);
+        let d = doc(REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed), json!([{"type": "table", "id": "st", "columns": [{"key": "g", "kind": "graph"}, {"key": "t"}], "children": children}]));
+        render(&d, w).lines().skip(1).map(String::from).collect()
+    }
+
+    #[test]
+    fn a_graph_column_joins_each_row_to_the_rows_it_names() {
+        // a linear stack, top first: each row names the row under it; a row with no link is hollow
+        assert_eq!(stack(&[("c", json!("b")), ("b", json!(["a"])), ("a", json!(null)), ("x", json!(null))], 30), [" ● c", " ● b", " ● a", " ○ x"]);
+        // a fork: two rows sit on b; an id that is not a row is ignored
+        assert_eq!(stack(&[("d", json!("b")), ("c", json!("b")), ("b", json!(["a", "gone"])), ("a", json!([]))], 30), [" ●   d", " │ ● c", " ●─╯ b", " ●   a"]);
+        // a merge: one row sits on two
+        assert_eq!(stack(&[("m", json!(["x", "y"])), ("x", json!(null)), ("y", json!(null))], 30), [" ●─╮ m", " ● │ x", "   ● y"]);
+        // the todo direction reads the same: a row names a row above it
+        assert_eq!(stack(&[("a", json!(null)), ("b", json!("a")), ("c", json!("a"))], 30), [" ●─╮ a", " ● │ b", "   ● c"]);
+        // no row names another: lone nodes, one cell wide
+        assert_eq!(stack(&[("a", json!(null)), ("b", json!("gone"))], 30), [" ○ a", " ○ b"]);
+        // the links are a row id or a list of them, and nothing else
+        let bad = serde_json::from_value::<Block>(json!({"type": "table", "id": "t", "columns": [{"key": "g", "kind": "graph"}], "children": [{"type": "tr", "id": "r", "after": 3}]})).unwrap();
+        assert!(crate::doc::check_block(&bad).unwrap_err().contains("row id"));
+    }
+
+    #[test]
+    fn a_graph_column_keeps_to_eight_lanes() {
+        // ten rows on one base: eight lanes show, and the text column still starts in one place
+        let mut rows: Vec<(String, serde_json::Value)> = (0..10).map(|i| (format!("r{i}"), json!("base"))).collect();
+        rows.push(("base".into(), json!(null)));
+        let rows: Vec<(&str, serde_json::Value)> = rows.iter().map(|(id, a)| (id.as_str(), a.clone())).collect();
+        let lines = stack(&rows, 60);
+        assert!(lines.iter().all(|l| l.chars().nth(17).is_some_and(|c| c == 'r' || c == 'b')), "{lines:#?}");
     }
 
     #[test]
@@ -3208,6 +3297,19 @@ mod note_tests {
 
     /// Item 6: italic, strike and link spans, alone and inside bold, drawn with the terminal's
     /// attributes; code keeps what it holds.
+    #[test]
+    fn a_graph_column_carries_its_lanes_down_a_wrapped_row() {
+        // the focused row wraps its text: the lanes that leave it downward carry on beside it
+        let long = "a title long enough to wrap onto a second line of the row";
+        let d = dash_tests::doc(1, json!([{"type": "table", "id": "st", "columns": [{"key": "g", "kind": "graph"}, {"key": "t"}], "children": [
+            {"type": "tr", "id": "top", "after": ["base"], "cells": {"t": "top"}},
+            {"type": "tr", "id": "mid", "after": ["base"], "cells": {"t": long}},
+            {"type": "tr", "id": "base", "cells": {"t": "base"}}]}]));
+        let text = frame(&d, 40, Some("mid")).0;
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert!(rows.len() >= 4 && rows[1].starts_with(" │ ● a title") && rows[2].starts_with(" │ │ "), "{text}");
+    }
+
     #[test]
     fn italic_strike_and_link_spans() {
         let m = |s: &str| markup(s).into_iter().map(|(t, sp)| (t, sp)).collect::<Vec<_>>();

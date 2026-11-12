@@ -145,9 +145,9 @@ pub const SCHEMA: &[Kind] = &[
     Kind { name: "rule", about: "a horizontal line: a break between parts of a dashboard", children: false, action: "",
         fields: &[("text", Ty::Text, "a label inset at the left")] },
     Kind { name: "table", about: "a table: a header and aligned columns; its children are tr rows", children: true, action: "",
-        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state (default text), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows"), ("rows", Ty::Text, "a dataset's name (margin data add): each of its records is a row, read by the pane when it draws; the table then holds no tr children of its own. A record's fields are the cells, by column key; its target and detail fields are the row's"), ("key", Ty::Text, "with rows: the record field that names a row (default id). The row's id is <table id>-<value>, so the focus and actions follow the record; records sharing a value are one row, the newest"), ("actions", Ty::Any, ACTIONS_NOTE)] },
+        fields: &[("columns", Ty::Any, "list of {key, title?, kind?: text num who id runs age state graph (default text; graph: lanes joining each row to the rows its after names, no cells), align?: left right center, width?: cells, optional?: true to drop it first when the pane is narrow, summary?: true on a runs column to end each strip with its failure count such as 1/6}"), ("zebra", Ty::Bool, "stripe alternate rows (default: config dashboard.zebra, off)"), ("empty", Ty::Text, "shown while it has no rows"), ("rows", Ty::Text, "a dataset's name (margin data add): each of its records is a row, read by the pane when it draws; the table then holds no tr children of its own. A record's fields are the cells, by column key; its target and detail fields are the row's"), ("key", Ty::Text, "with rows: the record field that names a row (default id). The row's id is <table id>-<value>, so the focus and actions follow the record; records sharing a value are one row, the newest"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "tr", about: "one table row, only inside a table; give it a stable id so a rewrite reconciles", children: false, action: "open (click, when it has a target)",
-        fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)"), ("actions", Ty::Any, ACTIONS_NOTE)] },
+        fields: &[("cells", Ty::Any, "object keyed by column key: text (**bold** `code` @[name]), a number, a name (who), an id, a list of ok fail skip running or null (runs), an RFC 3339 time (age), a row glyph name (state)"), ("target", Ty::Text, "URL or mg: token, opened on click"), ("detail", Ty::Text, "longer text about the row, shown in the detail panel (d)"), ("after", Ty::Any, "the id of a row of this table it depends on or sits on (a pull request's base), or a list of ids; a column of kind graph draws the links; an id that is not a row is ignored"), ("actions", Ty::Any, ACTIONS_NOTE)] },
     Kind { name: "runs", about: "a run strip: the last n outcomes as small squares, oldest left, a cross for a failure", children: false, action: "",
         fields: &[("label", Ty::Text, "text at the left: what ran"), ("values", Ty::Any, "list of ok fail skip running, or null for no run"), ("summary", Ty::Bool, "end with a count such as 2/20 failed"), ("data", Ty::Text, "a dataset's name (margin data add): the outcomes are read from its newest records instead of values"), ("y", Ty::Text, "with data: the record field holding ok fail skip running (default outcome)"), ("last", Ty::Num, "with data: how many of the newest records to read (default: as many as fit)")] },
     Kind { name: "plot", about: "a plot drawn in the pane: lines, an area, bars, columns, a histogram, sparklines or heat strips", children: false, action: "",
@@ -250,7 +250,7 @@ pub fn coerce(kind_name: &str, field: &str, raw: &str) -> Value {
 }
 
 /// A table column's kinds: how its cells are read and drawn.
-pub const COL_KINDS: &[&str] = &["text", "num", "who", "id", "runs", "age", "state"];
+pub const COL_KINDS: &[&str] = &["text", "num", "who", "id", "runs", "age", "state", "graph"];
 const ALIGNS: &[&str] = &["left", "right", "center"];
 
 /// A run strip's values: a list of outcome names, null where nothing ran.
@@ -318,9 +318,24 @@ pub fn check_columns(table: &Block) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
+/// The rows a table row names with `after`: one id as text, or a list of ids.
+pub fn row_links(row: &Block) -> Vec<String> {
+    match row.f.get("after") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// A row's cells against its table's columns: every key names a column, and a runs cell holds
-/// run outcomes.
+/// run outcomes. Its `after` is a row id or a list of them (which rows exist is not checked: rows
+/// come and go as a handler rewrites them).
 fn check_cells(row: &Block, cols: &[(String, String)]) -> Result<(), String> {
+    match row.f.get("after") {
+        None | Some(Value::Null) | Some(Value::String(_)) => {}
+        Some(Value::Array(a)) if a.iter().all(|x| x.is_string()) => {}
+        Some(v) => return Err(format!("{}: tr after must be a row id or a list of row ids, got {v}", row.id)),
+    }
     let Some(v) = row.f.get("cells").filter(|v| !v.is_null()) else { return Ok(()) };
     let cells = v.as_object().ok_or_else(|| format!("{}: tr cells must be an object keyed by column key, got {v}", row.id))?;
     for (k, cell) in cells {

@@ -6,17 +6,18 @@
     {"type": "rule", "id": "waiting", "text": "Waiting on you"},
     {"type": "table", "id": "pr", "empty": "nothing to review",
      "columns": [
+       {"key": "g", "kind": "graph"},
        {"key": "pr", "title": "PR", "kind": "id"},
        {"key": "by", "title": "Author", "kind": "who"},
        {"key": "title", "title": "Title"},
        {"key": "ci", "title": "CI", "kind": "runs", "optional": true},
        {"key": "age", "title": "Age", "kind": "age"}
      ], "children": [
-      {"type": "tr", "id": "pr-4812", "target": "https://example.com/pulls/4812", "detail": "Touches the scheduler's retry path. Please take a second look at the backoff cap: 5 minutes is a guess.", "cells": {"pr": "#4812", "by": "priya", "title": "Cap retry backoff at **5 min**", "ci": ["ok", "ok", "fail", "ok", "ok", "ok"], "age": "2026-11-10T16:05:00Z"}},
-      {"type": "tr", "id": "pr-4807", "target": "https://example.com/pulls/4807", "detail": "Mechanical move; the loader keeps reading the old YAML for one release.", "cells": {"pr": "#4807", "by": "marcus", "title": "Move `ingest` config to TOML", "ci": ["ok", "fail", "fail", "fail"], "age": "2026-11-10T11:40:00Z"}},
-      {"type": "tr", "id": "pr-4795", "target": "https://example.com/pulls/4795", "detail": "", "cells": {"pr": "#4795", "by": "priya", "title": "Drop the legacy metrics exporter", "ci": ["ok", "ok", "ok", "ok", "ok", "ok", "ok", "running"], "age": "2026-11-09T09:12:00Z"}},
-      {"type": "tr", "id": "pr-4780", "target": "https://example.com/pulls/4780", "detail": "Quarantines one test. The clock fix is tracked separately.", "cells": {"pr": "#4780", "by": "yuki", "title": "Flaky test: quarantine `test_lease_renewal` until the clock fix lands", "ci": ["fail", "ok", "skip", "ok", null, "ok"], "age": "2026-11-07T14:30:00Z"}},
-      {"type": "tr", "id": "pr-4761", "target": "https://example.com/pulls/4761", "detail": "", "cells": {"pr": "#4761", "by": "dmitri", "title": "Docs: on-call runbook for queue backlog", "ci": ["ok", "ok"], "age": "2026-11-03T08:00:00Z"}}
+      {"type": "tr", "id": "pr-4812", "target": "https://example.com/pulls/4812", "detail": "Touches the scheduler's retry path. Please take a second look at the backoff cap: 5 minutes is a guess.", "after": ["pr-4807"], "cells": {"pr": "#4812", "by": "priya", "title": "Cap retry backoff at **5 min**", "ci": ["ok", "ok", "fail", "ok", "ok", "ok"], "age": "2026-11-10T16:05:00Z"}},
+      {"type": "tr", "id": "pr-4807", "target": "https://example.com/pulls/4807", "detail": "Mechanical move; the loader keeps reading the old YAML for one release.", "after": [], "cells": {"pr": "#4807", "by": "marcus", "title": "Move `ingest` config to TOML", "ci": ["ok", "fail", "fail", "fail"], "age": "2026-11-10T11:40:00Z"}},
+      {"type": "tr", "id": "pr-4795", "target": "https://example.com/pulls/4795", "detail": "", "after": [], "cells": {"pr": "#4795", "by": "priya", "title": "Drop the legacy metrics exporter", "ci": ["ok", "ok", "ok", "ok", "ok", "ok", "ok", "running"], "age": "2026-11-09T09:12:00Z"}},
+      {"type": "tr", "id": "pr-4780", "target": "https://example.com/pulls/4780", "detail": "Quarantines one test. The clock fix is tracked separately.", "after": [], "cells": {"pr": "#4780", "by": "yuki", "title": "Flaky test: quarantine `test_lease_renewal` until the clock fix lands", "ci": ["fail", "ok", "skip", "ok", null, "ok"], "age": "2026-11-07T14:30:00Z"}},
+      {"type": "tr", "id": "pr-4761", "target": "https://example.com/pulls/4761", "detail": "", "after": [], "cells": {"pr": "#4761", "by": "dmitri", "title": "Docs: on-call runbook for queue backlog", "ci": ["ok", "ok"], "age": "2026-11-03T08:00:00Z"}}
     ]},
     {"type": "rule", "id": "notes", "text": "Notes"},
     {"type": "text", "id": "note1", "text": "@[marcus] is out until Thursday; @[yuki] covers the reviews assigned to marcus."}

@@ -13,3 +13,4 @@ reaches you with those steps listed. Re-plan them before doing them. State the a
 claim and link it whenever a step only makes sense if the claim holds.
 
 **Lanes.** `"after": ["t1", "t2"]` on a todo names the steps above it in its section that it waits on; the section draws them joined by lanes.
+A table draws the same lanes between its rows: a column of kind `graph` and `after` on a `tr` (`margin help dashboards`, "A graph column").

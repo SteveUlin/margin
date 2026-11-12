@@ -237,6 +237,24 @@ pub fn layout(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
         .collect()
 }
 
+/// `layout` for rows that may name a row on either side (a table's graph column: a pull request
+/// names its base, which may be listed above or below it). Each link becomes an edge from the
+/// upper row down to the lower one; ids that aren't in the list are dropped.
+pub fn layout_linked(nodes: &[(String, Vec<String>)]) -> HashMap<String, Row> {
+    let pos: HashMap<&str, usize> = nodes.iter().enumerate().map(|(i, (id, _))| (id.as_str(), i)).collect();
+    let mut down: Vec<(String, Vec<String>)> = nodes.iter().map(|(id, _)| (id.clone(), Vec::new())).collect();
+    for (i, (id, links)) in nodes.iter().enumerate() {
+        for l in links {
+            match pos.get(l.as_str()) {
+                Some(&j) if j < i => down[i].1.push(l.clone()),
+                Some(&j) if j > i => down[j].1.push(id.clone()),
+                _ => {}
+            }
+        }
+    }
+    layout(&down)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +326,16 @@ mod tests {
         assert_eq!(text("e").trim_end(), "●─┴─╯");
         assert_eq!(rows["a"].cells[2], DOWN_FROM_LEFT);
         assert_eq!(rows["e"].cells[2], UP_TO_LEFT);
+    }
+
+    #[test]
+    fn a_link_may_name_a_row_above_or_below() {
+        // a stack listed top first: each row names its base, the row under it
+        let up = layout_linked(&[n("c", &["b"]), n("b", &["a"]), n("a", &[])]);
+        assert_eq!(show(&up, &["c", "b", "a"]), ["┯", "┿", "┷"]);
+        // the same picture as the todo order, and an unknown id is no edge
+        let down = layout_linked(&[n("a", &["gone"]), n("b", &["a"]), n("c", &["b"])]);
+        assert_eq!(show(&down, &["a", "b", "c"]), ["┯", "┿", "┷"]);
     }
 
     #[test]

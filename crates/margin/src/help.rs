@@ -335,6 +335,7 @@ mod tests {
 
     /// The parked components (diff, image, dependency lanes, `demo live`) are not taught: the
     /// skill and the topics leave them out, but for the one line on lanes the graphs topic keeps.
+    /// (A table's graph column is not parked: dashboards documents it.)
     /// Their schema entries stay, each marked.
     #[test]
     fn parked_components_are_not_taught() {
@@ -344,7 +345,13 @@ mod tests {
                 assert!(!text.contains(gone), "{name} still teaches {gone:?}");
             }
             let lanes = text.lines().filter(|l| l.contains("\"after\": [") || l.contains("`after`")).count();
-            assert_eq!(lanes, usize::from(*name == "graphs"), "{name}: lanes are documented in one line of the graphs topic only");
+            // a table's graph column is taught (dashboards), and the graphs topic points at it
+            let taught = match *name {
+                "graphs" => 2,
+                "dashboards" => lanes,
+                _ => 0,
+            };
+            assert_eq!(lanes, taught, "{name}: lanes between todos are documented in one line of the graphs topic only");
         }
         let mark = "not part of the documented set; may be removed";
         for kind in ["diff", "image"] {

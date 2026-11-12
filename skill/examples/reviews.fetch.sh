@@ -34,6 +34,7 @@ jq -c '
   {
     type: "table", id: "pr", empty: "nothing to review",
     columns: [
+      {key: "g",                      kind: "graph"},  # lanes: each row joined to the rows its `after` names
       {key: "pr",    title: "PR",     kind: "id"},
       {key: "by",    title: "Author", kind: "who"},
       {key: "title", title: "Title"},
@@ -45,6 +46,7 @@ jq -c '
         type: "tr", id: "pr-\(.number)",
         target: .url,                       # enter or a click opens it
         detail: (.body // ""),              # the detail panel (d) shows it
+        after: [.base // empty | "pr-\(.)"],  # stacked on another pull request: the id of that row (one not listed is ignored)
         cells: {
           pr: "#\(.number)",
           by: .author,
